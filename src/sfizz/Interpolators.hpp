@@ -213,7 +213,7 @@ public:
         size_t i = 0;
         do {
             simde__m128 h = ws.getUncheckedX4(x);
-            y = simde_mm_add_ps(y, simde_mm_mul_ps(h, simde_mm_loadu_ps(&values[j0 + i])));
+            y = simde_mm_add_ps(y, simde_mm_mul_ps(h, simde_mm_loadu_ps(&values[j0 + static_cast<int>(i)])));
             x = simde_mm_add_ps(x, simde_mm_set1_ps(4.0f));
             i += 4;
         } while (i < Points);

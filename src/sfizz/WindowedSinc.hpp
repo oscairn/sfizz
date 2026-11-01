@@ -55,14 +55,10 @@ inline simde__m128 AbstractWindowedSinc<T>::getUncheckedX4(simde__m128 x) const 
     simde_mm_store_si128((simde__m128i*)j0, i0);
     simde__m128 mu = simde_mm_sub_ps(ix, simde_mm_cvtepi32_ps(i0));
 
-    // reference: Interpolated table lookups using SSE2 [2/2]
-    // https://rawstudio.org/blog/?p=482
-    simde__m128 p0p1 = simde_mm_castsi128_ps(simde_mm_loadl_epi64((simde__m128i*)&table[j0[0]]));
-    simde__m128 p2p3 = simde_mm_castsi128_ps(simde_mm_loadl_epi64((simde__m128i*)&table[j0[2]]));
-    p0p1 = simde_mm_loadh_pi(p0p1, (simde__m64*)&table[j0[1]]);
-    p2p3 = simde_mm_loadh_pi(p2p3, (simde__m64*)&table[j0[3]]);
-    simde__m128 y0 = simde_mm_shuffle_ps(p0p1, p2p3, SIMDE_MM_SHUFFLE(2, 0, 2, 0));
-    simde__m128 y1 = simde_mm_shuffle_ps(p0p1, p2p3, SIMDE_MM_SHUFFLE(3, 1, 3, 1));
+    // Scalar loads: the table pairs are not 16-byte aligned, and simde's
+    // loadl_epi64 reads them through an aligned vector pointer
+    simde__m128 y0 = simde_mm_setr_ps(table[j0[0]], table[j0[1]], table[j0[2]], table[j0[3]]);
+    simde__m128 y1 = simde_mm_setr_ps(table[j0[0] + 1], table[j0[1] + 1], table[j0[2] + 1], table[j0[3] + 1]);
 
     simde__m128 dy = simde_mm_sub_ps(y1, y0);
     return simde_mm_add_ps(y0, simde_mm_mul_ps(mu, dy));
