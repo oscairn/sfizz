@@ -1,0 +1,6 @@
+// LFOs: SFZv1 LFOs and ARIA LFOs with sub-oscillators, delay, fade and CC depth
+<region> lokey=0 hikey=63 sample=*triangle pitchlfo_freq=5 pitchlfo_depth=50 pitchlfo_delay=0.1 amplfo_freq=3 amplfo_depth=3 fillfo_freq=2 fillfo_depth=1200 cutoff=1500
+<region> lokey=64 hikey=127 sample=*saw cutoff=2000 fil_type=lpf_4p
+  lfo1_freq=4 lfo1_wave=1 lfo1_pitch=30 lfo1_delay=0.05 lfo1_fade=0.2 lfo1_ratio2=2 lfo1_scale2=0.5 lfo1_wave2=3
+  lfo2_freq=0.7 lfo2_wave=4 lfo2_cutoff=1800 lfo2_phase=0.25 lfo2_freq_oncc1=6
+  lfo3_beats=1 lfo3_wave=7 lfo3_volume=4 lfo3_pan=50

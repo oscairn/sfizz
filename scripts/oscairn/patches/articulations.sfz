@@ -1,0 +1,23 @@
+// Round robin, random, release and legato triggers, key switches, off_by, polyphony
+<global> ampeg_release=0.05
+<group> key=60 seq_length=3
+<region> seq_position=1 sample=../../../tests/TestFiles/36-CajonCenter-1.wav
+<region> seq_position=2 sample=../../../tests/TestFiles/36-CajonCenter-2.wav
+<region> seq_position=3 sample=../../../tests/TestFiles/36-CajonCenter-3.wav
+<group> key=60 lorand=0 hirand=0.5
+<region> sample=../../../tests/TestFiles/kick.wav volume=-6
+<group> key=60 lorand=0.5 hirand=1
+<region> sample=../../../tests/TestFiles/snare.wav volume=-6
+<group> key=60 trigger=release rt_decay=6
+<region> sample=../../../tests/TestFiles/closedhat.wav
+<group> lokey=36 hikey=47 trigger=first
+<region> sample=*sine pitch_keycenter=36
+<group> lokey=36 hikey=47 trigger=legato
+<region> sample=*square pitch_keycenter=36 volume=-12
+<group> sw_lokey=24 sw_hikey=25 sw_default=24 lokey=60 hikey=60
+<region> sw_last=24 sample=*saw volume=-12
+<region> sw_last=25 sample=*triangle
+<group> group=1 off_by=2 lokey=62 hikey=62 polyphony=1
+<region> sample=../../../tests/TestFiles/looped_flute.wav loop_mode=loop_continuous
+<group> group=2 lokey=72 hikey=74 off_mode=time off_time=0.02 note_polyphony=1
+<region> sample=../../../tests/TestFiles/snare.wav

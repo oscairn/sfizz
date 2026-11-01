@@ -1,0 +1,4 @@
+// ARIA flex envelopes replacing the amp EG, with shapes, CC-modulated times and routing
+<region> sample=*sine
+  eg1_time1=0.05 eg1_level1=1 eg1_shape1=2 eg1_time2=0.2 eg1_level2=0.5 eg1_shape2=-3 eg1_time3=0.3 eg1_level3=0 eg1_sustain=2 eg1_ampeg=1 eg1_time1_oncc1=0.5
+  eg2_time1=0.3 eg2_level1=1 eg2_time2=0.5 eg2_level2=0 eg2_pitch=1200 eg2_sustain=1

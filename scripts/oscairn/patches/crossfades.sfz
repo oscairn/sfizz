@@ -1,0 +1,5 @@
+// Velocity, key and CC crossfades with both curves
+<region> lokey=0 hikey=63 sample=*sine xfin_lovel=1 xfin_hivel=64 xf_velcurve=power
+<region> lokey=0 hikey=63 sample=*saw volume=-12 xfout_lovel=40 xfout_hivel=127 xf_velcurve=gain xfin_lokey=21 xfin_hikey=48 xf_keycurve=gain
+<region> lokey=64 hikey=127 sample=../../../tests/TestFiles/looped_flute.wav loop_mode=loop_continuous xfin_locc1=0 xfin_hicc1=127 xf_cccurve=power
+<region> lokey=64 hikey=127 sample=*triangle xfout_locc1=0 xfout_hicc1=127 xf_cccurve=gain

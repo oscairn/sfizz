@@ -1,0 +1,4 @@
+// Pan, width, position, stereo samples, multi-output, delay, offsets, loops, pitch tracking
+<region> lokey=0 hikey=47 sample=../../../tests/TestFiles/stereo_sample.wav width=40 position=-30 pan=20 delay=0.03 offset=200 pitch_keytrack=50 tune=-30 transpose=2
+<region> lokey=48 hikey=71 sample=../../../tests/TestFiles/mono_sample.wav pan=-80 pan_oncc10=100 amp_random=3 pitch_random=20 delay_random=0.01
+<region> lokey=72 hikey=127 sample=../../../tests/TestFiles/looped_flute.wav loop_mode=loop_sustain loop_crossfade=0.05 pitch_veltrack=300 bend_up=1200 bend_down=-200 volume_oncc7=-6 amplitude_oncc11=100

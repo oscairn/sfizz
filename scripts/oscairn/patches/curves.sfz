@@ -1,0 +1,3 @@
+// Curves, velocity curves and CC modulation with curves and smoothing
+<curve> curve_index=7 v000=0 v064=0.2 v127=1
+<region> sample=*saw amp_velcurve_1=0 amp_velcurve_64=0.6 amp_velcurve_127=1 cutoff=600 cutoff_oncc1=3600 cutoff_curvecc1=7 cutoff_smoothcc1=20 resonance_oncc74=12 pitch_oncc1=100 pan_oncc1=-100

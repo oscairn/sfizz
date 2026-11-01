@@ -1,0 +1,6 @@
+// Amplitude, pitch and filter envelopes, velocity and key tracking
+<global> sample=*saw amp_veltrack=80 amp_keytrack=-1.5 amp_keycenter=60
+<region> lokey=0 hikey=59 ampeg_delay=0.01 ampeg_attack=0.05 ampeg_hold=0.02 ampeg_decay=0.3 ampeg_sustain=40 ampeg_release=0.4 ampeg_vel2attack=-0.03 ampeg_start=10
+  pitcheg_attack=0.1 pitcheg_decay=0.2 pitcheg_sustain=0 pitcheg_depth=700 pitcheg_veltodepth=200
+<region> lokey=60 hikey=127 cutoff=800 resonance=6 fil_type=lpf_2p fileg_attack=0.02 fileg_decay=0.4 fileg_sustain=30 fileg_release=0.2 fileg_depth=2400 fil_keytrack=50 fil_veltrack=1200
+  ampeg_attack=0.002 ampeg_decay=1 ampeg_sustain=70 ampeg_release=0.15 ampeg_vel2release=0.1

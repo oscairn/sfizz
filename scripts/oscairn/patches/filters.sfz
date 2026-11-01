@@ -1,0 +1,18 @@
+// Every filter type sfizz implements, two filters in series, EQ bands
+<global> sample=*saw ampeg_release=0.1 resonance=8
+<region> key=0 fil_type=lpf_1p cutoff=500
+<region> key=21 fil_type=hpf_1p cutoff=300
+<region> key=24 fil_type=bpf_1p cutoff=900
+<region> key=25 fil_type=brf_1p cutoff=900
+<region> key=36 fil_type=lpf_2p cutoff=700
+<region> key=38 fil_type=hpf_2p cutoff=1500
+<region> key=40 fil_type=bpf_2p cutoff=1200
+<region> key=48 fil_type=brf_2p cutoff=1200
+<region> key=60 fil_type=lpf_4p cutoff=2500 fil2_type=hpf_2p cutoff2=200 resonance2=3
+<region> key=62 fil_type=hpf_4p cutoff=900
+<region> key=64 fil_type=lpf_6p cutoff=3000
+<region> key=67 fil_type=hpf_6p cutoff=500
+<region> key=72 fil_type=lpf_2p_sv cutoff=1000 cutoff_cc74=2400
+<region> key=74 fil_type=bpf_4p cutoff=1000
+<region> key=84 fil_type=pkf_2p cutoff=1000 fil_gain=6
+<region> key=127 fil_type=lsh cutoff=400 fil_gain=-6 eq1_freq=200 eq1_gain=6 eq2_freq=3000 eq2_gain=-9 eq2_bw=0.5 eq3_type=hshelf eq3_freq=8000 eq3_gain=4
