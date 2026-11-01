@@ -71,4 +71,8 @@ if(APPLE AND CMAKE_OSX_DEPLOYMENT_TARGET VERSION_LESS "10.12")
 endif()
 sfizz_enable_lto_if_needed(sfizz_tests)
 sfizz_enable_fast_math(sfizz_tests)
+if(NOT MSVC)
+    # The NaN/Inf checks need real NaNs; with -ffinite-math-only the compiler may fold them away
+    set_source_files_properties(FloatHelpersT.cpp PROPERTIES COMPILE_OPTIONS "-fno-finite-math-only")
+endif()
 catch_discover_tests(sfizz_tests)
