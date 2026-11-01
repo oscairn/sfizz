@@ -1,4 +1,4 @@
-# Oscairn branch (doc/oscairn-plan.md): sfizz's tests and the fork's tests on Linux x86_64,
+# Oscairn branch (doc/oscairn-plan.md): sfizz's tests and the CLAP plugin's tests on Linux x86_64,
 # Linux ARM64 and macOS, with sanitizers on Linux, and the stock-vs-fork comparison.
 name: Oscairn
 on:
@@ -52,18 +52,20 @@ jobs:
         # comparisons in RegionValuesT fail on clang (seen on macOS, 2026-11-01)
         run: |
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
-            -DSFIZZ_TESTS=ON -DSFIZZ_RENDER=OFF -DSFIZZ_JACK=OFF -DSFIZZ_SHARED=OFF -DENABLE_LTO=OFF \
+            -DSFIZZ_TESTS=ON -DSFIZZ_CLAP=ON -DSFIZZ_RENDER=OFF -DSFIZZ_JACK=OFF -DSFIZZ_SHARED=OFF -DENABLE_LTO=OFF \
             -DCMAKE_C_FLAGS="${{ matrix.flags }}" -DCMAKE_CXX_FLAGS="${{ matrix.flags }}" \
             -DCMAKE_EXE_LINKER_FLAGS="${{ matrix.flags }}" -DCMAKE_SHARED_LINKER_FLAGS="${{ matrix.flags }}" \
             -DCMAKE_MODULE_LINKER_FLAGS="${{ matrix.flags }}"
       - name: Build
-        run: cmake --build build --target sfizz_tests
+        run: cmake --build build --target sfizz_tests sfizz_clap sfizz_clap_tests
       - name: Test
         env:
           UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
           TSAN_OPTIONS: halt_on_error=1
           ASAN_OPTIONS: detect_leaks=1
-        run: ./build/library/bin/sfizz_tests
+        run: |
+          ./build/library/bin/sfizz_tests
+          ./build/library/bin/sfizz_clap_tests build/library/lib/oscairn-sfizz.clap
       - name: Stock vs fork
         if: matrix.gate
         run: scripts/oscairn/compare-stock.sh "$RUNNER_TEMP/gate"
