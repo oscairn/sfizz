@@ -8,7 +8,7 @@
 // section 4): from the initial level, an attack to the attack level, decay 1 to the decay 1
 // level, decay 2 to the decay 2 (sustain) level, and after note-off a release to silence.
 //
-// Shapes and times follow measurements of the reference (oscairn/measurement, awm2/):
+// Shapes and times follow measurements of the reference (oscairn/measurement):
 // levels are (level / 127)^2 in amplitude, with level 0 at -90 dB as a target; the attack
 // is a straight line in amplitude at the rate of a full-scale attack of the index's time;
 // decays and the release are straight lines in dB that take the index's time whatever

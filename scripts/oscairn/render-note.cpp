@@ -5,7 +5,7 @@
 // If not, contact the sfizz maintainers at https://github.com/sfztools/sfizz
 
 // Renders one note through an SFZ file to a 32-bit float stereo WAV, for measuring the
-// engine with the same analysis as the reference renders (oscairn/measurement, awm2/).
+// engine with the same analysis as the reference renders (oscairn/measurement).
 //
 // usage: oscairn-render-note <patch.sfz> <out.wav> <sample rate> <key> <velocity> <hold s> <tail s>
 
