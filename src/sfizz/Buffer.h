@@ -185,7 +185,8 @@ public:
         else
             _alignedEnd = normalEnd;
 
-        std::memcpy(normalData, oldNormalData, std::min(newSize, oldSize) * sizeof(Type));
+        if (oldNormalData != nullptr) // the first allocation has nothing to copy
+            std::memcpy(normalData, oldNormalData, std::min(newSize, oldSize) * sizeof(Type));
         std::free(oldData);
 
         return true;

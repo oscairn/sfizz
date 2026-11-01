@@ -155,7 +155,8 @@ uint32_t OSCWriter::writeMessage(const char* path, const char* sig, const sfizz_
 uint32_t OSCWriter::appendBytes(const void* src, uint32_t count)
 {
     uint32_t written = std::min(dstCapacity_, count);
-    memcpy(dstBuffer_, src, written);
+    if (written > 0) // a size query passes a null buffer
+        memcpy(dstBuffer_, src, written);
     dstBuffer_ += written;
     dstCapacity_ -= written;
     return count;
@@ -164,7 +165,8 @@ uint32_t OSCWriter::appendBytes(const void* src, uint32_t count)
 uint32_t OSCWriter::appendZeros(uint32_t count)
 {
     uint32_t written = std::min(dstCapacity_, count);
-    memset(dstBuffer_, '\0', written);
+    if (written > 0)
+        memset(dstBuffer_, '\0', written);
     dstBuffer_ += written;
     dstCapacity_ -= written;
     return count;
