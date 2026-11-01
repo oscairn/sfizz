@@ -173,8 +173,9 @@ Reference-matching behaviour sits behind a per-patch setting, off by default, ne
 
 **Design.**
 
-- A patch opts in with `<control> oscairn_profile=1`. The profile is a property of the
-  whole patch, whichever `<control>` header (including an included file's) carries it.
+- A patch opts in with `<control> oscairn_profile=1`. It applies to the regions after that
+  header (sfizz builds each region as it parses it), so the converter writes it first.
+  (Implemented this way on 2026-11-01; the first draft said "whole patch".)
 - Without it, every `oscairn_*` opcode is reported as unknown and ignored, exactly as stock
   sfizz ignores it. With it, `oscairn_*` opcodes take effect.
 - **The profile never changes the meaning of an existing opcode.** Where the reference
@@ -195,6 +196,28 @@ to 32-bit float, and compares the bytes. The patches are sfizz's own test patche
 touches. The comparison is **bit-identical**; a single differing sample fails. Each render
 runs in its own process (section 2, randomness), at a fixed block size and sample rate.
 Both trees are built with the same compiler and flags.
+
+What it took to make stock renders reproducible, found while building the gate (2026-11-01):
+
+- **Whole samples preloaded.** With sfizz's default preload size, the rest of a file streams
+  in on background threads, and when it arrives decides what a voice plays; renders
+  differed from run to run (`looped_regions.sfz`: four different outputs in six runs). The render tool sets the preload size to 2^30 frames, so the
+  gate does not cover sfizz's streaming path.
+- **ASLR off.** abseil seeds its hash tables from an address, and some patches render
+  differently depending on the iteration order (with ASLR on, `newdrums_flat.sfz` gave two
+  different outputs in six runs, split 4 and 2; with ASLR off, all six agreed). Renders run with ASLR off (`no-aslr` on macOS,
+  `setarch -R` on Linux).
+- **Every render twice.** A patch whose stock renders still differ between runs has no
+  reference and is reported as unstable; a fork that differs between runs where stock does
+  not fails.
+- **Patches left out:** the include-loop parser fixtures (`included_loop*.sfz`,
+  `root_loop.sfz`: stock crashes on them or renders them differently every run, even with
+  ASLR off) and `newdrums_flat.sfz` (2 of 12 stock runs differed from the rest with ASLR
+  off, from its fifth note; cause not found). That leaves 53 patches at three settings
+  (256 frames, 48 kHz, quality 2; 37 frames, 44.1 kHz, quality 1; 512 frames, 96 kHz,
+  quality 10): 159 renders.
+- A one-character change in the amp EG's decay coefficient made 125 of the 159 renders
+  fail, so the gate does see small changes.
 
 ---
 
@@ -388,7 +411,7 @@ Absolute paths and escapes from the library are rejected, as in the Sampler.
 | --- | --- |
 | sfizz's tests | `sfizz_tests` on every job |
 | Stock vs fork | Section 3, on every job that builds both |
-| Fork tests | `tests/oscairn/` (Catch2, in `sfizz_tests`): profile switch, every `oscairn_*` opcode, fitted tables, against synthetic samples |
+| Fork tests | `tests/OscairnT.cpp` (Catch2, in `sfizz_tests`, flat like sfizz's other tests): profile switch, every `oscairn_*` opcode, fitted tables, against generated tones |
 | CLAP | Load, activate, render, notes with IDs and `NOTE_END`, state round trip, allocation guard |
 | Sound contexts, workers | Oscairn's host tests, run against this checkout (as the Sampler's CI does) |
 | Sanitizers | ASan+UBSan and TSan builds of `sfizz_tests` and the fork tests |
@@ -409,6 +432,15 @@ speed. Per table: the fitting indices, check indices not used for the fit, the
 tolerance (proposed until Jacob confirms), and the result. Tables checked only against
 their own fitting renders are labelled so.
 
+**Sample rates (Jacob, 2026-11-01).** Oscairn runs mainly at 48 kHz but supports other
+rates. The reference is measured at 44.1 kHz, its hardware runs at 44.1 kHz internally, and
+its waveforms keep their own rates. So every fitted table is expressed in time (seconds),
+frequency (Hz) or pitch (cents), never in 44.1 kHz samples, and the engine turns it into
+per-sample coefficients at the rate it is running at. Every reference-matching feature has a
+**cross-rate check**: the same test patch rendered at 44.1, 48 and 96 kHz gives the same
+measured quantity (segment time, level, cutoff, LFO rate) within the feature's tolerance at
+each rate. It is part of each feature's gate (section 7).
+
 Probe source: a sustained, steady waveform with a clear fundamental, filter Thru, effects
 off, so the amplitude envelope is the render's level envelope. Times are measured between
 level crossings (attack: onset to within 1 dB of the attack level; decay and release: dB
@@ -419,13 +451,14 @@ slope or crossing times), relative to the note-on/note-off markers found in the 
 ## 7. Milestones
 
 Each milestone meets RFC 0008's runtime gates (no allocation while rendering, held-note
-survival, sanitizers) and the stock-vs-fork gate.
+survival, sanitizers) and the stock-vs-fork gate. Every reference-matching feature also
+passes its cross-rate check at 44.1, 48 and 96 kHz (section 6).
 
 | # | Deliverable | Gate |
 | --- | --- | --- |
 | 0 | Builds on macOS and Linux (x86_64, ARM64); toolchain fixes; CLAP entry with state and notes; CI on `oscairn` (Linux x86_64, Linux ARM64, macOS, ASan/UBSan, TSan); stock-vs-fork gate | sfizz's tests pass on every job; the CLAP plugin loads, renders a synthetic patch and round-trips state; stock-vs-fork bit-identical |
 | 1 | RFC 0013 step 1 check: the imported factory waveform library and the Salamander piano | All 7,647 waveform files load without errors; loops continuous over 30 s notes (no discontinuity above a proposed threshold at loop points) |
-| 2 | Measurement harness in `measurement/awm2/` and the first fitted tables: AEG times and levels, then level/velocity curves; profile switch and `oscairn_ampeg_*` | Repeatable renders (two renders of one probe agree within the proposed tolerance); AEG checks within proposed tolerances at indices not used for fitting; profile tests fail with the change undone |
+| 2 | Measurement harness in `measurement/awm2/` and the first fitted tables: AEG times and levels, then level/velocity curves; profile switch and `oscairn_ampeg_*` | Repeatable renders (two renders of one probe agree within the proposed tolerance); AEG checks within proposed tolerances at indices not used for fitting; the same checks at 44.1, 48 and 96 kHz; profile tests fail with the change undone |
 | 3 | Element model: element-scoped cycle and random, element groups, assignable switches, key-off and legato rules, key-on delay with tempo sync | Articulation fixtures (synthetic) select the same elements as the reference does on matching probes |
 | 4 | Filters: LPF12+HPF12 and the LPF family, then the rest; FEG; scaling breakpoints | Frequency-response checks per type within proposed tolerances |
 | 5 | PEG, element LFO, Part LFO per context, pan modes, random pitch, element EQ, half damper | Per-feature measurement checks |
@@ -437,10 +470,17 @@ survival, sanitizers) and the stock-vs-fork gate.
 ## 8. Upstreamability
 
 - **New files only, small hooks.** Oscairn code is in `src/sfizz/oscairn/`, `clap/`,
-  `tests/oscairn/` and `scripts/oscairn/`. Hooks in sfizz files are listed here as they are
-  added, each a few lines: the opcode fallback in `Region::parseOpcode`, the control opcode
-  in `Synth::Impl::handleControlOpcodes`, new `ModId` entries and their generators, the voice
-  stage calls.
+  `tests/OscairnT.cpp` and `scripts/oscairn/`. Hooks in sfizz files, as of `23630bee`:
+  - `Synth.cpp`, `buildRegion`: an `oscairn_*` opcode is parsed by `oscairn::parseRegionOpcode`
+    when the profile is on (and not skipped for having been unknown in an earlier region);
+    `handleControlOpcodes`: `oscairn::parseControlOpcode`; `clear()` resets the profile.
+  - `SynthPrivate.h`: the profile flag. `Region.h`: one member, `oscairn::RegionData oscairn`.
+  - `Voice.cpp`: the element envelope as a member; started in `startVoice`, applied after the
+    amp EG in `amplitudeEnvelope`, released in `release`, and asked in `renderBlock` (end of
+    the voice) and `released()`. Each is an `if (region->oscairn.ampegEnabled)` branch.
+  - `CMakeLists.txt` (option and `add_subdirectory(clap)`), `src/CMakeLists.txt` (sources),
+    `tests/CMakeLists.txt` (one test file).
+  Upstream-style fixes that are not Oscairn-specific are separate commits (section 11).
 - **Candidates for upstream as they are:** the toolchain fixes (atomic_queue, the NaN test),
   the CLAP target, per-instance seeded random generators, the active-voices-per-key query,
   multi-point envelopes with velocity/key time scaling, breakpoint curves, element-scoped
@@ -468,7 +508,7 @@ Decisions taken (for Jacob to confirm):
 
 1. **Licence:** everything added in this fork is BSD-2-Clause, like sfizz, so it can go
    upstream.
-2. **Profile switch:** `<control> oscairn_profile=1`, whole patch, off by default;
+2. **Profile switch:** `<control> oscairn_profile=1`, for the regions after it, off by default;
    `oscairn_*` opcodes do nothing without it; it never changes an existing opcode's
    meaning.
 3. **Engine opcodes take the reference's raw values** (0-127 times, 0-1023 cutoff) and the
@@ -485,6 +525,19 @@ Decisions taken (for Jacob to confirm):
    which sfizz supports as extended CCs) that the CLAP plugin exposes as parameters.
 7. **The Oscairn Sampler** stays unchanged; whether Oscairn retires it in favour of this
    engine is open.
+8. **CLAP identity:** ID `org.oscairn.sfizz`, name "Oscairn sfizz", vendor "Oscairn",
+   version 0.1.0.
+9. **Profile scope:** the profile applies to the regions after its `<control>` header, not to
+   the whole patch (sfizz builds regions while parsing).
+10. **Envelope tables in seconds**, generated into `ElementTables.cpp` by the measurement
+    repository's `fit_eg.py`; the 2.5 % tolerance for segment times is proposed.
+11. **Level 0 of a decay or release is -90 dB**, then silence, fitted from the renders
+    above; the attack keeps a constant rate for partial attacks until the rule is found.
+12. **Gate exclusions:** the include-loop fixtures and `newdrums_flat.sfz` are left out of
+    the stock-vs-fork gate because stock does not render them reproducibly (section 3).
+13. **Measurement folder name:** the measurement repository folder is `awm2/` as asked; it
+    is a product term, which the measurement repository's README otherwise keeps out of
+    identifiers. Renaming it (for example to `sample/`) is Jacob's call.
 
 Risks and open questions:
 
@@ -499,4 +552,106 @@ Risks and open questions:
 
 ## 11. Progress
 
-(Updated as milestones land.)
+### Milestone 0 (2026-11-01): done except sound contexts and assets
+
+Commits on `oscairn` after the plan (`75c32654`):
+
+| Commit | What | Upstreamable |
+| --- | --- | --- |
+| `0488b7b5` | atomic_queue: drop `template` without an argument list (clang 19+ build) | yes |
+| `1ee7c5bb` | NaN/Inf checker test without finite-math assumptions (failed in Release on Apple clang 17) | yes |
+| `c5b780f5` | sinc interpolator: no misaligned vector load, no wrapped unsigned index (UBSan) | yes |
+| `c450b1ac` | WavPack: widen samples with an unsigned shift (UBSan) | yes |
+| `f650d314` | FilePool: start its threads after the members they use; atomic stop flags (TSan) | yes |
+| `30cbb52c` | stock-vs-fork comparison (`scripts/oscairn/`) | Oscairn |
+| `e9aa3371` | CI for `oscairn` (`.github/workflows/oscairn.yml`) | Oscairn |
+| `65182e7e` | no null pointers to memcpy/memset in Buffer and OSCWriter (GCC UBSan, found by the first CI run) | yes |
+| `6d8f056c` | CLAP plugin `oscairn-sfizz.clap` and its tests | yes, as a generic CLAP target |
+| `23630bee` | Oscairn profile and the element amplitude envelope (milestone 2, below) | the envelope, without the profile |
+
+Local checks on the tree of every commit before pushing it (macOS arm64, Apple clang 17):
+Release build and `sfizz_tests`; ASan+UBSan and TSan builds (both Release, see below) of
+`sfizz_tests`, and of `sfizz_clap_tests` from `6d8f056c` on; the stock-vs-fork gate.
+Commits before the fixes they depend on fail the sanitizer runs with the findings those
+fixes address (`0488b7b5`: UBSan in the sinc interpolator, TSan in FilePool; and so on);
+from `f650d314` every run passes. The gate passed on every commit: 159 renders
+bit-identical up to `30cbb52c`'s tree, 162 once the profile patch was added (54 patches at
+three settings).
+
+CI runs only on the pushed head. Run 41356239682 (head `e9aa3371`): Linux x86_64, Linux
+ARM64, macOS arm64 and TSan passed; ASan+UBSan failed on a GCC-only finding (fixed in
+`65182e7e`). Run 41361467597 (head `23630bee`): all five jobs passed; `sfizz_tests` and
+`sfizz_clap_tests` passed in each, and the stock-vs-fork gate reported 162 renders
+bit-identical on Linux x86_64, Linux ARM64 and macOS.
+
+Sanitized builds use `CMAKE_BUILD_TYPE=Release`: at RelWithDebInfo (-O2) with UBSan, nine of
+sfizz's exact float comparisons in `RegionValuesT`/`RegionValuesSetT` fail on Apple clang
+(`-10.0f == -10.0f` after a percent round trip), a test fragility not related to the
+sanitizers' findings.
+
+Not done in milestone 0: native sound contexts, `oscairn.assets`, the allocation guard test
+and per-note `NOTE_END`/choke/volume (the plugin ends all notes once the synth is silent).
+They move to milestone 6 with the context work.
+
+**RFC 0013 step 1 (partial).** 300 waveform SFZ files picked at random (seed 1) from the
+7,647 of the imported factory library loaded in the fork without errors or unknown opcodes,
+and each sounded on a held note 60. All 7,647 and loop continuity over 30 s notes are not
+checked yet; the Salamander piano is not here.
+
+### Milestone 2 (2026-11-01): AEG times, in progress
+
+Reference renders: 44.1 kHz, a looped single-cycle sine, filter Thru, effects off, velocity
+127, note 69, one AEG parameter swept per render (batches `eg1`-`eg3`, about 250 renders).
+Dropouts (runs of exact zeros) were checked in every render; two renders had one and were
+not used. Analysis: `awm2/` in the measurement repository (`eg.py`, `segments.py`,
+`fit_eg.py`, `compare_eg.py`).
+
+What the renders show (reference behaviour):
+
+- **Levels** 0-127 are `(level/127)^2` in amplitude: 16 levels from 8 to 127 within 0.25 dB
+  (median 0.08 dB). Not yet a gated table (the engine uses the formula).
+- **Attack** is a straight line in amplitude (at indices 96 and 112, sampled at 12 points
+  from 5 % to 100 % of the time, within 0.003 of the line). Its time grows about 2x per 8 indices above 64 and has a floor of
+  about 2.7 ms below index 16.
+- **Decays and the release** are straight lines in dB. A segment takes the same time whatever
+  distance it covers: decays from level 127 to 96, 64 and 32 at index 80 all took 3.17-3.20 s,
+  and the decay to level 0 fits the same time if level 0 sits at -90 dB. A release from level
+  64 (index 80) agrees with a -90 dB floor within 3 %.
+- **Decay times double exactly every 8 indices** with the same eight steps in each octave:
+  measured 56-103 agree with the octave measured at 64-71 within 0.21 %. Release times do
+  the same at 56-76 and 92-121, but 80-88 are 3-4 % shorter (two renders of index 80 made
+  in different sessions agree to 0.0001 %, so this is the reference, not noise).
+- Repeatability: attack index 96 in two sessions 0.16 % apart; release 64 and 80 identical.
+
+Engine (`23630bee`): `oscairn_ampeg_*` with those shapes and tables in seconds
+(`src/sfizz/oscairn/ElementTables.cpp`, generated by `fit_eg.py`). Attack: interpolated in log
+time between measured indices. Decay: the octave rule from 56 (measured values below).
+Release: the octave rule from 56 except 77-91, interpolated between measured indices.
+
+Gate (tolerance 2.5 %, **proposed**): the engine rendered with the same probes and measured
+with the same code as the reference, at 44.1, 48 and 96 kHz.
+
+| Table | Valid span | Checks (indices not used for fitting) | Largest error | Outside the span |
+| --- | --- | --- | --- | --- |
+| Attack | 40-111 | 7 (50, 62, 74, 86, 98, 103, 111) | 2.39 % (111, at 96 kHz) | 119: -4.9 % |
+| Decay | 56-103 | 15 | 0.21 % | 50: -4.4 %; 105-119: +2 to +10.5 % |
+| Release | 56-121 | 25 | 0.81 % | 50: +2.6 % |
+
+All checks pass at all three rates; the engine's own measurements differ by at most 0.034 %
+between 44.1, 48 and 96 kHz. Below the valid spans the tables hold measured values that
+are not checked (attack 2.7-7.8 ms; decay and release below 56, where the measured falls
+are not straight lines in dB).
+
+Open in milestone 2: decay above 103 (measured up to 10 % shorter than the octave rule;
+the probes hold only 16 s, so whether this is the reference or the measurement is
+unresolved); attack above 111 (needs every index of an octave); an attack that starts from
+an initial level, and an attack to a level below 127 (index 96 to level 64 took 0.385 s
+against 0.337 s for a constant rate: neither constant rate nor constant time); the time
+velocity and key-follow parameters; velocity and level curves; element level.
+
+### Upstream merge test (2026-11-01)
+
+`upstream/develop` has no commits after `f5c6e29f`: merging it into `oscairn` is a no-op.
+Of upstream's other branches, `paulfd/test-refactor` merges cleanly into `develop` but
+conflicts with `oscairn` in `CMakeLists.txt` (the `SFIZZ_CLAP` option line); the rest that
+conflict with `oscairn` conflict with `develop` too.
