@@ -5,6 +5,7 @@
 // If not, contact the sfizz maintainers at https://github.com/sfztools/sfizz
 
 #include "Voice.h"
+#include "oscairn/ElementEnvelope.h"
 #include "Layer.h"
 #include "AudioBuffer.h"
 #include "Config.h"
@@ -276,6 +277,7 @@ struct Voice::Impl
     std::unique_ptr<LFO> lfoFilter_;
 
     ADSREnvelope egAmplitude_ { resources_.getMidiState(), resources_.getCurves() };
+    oscairn::ElementEnvelope oscairnAmpEG_; // replaces the amp EG when the region enables it
     std::unique_ptr<ADSREnvelope> egPitch_;
     std::unique_ptr<ADSREnvelope> egFilter_;
 
@@ -524,6 +526,10 @@ bool Voice::startVoice(Layer* layer, int delay, const TriggerEvent& event) noexc
     ModMatrix& modMatrix = resources.getModMatrix();
     modMatrix.initVoice(impl.id_, region.getId(), impl.initialDelay_);
     impl.saveModulationTargets(&region);
+    if (region.oscairn.ampegEnabled) {
+        impl.oscairnAmpEG_.setSampleRate(impl.sampleRate_);
+        impl.oscairnAmpEG_.start(region.oscairn.ampeg, impl.initialDelay_);
+    }
 
     if (region.checkSustain) {
         const bool sustainPressed =
@@ -583,7 +589,12 @@ void Voice::Impl::release(int delay) noexcept
     if (state_ != State::playing)
         return;
 
-    if (!region_->flexAmpEG) {
+    if (region_->oscairn.ampegEnabled) {
+        if (oscairnAmpEG_.getRemainingDelay() > delay)
+            switchState(State::cleanMeUp);
+        oscairnAmpEG_.release(delay);
+    }
+    else if (!region_->flexAmpEG) {
         if (egAmplitude_.getRemainingDelay() > delay)
             switchState(State::cleanMeUp);
     }
@@ -805,7 +816,11 @@ void Voice::renderBlock(AudioSpan<float, 2> buffer) noexcept
         impl.panStageMono(buffer);
     }
 
-    if (!region->flexAmpEG) {
+    if (region->oscairn.ampegEnabled) {
+        if (impl.oscairnAmpEG_.isFinished())
+            impl.switchState(State::cleanMeUp);
+    }
+    else if (!region->flexAmpEG) {
         if (!impl.egAmplitude_.isSmoothing())
             impl.switchState(State::cleanMeUp);
     }
@@ -901,6 +916,8 @@ void Voice::Impl::amplitudeEnvelope(absl::Span<float> modulationSpan) noexcept
     absl::Span<const float> ampegOut(mm.getModulation(masterAmplitudeTarget_), numSamples);
     ASSERT(ampegOut.data());
     copy(ampegOut, modulationSpan);
+    if (region_->oscairn.ampegEnabled)
+        oscairnAmpEG_.process(modulationSpan);
 
     // Amplitude envelope
     applyGain1<float>(baseGain_, modulationSpan);
@@ -1669,7 +1686,9 @@ bool Voice::Impl::released() const noexcept
         return true;
 
 
-    if (!region_->flexAmpEG)
+    if (region_->oscairn.ampegEnabled)
+        return oscairnAmpEG_.isReleased();
+    else if (!region_->flexAmpEG)
         return egAmplitude_.isReleased();
     else
         return flexEGs_[*region_->flexAmpEG]->isReleased();

@@ -61,6 +61,7 @@ set(SFIZZ_TEST_SOURCES
     AudioFilesT.cpp
     DataHelpers.h
     DataHelpers.cpp
+    OscairnT.cpp
 )
 
 add_executable(sfizz_tests ${SFIZZ_TEST_SOURCES})

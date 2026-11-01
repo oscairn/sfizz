@@ -165,11 +165,12 @@ void Synth::Impl::buildRegion(const std::vector<Opcode>& regionOpcodes)
     auto parseOpcodes = [&](const std::vector<Opcode>& opcodes) {
         for (auto& opcode : opcodes) {
             const auto unknown = absl::c_find_if(unknownOpcodes_, [&](absl::string_view sv) { return sv.compare(opcode.name) == 0; });
-            if (unknown != unknownOpcodes_.end()) {
+            if (unknown != unknownOpcodes_.end() && !oscairn::enabledFor(oscairnProfile_, opcode)) {
                 continue;
             }
 
-            if (!lastRegion->parseOpcode(opcode))
+            if (!lastRegion->parseOpcode(opcode)
+                && !(oscairnProfile_ && oscairn::parseRegionOpcode(opcode, lastRegion->oscairn)))
                 unknownOpcodes_.emplace_back(opcode.name);
         }
     };
@@ -309,6 +310,7 @@ void Synth::Impl::clear()
     masterOpcodes_.clear();
     groupOpcodes_.clear();
     unknownOpcodes_.clear();
+    oscairnProfile_ = false;
     modificationTime_ = absl::nullopt;
     playheadMoved_ = false;
 
@@ -468,7 +470,8 @@ void Synth::Impl::handleControlOpcodes(const std::vector<Opcode>& members)
             break;
         default:
             // Unsupported control opcode
-            DBG("Unsupported control opcode: " << member.name);
+            if (!oscairn::parseControlOpcode(member, oscairnProfile_))
+                DBG("Unsupported control opcode: " << member.name);
         }
     }
 }

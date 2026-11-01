@@ -19,6 +19,7 @@
 #include "utility/NumericId.h"
 #include "utility/LeakDetector.h"
 #include "modulations/ModKey.h"
+#include "oscairn/Profile.h"
 #include "absl/types/optional.h"
 #include "absl/strings/string_view.h"
 #include <bitset>
@@ -395,6 +396,9 @@ struct Region {
         float velToDepth = 0.0f;
     };
     std::vector<Connection> connections;
+
+    // Oscairn extensions, set only when the patch enables the profile
+    oscairn::RegionData oscairn;
     Connection* getConnection(const ModKey& source, const ModKey& target);
     Connection& getOrCreateConnection(const ModKey& source, const ModKey& target);
     Connection* getConnectionFromCC(int sourceCC, const ModKey& target);

@@ -1,0 +1,2 @@
+// Oscairn opcodes without <control> oscairn_profile=1 are unknown and change nothing
+<region> sample=*saw ampeg_attack=0.02 ampeg_release=0.2 oscairn_ampeg_attack=96 oscairn_ampeg_decay1=70 oscairn_ampeg_decay1_level=40 oscairn_ampeg_release=90

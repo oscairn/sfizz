@@ -1,0 +1,60 @@
+// SPDX-License-Identifier: BSD-2-Clause
+
+// This code is part of the sfizz library and is licensed under a BSD 2-clause
+// license. You should have receive a LICENSE.md file along with the code.
+// If not, contact the sfizz maintainers at https://github.com/sfztools/sfizz
+
+#include "Profile.h"
+#include "../utility/StringViewHelpers.h"
+#include <absl/strings/match.h>
+
+namespace sfz {
+namespace oscairn {
+
+namespace {
+const OpcodeSpec<int32_t> index127 { 0, Range<int32_t>(0, 127), kEnforceBounds };
+const OpcodeSpec<int32_t> profileSpec { 0, Range<int32_t>(0, 1), kEnforceBounds };
+}
+
+bool parseControlOpcode(const Opcode& opcode, bool& profileEnabled)
+{
+    if (opcode.lettersOnlyHash != hash("oscairn_profile"))
+        return false;
+    profileEnabled = opcode.read(profileSpec) == 1;
+    return true;
+}
+
+bool enabledFor(bool profileEnabled, const Opcode& opcode)
+{
+    return profileEnabled && absl::StartsWith(opcode.name, "oscairn_");
+}
+
+bool parseRegionOpcode(const Opcode& opcode, RegionData& data)
+{
+    ElementEnvelopeParameters& eg = data.ampeg;
+    int32_t* target = nullptr;
+    switch (opcode.lettersOnlyHash) {
+    case hash("oscairn_ampeg_initial_level"): target = &eg.initialLevel; break;
+    case hash("oscairn_ampeg_attack"): target = &eg.attackTime; break;
+    case hash("oscairn_ampeg_attack_level"): target = &eg.attackLevel; break;
+    case hash("oscairn_ampeg_decay&"):
+        if (opcode.parameters.empty() || opcode.parameters.back() < 1 || opcode.parameters.back() > 2)
+            return false;
+        target = opcode.parameters.back() == 1 ? &eg.decay1Time : &eg.decay2Time;
+        break;
+    case hash("oscairn_ampeg_decay&_level"):
+        if (opcode.parameters.empty() || opcode.parameters.back() < 1 || opcode.parameters.back() > 2)
+            return false;
+        target = opcode.parameters.back() == 1 ? &eg.decay1Level : &eg.decay2Level;
+        break;
+    case hash("oscairn_ampeg_release"): target = &eg.releaseTime; break;
+    default:
+        return false;
+    }
+    *target = opcode.read(index127);
+    data.ampegEnabled = true;
+    return true;
+}
+
+} // namespace oscairn
+} // namespace sfz

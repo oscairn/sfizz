@@ -201,6 +201,12 @@ set(SFIZZ_SOURCES
 include(SfizzSIMDSourceFiles)
 sfizz_add_simd_sources(SFIZZ_SOURCES ".")
 
+# Oscairn extensions (doc/oscairn-plan.md)
+list(APPEND SFIZZ_SOURCES
+    sfizz/oscairn/Profile.cpp
+    sfizz/oscairn/ElementEnvelope.cpp
+    sfizz/oscairn/ElementTables.cpp)
+
 # Parser core library
 set(SFIZZ_PARSER_HEADERS
     sfizz/Defaults.h
