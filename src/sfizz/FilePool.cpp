@@ -148,6 +148,8 @@ sfz::FilePool::FilePool()
     loadingJobs.reserve(config::maxVoices);
     lastUsedFiles.reserve(config::maxVoices);
     garbageToCollect.reserve(config::maxVoices);
+    dispatchThread = std::thread(&FilePool::dispatchingJob, this);
+    garbageThread = std::thread(&FilePool::garbageJob, this);
 }
 
 sfz::FilePool::~FilePool()

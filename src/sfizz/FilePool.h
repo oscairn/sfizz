@@ -347,8 +347,8 @@ private:
     uint32_t preloadSize { config::preloadSize };
 
     // Signals
-    volatile bool dispatchFlag { true };
-    volatile bool garbageFlag { true };
+    std::atomic<bool> dispatchFlag { true };
+    std::atomic<bool> garbageFlag { true };
     RTSemaphore dispatchBarrier;
     RTSemaphore semGarbageBarrier;
 
@@ -370,8 +370,9 @@ private:
     void loadingJob(const QueuedFileData& data) noexcept;
     std::mutex loadingJobsMutex;
     std::vector<std::future<void>> loadingJobs;
-    std::thread dispatchThread { &FilePool::dispatchingJob, this };
-    std::thread garbageThread { &FilePool::garbageJob, this };
+    // Started at the end of the constructor, once every member they use exists
+    std::thread dispatchThread;
+    std::thread garbageThread;
 
     SpinMutex garbageAndLastUsedMutex;
     std::vector<FileId> lastUsedFiles;
