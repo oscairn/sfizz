@@ -15,6 +15,7 @@
 #include "catch2/catch.hpp"
 #include <algorithm>
 #include <cmath>
+#include <complex>
 #include <vector>
 
 using namespace Catch::literals;
@@ -637,27 +638,82 @@ TEST_CASE("[Oscairn] The element filter only acts with the profile")
     REQUIRE(f.filter.gain == 200);
 }
 
+namespace {
+// Gains (dB, filter gain taken out) of the element filter at `hz`, from its impulse response
+// under an exponential window with a 0.25 s time constant (the response smoothed over about
+// 1.3 Hz, the same at every rate, so that truncation does not leak around sharp peaks), until
+// the windowed response has fallen 200 dB below its largest value or for 4 s
+std::vector<double> filterResponseDb(const sfz::oscairn::ElementFilterParameters& p, double rate, const std::vector<double>& hz)
+{
+    sfz::oscairn::ElementFilter filter;
+    filter.setSampleRate(rate);
+    filter.start(p, 60);
+    const size_t total = static_cast<size_t>(std::lround(4.0 * rate));
+    const size_t block = 4096;
+    std::vector<float> x(block);
+    std::vector<std::complex<double>> sum(hz.size()), phasor(hz.size()), step(hz.size());
+    const double decay = std::exp(-1.0 / (0.25 * rate));
+    double weight = 1.0, largest = 0.0;
+    for (size_t k = 0; k < hz.size(); ++k) {
+        phasor[k] = 1.0;
+        step[k] = std::polar(decay, -2.0 * M_PI * hz[k] / rate);
+    }
+    for (size_t done = 0; done < total; done += block) {
+        std::fill(x.begin(), x.end(), 0.0f);
+        if (done == 0)
+            x[0] = 1.0f;
+        filter.process(absl::MakeSpan(x), {}, {});
+        const size_t n = std::min(block, total - done);
+        double blockLargest = 0.0;
+        for (size_t i = 0; i < n; ++i) {
+            blockLargest = std::max(blockLargest, std::abs(static_cast<double>(x[i])) * weight);
+            weight *= decay;
+            for (size_t k = 0; k < hz.size(); ++k) {
+                sum[k] += static_cast<double>(x[i]) * phasor[k];
+                phasor[k] *= step[k];
+            }
+        }
+        largest = std::max(largest, blockLargest);
+        if (blockLargest < largest * 1e-10)
+            break;
+    }
+    std::vector<double> db(hz.size());
+    for (size_t k = 0; k < hz.size(); ++k)
+        db[k] = 20.0 * std::log10(std::max(std::abs(sum[k]), 1e-30)) - 20.0 * std::log10(sfz::oscairn::filterGain(p.gain));
+    return db;
+}
+} // namespace
+
 TEST_CASE("[Oscairn] The element filter follows its 44.1 kHz response at every rate")
 {
-    // Proposed bounds for the transformed sections, for cutoffs up to about 2.2 kHz (index
-    // 700) and tones up to 5 kHz: within 0.75 dB of the 44.1 kHz response where it is above
-    // -20 dB (largest 0.64), 1.5 dB from -20 to -40 dB (largest 1.28, two sections); resonance
-    // up to 96, so the ringing has died down before the measurement window
-    // (doc/oscairn-plan.md, known differences, for higher cutoffs and tones)
+    // Accepted tolerances (Jacob, 2026-11-01): within 0.75 dB of the 44.1 kHz response where
+    // that is within 20 dB of its peak, 1.5 dB from 20 to 40 dB below it; every type, the
+    // whole cutoff and resonance ranges, tones from 20 Hz to 20 kHz
+    std::vector<double> hz;
+    for (int k = 0; k <= 40; ++k)
+        hz.push_back(20.0 * std::pow(1000.0, k / 40.0));
+    std::vector<int> cutoffs;
+    for (int c = 0; c < 1024; c += 32)
+        cutoffs.push_back(c);
+    for (int c : { 816, 864, 880, 896, 912, 1023 })
+        cutoffs.push_back(c);
     for (int type : { 0, 4, 6, 7 }) {
-        for (int cutoff : { 256, 384, 512, 640, 700 }) {
-            for (int resonance : { 0, 32, 64, 96 }) {
+        for (int cutoff : cutoffs) {
+            for (int resonance : { 0, 16, 32, 48, 64, 80, 96, 112, 127 }) {
                 sfz::oscairn::ElementFilterParameters p;
                 p.type = type;
                 p.cutoff = cutoff;
                 p.resonance = resonance;
-                for (double hz : { 100.0, 250.0, 500.0, 1000.0, 2000.0, 3500.0, 5000.0 }) {
-                    const double reference = filterGainDb(p, 44100.0, hz);
-                    if (reference < -40.0)
-                        continue;
-                    for (double rate : { 48000.0, 88200.0, 96000.0, 192000.0 }) {
-                        INFO("type " << type << " cutoff " << cutoff << " resonance " << resonance << " " << hz << " Hz at " << rate);
-                        REQUIRE(filterGainDb(p, rate, hz) == Approx(reference).margin(reference > -20.0 ? 0.75 : 1.5));
+                p.hpfCutoff = type == 4 ? cutoff / 2 : 0;
+                const auto reference = filterResponseDb(p, 44100.0, hz);
+                const double peak = *std::max_element(reference.begin(), reference.end());
+                for (double rate : { 48000.0, 88200.0, 96000.0, 192000.0 }) {
+                    const auto got = filterResponseDb(p, rate, hz);
+                    for (size_t k = 0; k < hz.size(); ++k) {
+                        if (reference[k] < peak - 40.0)
+                            continue;
+                        INFO("type " << type << " cutoff " << cutoff << " resonance " << resonance << " " << hz[k] << " Hz at " << rate);
+                        REQUIRE(got[k] == Approx(reference[k]).margin(reference[k] >= peak - 20.0 ? 0.75 : 1.5));
                     }
                 }
             }

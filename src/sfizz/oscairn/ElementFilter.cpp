@@ -108,45 +108,6 @@ float filterDamping(int32_t resonance) noexcept
     return 2.0f * std::exp2(-static_cast<float>(r) / 16.0f);
 }
 
-ElementFilter::Coefficients ElementFilter::coefficients(float hz, float damping, bool highPass) const noexcept
-{
-    // The section at the reference rate: F, its damping and its limits
-    const double h = std::min<double>(hz, kTopHz);
-    const double f = 2.0 * std::sin(kPi * h / kReferenceRate);
-    const double d = std::min<double>(damping, dampingLimit(h));
-    // Its transfer function in z^-1: low-pass F^2 z^-1, high-pass (1 - z^-1)^2, over
-    // 1 - (2 - F^2 - F d) z^-1 + (1 - F d) z^-2
-    double b[3] = { 0.0, f * f, 0.0 };
-    if (highPass) {
-        b[0] = 1.0;
-        b[1] = -2.0;
-        b[2] = 1.0;
-    }
-    double a[3] = { 1.0, -(2.0 - f * f - f * d), 1.0 - f * d };
-    if (sampleRate_ != kReferenceRate) {
-        // z^-1 -> (w - k) / (1 - k w), mapping the cutoff at 44.1 kHz onto the same
-        // frequency at the host rate
-        const double t44 = 2.0 * std::asin(f / 2.0);
-        const double tn = t44 * kReferenceRate / sampleRate_;
-        const double k = std::sin((t44 - tn) / 2.0) / std::sin((t44 + tn) / 2.0);
-        auto transform = [k](double* p) {
-            const double p0 = p[0], p1 = p[1], p2 = p[2];
-            p[0] = p0 - k * p1 + k * k * p2;
-            p[1] = -2.0 * k * p0 + (1.0 + k * k) * p1 - 2.0 * k * p2;
-            p[2] = k * k * p0 - k * p1 + p2;
-        };
-        transform(b);
-        transform(a);
-    }
-    Coefficients c;
-    c.b0 = static_cast<float>(b[0] / a[0]);
-    c.b1 = static_cast<float>(b[1] / a[0]);
-    c.b2 = static_cast<float>(b[2] / a[0]);
-    c.a1 = static_cast<float>(a[1] / a[0]);
-    c.a2 = static_cast<float>(a[2] / a[0]);
-    return c;
-}
-
 float filterGain(int32_t gain) noexcept
 {
     // Passband level measured at these values (dB), linear in dB between them; about
@@ -164,21 +125,127 @@ float filterGain(int32_t gain) noexcept
     return std::pow(10.0f, level / 20.0f);
 }
 
+void ElementFilter::setSampleRate(double sampleRate) noexcept
+{
+    sampleRate_ = sampleRate;
+    const double r = sampleRate / kReferenceRate;
+    const double whole = std::round(r);
+    allpass_ = std::abs(r - whole) > 1e-9 || whole < 1.0;
+    // A pure delay for whole multiples; otherwise the allpass carries 1 to 3 host samples
+    // (more would need a higher order to stay accurate) and the rest is a delay line
+    delay_ = allpass_ ? std::max(0, static_cast<int>(std::floor(r)) - 2) : static_cast<int>(whole);
+    delay_ = std::min(delay_, kMaxDelay - 1);
+    // shortcut: rates above 16 x 44.1 kHz keep a 15-sample delay line and drift from the
+    // 44.1 kHz response; raise kMaxDelay if such rates are ever used
+    const double theta = 2.0 * kPi * 18000.0 / kReferenceRate;
+    const double phi = theta / r;
+    const double alpha = (theta - delay_ * phi - 2.0 * phi) / 2.0;
+    pin2_[0] = static_cast<float>(std::sin(phi + alpha));
+    pin2_[1] = static_cast<float>(std::sin(2.0 * phi + alpha));
+    pin2_[2] = static_cast<float>(-std::sin(alpha));
+}
+
+void ElementFilter::design(Section& s, float hz, float damping) const noexcept
+{
+    const double h = std::min<double>(hz, kTopHz);
+    s.f = static_cast<float>(2.0 * std::sin(kPi * h / kReferenceRate));
+    s.d = std::min(damping, dampingLimit(h));
+    s.c1 = s.c2 = s.g = 0.0f;
+    if (allpass_) {
+        // The allpass (c2 + c1 z^-1 + z^-2) / (1 + c1 z^-1 + c2 z^-2) lags by
+        // 2 phi + 2 arg(1 + c1 e^-j phi + c2 e^-j2phi); pin z^-M times it to one 44.1 kHz
+        // sample at the cutoff and at 18 kHz
+        const double r = sampleRate_ / kReferenceRate;
+        const double theta = 2.0 * kPi * h / kReferenceRate;
+        const double phi = theta / r;
+        const double alpha = (theta - delay_ * phi - 2.0 * phi) / 2.0;
+        const double a0 = std::sin(phi + alpha), a1 = std::sin(2.0 * phi + alpha), b = -std::sin(alpha);
+        const double det = a0 * pin2_[1] - a1 * pin2_[0];
+        s.c1 = static_cast<float>((b * pin2_[1] - a1 * pin2_[2]) / det);
+        s.c2 = static_cast<float>((a0 * pin2_[2] - b * pin2_[0]) / det);
+        if (delay_ == 0)
+            s.g = s.c2; // the allpass's direct path closes the loop within the sample
+    }
+    const float f = s.f, d = s.d, g = s.g;
+    s.k = 1.0f / (1.0f - g);
+    const float k = s.k;
+    s.cs = k * f + k * k * f * g + d * g * k + d;
+    s.inv = 1.0f / (1.0f + k * k * f * f * g + d * g * k * f);
+}
+
+// The part of the reference-rate delay's output known before this sample's input
+float ElementFilter::delayedValue(const Section& s, Delay& line) const noexcept
+{
+    if (delay_ == 0)
+        return line.s1; // the direct path g * input is solved for
+    const float u = line.line[(line.pos + kMaxDelay - delay_) % kMaxDelay];
+    if (!allpass_)
+        return u;
+    const float y = s.c2 * u + line.s1;
+    line.s1 = s.c1 * (u - y) + line.s2;
+    line.s2 = u - s.c2 * y;
+    return y;
+}
+
+void ElementFilter::push(const Section& s, Delay& line, float value) const noexcept
+{
+    if (delay_ == 0) {
+        const float y = s.c2 * value + line.s1;
+        line.s1 = s.c1 * (value - y) + line.s2;
+        line.s2 = value - s.c2 * y;
+        return;
+    }
+    line.line[line.pos] = value;
+    line.pos = (line.pos + 1) % kMaxDelay;
+}
+
+float ElementFilter::run(Section& s, int channel, float x) const noexcept
+{
+    // Two-integrator state-variable section: low = low' + f band'; high = x - low - d band';
+    // band = f high + band', with every prime the reference-rate delay of its signal
+    Delay& lowLine = s.low[channel];
+    Delay& bandLine = s.band[channel];
+    const float low1 = delayedValue(s, lowLine);
+    const float band1 = delayedValue(s, bandLine);
+    const float high = (x - s.k * low1 - s.cs * band1) * s.inv;
+    const float band = s.k * (s.f * high + band1);
+    const float low = s.k * (low1 + s.f * band1) + s.k * s.f * s.g * band;
+    push(s, lowLine, low);
+    push(s, bandLine, band);
+    return s.highPass ? high : low;
+}
+
 void ElementFilter::start(const ElementFilterParameters& parameters, int note) noexcept
 {
     p_ = parameters;
     keyCents_ = static_cast<float>(p_.keyFollow - 64) * 3.125f * static_cast<float>(note - 60);
     gain_ = filterGain(p_.gain);
-    for (auto& s : states_)
-        s = State {};
+    for (auto& s : sections_)
+        s = Section {};
     damping_ = filterDamping(p_.resonance);
-    high_ = coefficients(filterCutoffHz(p_.hpfCutoff), 1.0f, true);
+    const bool highPass = p_.type == 6 || p_.type == 7;
+    sections_[0].highPass = highPass;
+    sections_[1].highPass = highPass || p_.type == 4;
+    if (p_.type == 4)
+        design(sections_[1], filterCutoffHz(p_.hpfCutoff), 1.0f);
     update(0.0f);
 }
 
 void ElementFilter::update(float cents) noexcept
 {
-    main_ = coefficients(filterCutoffHz(p_.cutoff, keyCents_ + cents), damping_, p_.type == 6 || p_.type == 7);
+    const float hz = filterCutoffHz(p_.cutoff, keyCents_ + cents);
+    design(sections_[0], hz, damping_);
+    if (p_.type != 4) {
+        Section& second = sections_[1];
+        second.f = sections_[0].f;
+        second.d = sections_[0].d;
+        second.c1 = sections_[0].c1;
+        second.c2 = sections_[0].c2;
+        second.g = sections_[0].g;
+        second.k = sections_[0].k;
+        second.cs = sections_[0].cs;
+        second.inv = sections_[0].inv;
+    }
 }
 
 void ElementFilter::process(absl::Span<float> left, absl::Span<float> right, absl::Span<const float> cents) noexcept
@@ -188,14 +255,6 @@ void ElementFilter::process(absl::Span<float> left, absl::Span<float> right, abs
     const bool stereo = !right.empty();
     const size_t n = stereo ? std::min(left.size(), right.size()) : left.size();
     const int stages = (p_.type == 0 || p_.type == 6 || p_.type == 4) ? 2 : 1;
-    // Transposed direct form II
-    auto step = [](float x, float& s1, float& s2, const Coefficients& c) noexcept {
-        const float y = c.b0 * x + s1;
-        s1 = c.b1 * x - c.a1 * y + s2;
-        s2 = c.b2 * x - c.a2 * y;
-        return y;
-    };
-
     for (size_t i = 0; i < n; ++i) {
         if (!cents.empty() && i % kControlInterval == 0 && i < cents.size())
             update(cents[i]);
@@ -203,7 +262,7 @@ void ElementFilter::process(absl::Span<float> left, absl::Span<float> right, abs
             float& sample = ch == 0 ? left[i] : right[i];
             float x = sample;
             for (int s = 0; s < stages; ++s)
-                x = step(x, states_[s].s1[ch], states_[s].s2[ch], (p_.type == 4 && s == 1) ? high_ : main_);
+                x = run(sections_[s], ch, x);
             sample = gain_ * x;
         }
     }

@@ -10,10 +10,15 @@
 // F = 2 sin(pi fc / 44100), fc up to 7290 Hz; its damping is 2 * 2^(-resonance / 16), held
 // under a limit that falls from 2 to 1 between cutoff indices 816 and 912. Key follow moves
 // the cutoff by (sensitivity - 64) * 3.125 cents per key from note 60; the filter gain
-// follows the measured passband levels (the default 230 is -5.45 dB). Each section runs as the biquad with
-// that response; at other sample rates the biquad is carried over by the allpass frequency
-// transform that keeps DC, the cutoff and Nyquist in place, so every rate follows the
-// 44.1 kHz response (doc/oscairn-plan.md, known differences, for the residual).
+// follows the measured passband levels (the default 230 is -5.45 dB).
+//
+// Every rate gives the 44.1 kHz response, warping near the top included: each section is
+// the 44.1 kHz section with its unit delays replaced by an allpass "reference-rate delay":
+// a pure delay when the host rate is a whole multiple of 44.1 kHz, otherwise z^-M times a
+// second-order allpass whose phase equals one 44.1 kHz sample's at the section's cutoff and
+// at 18 kHz. The section's response at the host rate is then the 44.1 kHz response read at
+// a frequency that differs from the true one only between and beyond those points (within
+// 0.3 dB up to 20 kHz at 48 kHz, less at higher rates; known differences, K22).
 
 #pragma once
 #include <absl/types/span.h>
@@ -53,26 +58,42 @@ float filterDamping(int32_t resonance) noexcept;
 
 class ElementFilter {
 public:
-    void setSampleRate(double sampleRate) noexcept { sampleRate_ = sampleRate; }
+    void setSampleRate(double sampleRate) noexcept;
     void start(const ElementFilterParameters& parameters, int note) noexcept;
     // Filters `left` and `right` in place; `cents` shifts the cutoff per sample
     // (empty for no shift). `right` may be empty for a mono voice.
     void process(absl::Span<float> left, absl::Span<float> right, absl::Span<const float> cents) noexcept;
 
 private:
-    struct Coefficients {
-        float b0 { 1.0f }, b1 { 0.0f }, b2 { 0.0f }, a1 { 0.0f }, a2 { 0.0f };
+    static constexpr int kMaxDelay = 16; // reference-rate delay up to 16 host samples (705.6 kHz)
+    // The reference-rate delay of one signal: a delay line and the allpass's state
+    struct Delay {
+        float line[kMaxDelay] {};
+        int pos { 0 };
+        float s1 { 0.0f }, s2 { 0.0f };
     };
-    struct State {
-        float s1[2] {}, s2[2] {};
+    struct Section {
+        bool highPass { false };
+        // 44.1 kHz coefficients and the allpass pinned for them
+        float f { 0.0f }, d { 2.0f }, c1 { 0.0f }, c2 { 0.0f };
+        // per-sample solve: high = (x - k low' - cs band') * inv; band = k (f high + band');
+        // low = k (low' + f band') + k f g band (primes: the delayed values)
+        float g { 0.0f }, k { 1.0f }, cs { 0.0f }, inv { 1.0f };
+        Delay low[2], band[2];
     };
-    Coefficients coefficients(float hz, float damping, bool highPass) const noexcept;
+    void design(Section& s, float hz, float damping) const noexcept;
+    float delayedValue(const Section& s, Delay& line) const noexcept;
+    void push(const Section& s, Delay& line, float value) const noexcept;
+    float run(Section& s, int channel, float x) const noexcept;
     void update(float cents) noexcept;
 
     ElementFilterParameters p_;
     double sampleRate_ { 48000.0 };
-    State states_[2];
-    Coefficients main_, high_;
+    // the reference-rate delay at this rate: z^-delay_, then the allpass if any
+    int delay_ { 1 };
+    bool allpass_ { false };
+    float pin2_[3] {}; // the 18 kHz row of the allpass pin equations
+    Section sections_[2];
     float damping_ { 2.0f };
     float keyCents_ { 0.0f };
     float gain_ { 1.0f };
