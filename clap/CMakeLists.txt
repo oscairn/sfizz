@@ -1,11 +1,12 @@
 # Oscairn's CLAP instrument around sfizz (doc/oscairn-plan.md, section 5).
-# The CLAP headers (MIT) are vendored in third_party/clap with their commit.
+# The CLAP headers and Oscairn's extension headers (both MIT) are vendored in third_party/
+# with their commits.
 
 add_library(sfizz_clap_headers INTERFACE)
-target_include_directories(sfizz_clap_headers INTERFACE third_party/clap/include)
+target_include_directories(sfizz_clap_headers INTERFACE third_party/clap/include third_party/oscairn-clap/include)
 
 add_library(sfizz_clap_plugin STATIC plugin.cpp plugin.h)
-target_link_libraries(sfizz_clap_plugin PUBLIC sfizz_clap_headers PRIVATE sfizz::static)
+target_link_libraries(sfizz_clap_plugin PUBLIC sfizz_clap_headers sfizz::internal)
 set_target_properties(sfizz_clap_plugin PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 add_library(sfizz_clap MODULE entry.cpp)
@@ -24,5 +25,6 @@ install(TARGETS sfizz_clap LIBRARY DESTINATION lib/clap)
 if(SFIZZ_TESTS)
     add_executable(sfizz_clap_tests test.cpp)
     target_link_libraries(sfizz_clap_tests PRIVATE sfizz_clap_plugin ${CMAKE_DL_LIBS})
+    target_compile_definitions(sfizz_clap_tests PRIVATE OSCAIRN_TEST_FILES="${PROJECT_SOURCE_DIR}/tests/TestFiles")
     add_dependencies(sfizz_clap_tests sfizz_clap)
 endif()

@@ -4,21 +4,35 @@
 // license. You should have receive a LICENSE.md file along with the code.
 // If not, contact the sfizz maintainers at https://github.com/sfztools/sfizz
 
-// A CLAP instrument around sfz::Sfizz (doc/oscairn-plan.md, section 5).
+// A CLAP instrument around sfz::Synth (doc/oscairn-plan.md, section 5).
 //
-// The patch is SFZ text plus the directory its relative paths resolve from, both stored in
-// the plugin state. A new patch is loaded into a new synth on the main thread and handed to
-// the audio thread through an atomic pointer at the next process call; the replaced synth
-// goes back the same way and is destroyed on the main thread.
+// Sounds: up to eight prepared sound contexts (Oscairn's oscairn.sound-contexts), each a
+// synth with its own SFZ patch. Context 0 is the plugin state's patch. Each MIDI channel
+// plays one context; a note keeps the context it started in. Patches are loaded on the main
+// thread; the audio thread only renders synths that are selected or still sounding, so the
+// main thread may free one once nothing uses it.
 //
-// Notes: CLAP note events and MIDI note events on port 0. A note ends (NOTE_END) once the
-// synth has no active voice left; sfizz does not report voices per note yet.
+// Notes: CLAP and MIDI notes on port 0. sfizz's voices know their key, not a note ID, so a
+// note ends (NOTE_END) once its context has no voice left on its key; notes sharing a key in
+// one context end together. A choke fades the key's voices over 3 ms; a note's volume
+// expression scales the key's voices.
+//
+// Files: with the host's oscairn.assets, every sample a patch uses is resolved through the
+// host, and oscairn.asset-dependencies lists them; without it, paths resolve from the
+// patch's directory.
 
 #include "plugin.h"
-#include <sfizz.hpp>
+#include "sfizz/Synth.h"
+#include "sfizz/Region.h"
+#include "sfizz/AudioSpan.h"
+#include "sfizz/parser/Parser.h"
+#include "sfizz/parser/ParserListener.h"
+#include <oscairn-clap/assets.h>
+#include <oscairn-clap/sound-contexts.h>
 
 #include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <memory>
@@ -30,6 +44,8 @@ namespace {
 constexpr const char* stateVersion = "oscairn-sfizz-1";
 constexpr size_t maxStateBytes = 64 << 20;
 constexpr size_t maxNotes = 256;
+constexpr uint32_t contextCount = 8;
+constexpr uint32_t selectionCapacity = 32;
 
 struct Patch {
     std::string directory; // where relative sample and include paths resolve
@@ -38,90 +54,211 @@ struct Patch {
 
 struct Engine {
     Patch patch;
-    sfz::Sfizz synth;
+    sfz::Synth synth;
+    std::vector<oscairn_asset_ref_t> assets; // resolved through the host, for dependencies
 };
 
 struct Note {
     int32_t id;
     int16_t channel, key;
+    uint32_t context;
+};
+
+struct Context {
+    // Main thread
+    bool prepared { false };
+    uint32_t id { 0 };
+    char name[64] {};
+    std::unique_ptr<Engine> engine;
+    // Shared: the audio thread renders a context while any of these is set; the main thread
+    // frees it only when all are clear.
+    std::atomic<uint32_t> selectedChannels { 0 }; // written by the audio thread
+    std::atomic<uint32_t> queued { 0 };           // selections not yet applied
+    std::atomic<uint32_t> sounding { 0 };         // notes or voices left, audio thread
+};
+
+struct Selection {
+    uint32_t context;
+    int16_t channel;
 };
 
 struct Plugin {
     clap_plugin_t plugin {};
     const clap_host_t* host { nullptr };
+    const oscairn_host_assets_t* assets { nullptr };
     double sampleRate { 48000.0 };
     uint32_t maxFrames { 1024 };
     bool active { false };
+    uint32_t chokeFrames { 144 };
 
-    Patch patch; // main thread: the latest patch, as saved
-    std::unique_ptr<Engine> prepared; // main thread: built while inactive, used by activate
-    std::atomic<Engine*> pending { nullptr }; // main -> audio
-    std::atomic<Engine*> retired { nullptr }; // audio -> main
-    Engine* audio { nullptr }; // audio thread while active
+    Patch patch; // main thread: context 0's patch, as saved
+    Context contexts[contextCount];
+    uint32_t nextId { 1 };
 
+    // Main thread -> audio: a new engine for context 0 (from a state load while active)
+    std::atomic<Engine*> pendingDefault { nullptr };
+    std::atomic<Engine*> retired { nullptr };
+
+    Selection selections[selectionCapacity];
+    std::atomic<uint32_t> selectionHead { 0 }, selectionTail { 0 };
+
+    // Audio thread
+    uint32_t channelContext[16] {};
     Note notes[maxNotes];
     size_t noteCount { 0 };
-    std::vector<float> left, right;
+    std::vector<float> left, right, mixLeft, mixRight;
 };
 
 Plugin& self(const clap_plugin_t* p) { return *static_cast<Plugin*>(p->plugin_data); }
 
-void collectRetired(Plugin& s)
+void configure(const Plugin& s, sfz::Synth& synth)
 {
-    delete s.retired.exchange(nullptr);
+    synth.setSampleRate(static_cast<float>(s.sampleRate));
+    synth.setSamplesPerBlock(static_cast<int>(s.maxFrames));
 }
 
-std::unique_ptr<Engine> makeEngine(const Plugin& s, const Patch& patch)
-{
-    std::unique_ptr<Engine> e { new Engine };
-    e->patch = patch;
-    e->synth.setSampleRate(static_cast<float>(s.sampleRate));
-    e->synth.setSamplesPerBlock(static_cast<int>(s.maxFrames));
-    if (!patch.text.empty()) {
-        // sfizz resolves relative paths from the directory of the virtual file name
-        const std::string virtualPath = patch.directory + "/patch.sfz";
-        if (!e->synth.loadSfzString(virtualPath, patch.text))
-            return nullptr;
+// The sample files a patch names, relative to its directory (default_path applied)
+struct SampleCollector : sfz::Parser::Listener {
+    std::string defaultPath, header;
+    std::vector<std::string> samples;
+    void onParseHeader(const sfz::SourceRange&, const std::string& h) override { header = h; }
+    void onParseOpcode(const sfz::SourceRange&, const sfz::SourceRange&, const std::string& name, const std::string& value) override
+    {
+        std::string v = value;
+        std::replace(v.begin(), v.end(), '\\', '/');
+        if (header == "control" && name == "default_path")
+            defaultPath = v;
+        else if (name == "sample" && !v.empty() && v[0] != '*')
+            samples.push_back(defaultPath + v);
     }
-    return e;
-}
+};
 
-// Main thread: makes `patch` the playing patch.
-bool setPatch(Plugin& s, const Patch& patch)
+bool loadPatch(const Plugin& s, Engine& e, const oscairn_asset_ref_t* base, std::string& message)
 {
-    auto e = makeEngine(s, patch);
-    if (!e)
+    configure(s, e.synth);
+    if (e.patch.text.empty())
+        return true;
+    // sfizz resolves relative paths from the directory of the virtual file name
+    std::string directory = e.patch.directory;
+    if (s.assets && base) {
+        // Resolve every sample through the host. A first parse finds them; the files must
+        // then lie in one folder tree, which becomes the patch's directory.
+        // shortcut: samples resolving to several folders are refused, and #include files are
+        // not resolved; per-file resolution needs a path-mapping hook in sfizz's file pool.
+        SampleCollector scan;
+        sfz::Parser parser;
+        parser.setListener(&scan);
+        parser.parseString("/nonexistent-oscairn-base/patch.sfz", e.patch.text);
+        if (e.patch.text.find("#include") != std::string::npos) {
+            message = "#include is not supported with host-resolved samples yet";
+            return false;
+        }
+        std::string root;
+        for (const std::string& relative : scan.samples) {
+            if (relative.empty() || relative[0] == '/' || relative.find("..") != std::string::npos) {
+                message = "sample path not allowed: " + relative;
+                return false;
+            }
+            oscairn_asset_ref_t ref {};
+            std::snprintf(ref.library, sizeof(ref.library), "%s", base->library);
+            const std::string path = (std::strlen(base->path) ? std::string(base->path) + "/" : std::string()) + relative;
+            if (path.size() >= sizeof(ref.path)) {
+                message = "sample path too long: " + relative;
+                return false;
+            }
+            std::snprintf(ref.path, sizeof(ref.path), "%s", path.c_str());
+            char local[4096] {}, why[256] {};
+            if (!s.assets->resolve(s.host, &ref, local, sizeof(local), why, sizeof(why))) {
+                message = "cannot resolve " + relative + ": " + why;
+                return false;
+            }
+            const std::string resolved = local;
+            if (resolved.size() <= relative.size() || resolved.compare(resolved.size() - relative.size(), relative.size(), relative) != 0) {
+                message = "a resolved sample is not in the patch's folder tree: " + relative;
+                return false;
+            }
+            const std::string thisRoot = resolved.substr(0, resolved.size() - relative.size());
+            if (!root.empty() && root != thisRoot) {
+                message = "samples resolve to more than one folder";
+                return false;
+            }
+            root = thisRoot;
+            if (std::none_of(e.assets.begin(), e.assets.end(), [&](const oscairn_asset_ref_t& a) { return !std::strcmp(a.path, ref.path); }))
+                e.assets.push_back(ref);
+        }
+        if (!root.empty())
+            directory = root;
+    }
+    if (!e.synth.loadSfzString(directory + "/patch.sfz", e.patch.text)) {
+        message = "the patch could not be loaded";
         return false;
-    collectRetired(s);
-    s.patch = patch;
-    if (s.active)
-        delete s.pending.exchange(e.release()); // replaces one the audio thread never took
-    else
-        s.prepared = std::move(e);
+    }
     return true;
 }
 
-void endNotes(Plugin& s, const clap_output_events_t* out, uint32_t time)
+std::unique_ptr<Engine> makeEngine(const Plugin& s, const Patch& patch, const oscairn_asset_ref_t* base, std::string& message)
 {
+    std::unique_ptr<Engine> e { new Engine };
+    e->patch = patch;
+    if (!loadPatch(s, *e, base, message))
+        return nullptr;
+    return e;
+}
+
+void collectRetired(Plugin& s) { delete s.retired.exchange(nullptr); }
+
+// Audio thread
+
+void endNote(const clap_output_events_t* out, const Note& n, uint32_t time)
+{
+    clap_event_note_t end {};
+    end.header = { sizeof(end), time, CLAP_CORE_EVENT_SPACE_ID, CLAP_EVENT_NOTE_END, 0 };
+    end.note_id = n.id;
+    end.port_index = 0;
+    end.channel = n.channel;
+    end.key = n.key;
+    out->try_push(out, &end.header);
+}
+
+void endFinishedNotes(Plugin& s, const clap_output_events_t* out, uint32_t time)
+{
+    size_t kept = 0;
     for (size_t i = 0; i < s.noteCount; ++i) {
-        clap_event_note_t end {};
-        end.header = { sizeof(end), time, CLAP_CORE_EVENT_SPACE_ID, CLAP_EVENT_NOTE_END, 0 };
-        end.note_id = s.notes[i].id;
-        end.port_index = 0;
-        end.channel = s.notes[i].channel;
-        end.key = s.notes[i].key;
-        out->try_push(out, &end.header);
+        const Note& n = s.notes[i];
+        Engine* e = s.contexts[n.context].engine.get();
+        if (!e || e->synth.getNumActiveVoicesForNote(n.key) == 0)
+            endNote(out, n, time);
+        else
+            s.notes[kept++] = n;
     }
-    s.noteCount = 0;
+    s.noteCount = kept;
 }
 
-void startNote(Plugin& s, int32_t id, int16_t channel, int16_t key)
+void applySelections(Plugin& s)
 {
-    if (s.noteCount < maxNotes)
-        s.notes[s.noteCount++] = { id, channel, key };
+    uint32_t tail = s.selectionTail.load(std::memory_order_relaxed);
+    const uint32_t head = s.selectionHead.load(std::memory_order_acquire);
+    for (; tail != head; ++tail) {
+        const Selection sel = s.selections[tail % selectionCapacity];
+        for (int ch = 0; ch < 16; ++ch) {
+            if (sel.channel >= 0 && sel.channel != ch)
+                continue;
+            const uint32_t old = s.channelContext[ch];
+            s.contexts[old].selectedChannels.fetch_and(~(1u << ch), std::memory_order_release);
+            s.contexts[sel.context].selectedChannels.fetch_or(1u << ch, std::memory_order_release);
+            s.channelContext[ch] = sel.context;
+        }
+        s.contexts[sel.context].queued.fetch_sub(1, std::memory_order_release);
+    }
+    s.selectionTail.store(tail, std::memory_order_release);
 }
 
-void applyEvent(Plugin& s, sfz::Sfizz& synth, const clap_event_header_t* h, int delay)
+bool matches(const Note& note, int32_t id, int16_t channel, int16_t key)
+{
+    return (id < 0 || note.id == id) && (channel < 0 || note.channel == channel) && (key < 0 || note.key == key);
+}
+
+void applyEvent(Plugin& s, const clap_event_header_t* h, int delay)
 {
     if (h->space_id != CLAP_CORE_EVENT_SPACE_ID)
         return;
@@ -130,16 +267,44 @@ void applyEvent(Plugin& s, sfz::Sfizz& synth, const clap_event_header_t* h, int 
     case CLAP_EVENT_NOTE_OFF:
     case CLAP_EVENT_NOTE_CHOKE: {
         const auto* n = reinterpret_cast<const clap_event_note_t*>(h);
-        if (n->port_index > 0 || n->key < 0 || n->key > 127)
+        if (n->port_index > 0 || n->key > 127)
             return;
-        // A velocity-0 note-on stays a note-on (Oscairn RFC 0005); sfizz needs a velocity
-        // above 0 to start a voice, so use the smallest one it distinguishes.
         const float velocity = static_cast<float>(std::min(1.0, std::max(n->velocity, 0.0)));
         if (h->type == CLAP_EVENT_NOTE_ON) {
-            synth.hdNoteOn(delay, n->key, std::max(velocity, 1.0f / 127.0f));
-            startNote(s, n->note_id, n->channel, n->key);
-        } else {
-            synth.hdNoteOff(delay, n->key, velocity);
+            if (n->channel < 0 || n->channel > 15 || n->key < 0)
+                return;
+            const uint32_t context = s.channelContext[n->channel];
+            // A velocity-0 note-on stays a note-on (Oscairn RFC 0005); sfizz needs a velocity
+            // above 0 to start a voice, so use the smallest one it distinguishes.
+            if (Engine* e = s.contexts[context].engine.get())
+                e->synth.hdNoteOn(delay, n->key, std::max(velocity, 1.0f / 127.0f));
+            if (s.noteCount < maxNotes)
+                s.notes[s.noteCount++] = { n->note_id, n->channel, n->key, context };
+            return;
+        }
+        // Note-off and choke address the notes they match, in the context each started in
+        for (size_t i = 0; i < s.noteCount; ++i) {
+            const Note& note = s.notes[i];
+            Engine* e = s.contexts[note.context].engine.get();
+            if (!e || !matches(note, n->note_id, n->channel, n->key))
+                continue;
+            if (h->type == CLAP_EVENT_NOTE_OFF)
+                e->synth.hdNoteOff(delay, note.key, velocity);
+            else
+                e->synth.fadeOutNote(delay, note.key, static_cast<int>(s.chokeFrames));
+        }
+        break;
+    }
+    case CLAP_EVENT_NOTE_EXPRESSION: {
+        const auto* x = reinterpret_cast<const clap_event_note_expression_t*>(h);
+        if (x->port_index > 0 || x->expression_id != CLAP_NOTE_EXPRESSION_VOLUME)
+            return;
+        const float gain = static_cast<float>(std::min(4.0, std::max(x->value, 0.0)));
+        for (size_t i = 0; i < s.noteCount; ++i) {
+            const Note& note = s.notes[i];
+            if (Engine* e = s.contexts[note.context].engine.get())
+                if (matches(note, x->note_id, x->channel, x->key))
+                    e->synth.setNoteGain(note.key, gain);
         }
         break;
     }
@@ -147,21 +312,27 @@ void applyEvent(Plugin& s, sfz::Sfizz& synth, const clap_event_header_t* h, int 
         const auto* m = reinterpret_cast<const clap_event_midi_t*>(h);
         if (m->port_index > 0)
             return;
+        const int channel = m->data[0] & 0x0f;
         const uint8_t kind = m->data[0] & 0xf0, a = m->data[1] & 0x7f, b = m->data[2] & 0x7f;
+        if (kind == 0x90 || kind == 0x80) {
+            clap_event_note_t n {};
+            n.header = { sizeof(n), h->time, CLAP_CORE_EVENT_SPACE_ID,
+                         static_cast<uint16_t>(kind == 0x90 && b ? CLAP_EVENT_NOTE_ON : CLAP_EVENT_NOTE_OFF), 0 };
+            n.note_id = -1;
+            n.channel = static_cast<int16_t>(channel);
+            n.key = a;
+            n.velocity = b / 127.0;
+            applyEvent(s, &n.header, delay);
+            return;
+        }
+        Engine* e = s.contexts[s.channelContext[channel]].engine.get();
+        if (!e)
+            return;
         switch (kind) {
-        case 0x90:
-            if (b) {
-                synth.noteOn(delay, a, b);
-                startNote(s, -1, m->data[0] & 0x0f, a);
-                break;
-            }
-            synth.noteOff(delay, a, 0);
-            break;
-        case 0x80: synth.noteOff(delay, a, b); break;
-        case 0xb0: synth.cc(delay, a, b); break;
-        case 0xe0: synth.pitchWheel(delay, (b << 7 | a) - 8192); break;
-        case 0xd0: synth.channelAftertouch(delay, a); break;
-        case 0xa0: synth.polyAftertouch(delay, a, b); break;
+        case 0xb0: e->synth.hdcc(delay, a, b / 127.0f); break;
+        case 0xe0: e->synth.pitchWheel(delay, (b << 7 | a) - 8192); break;
+        case 0xd0: e->synth.channelAftertouch(delay, a); break;
+        case 0xa0: e->synth.polyAftertouch(delay, a, b); break;
         default: break;
         }
         break;
@@ -176,16 +347,22 @@ void applyEvent(Plugin& s, sfz::Sfizz& synth, const clap_event_header_t* h, int 
 bool init(const clap_plugin_t* p)
 {
     auto& s = self(p);
-    s.prepared = makeEngine(s, Patch {});
-    return s.prepared != nullptr;
+    if (s.host->get_extension)
+        s.assets = static_cast<const oscairn_host_assets_t*>(s.host->get_extension(s.host, OSCAIRN_EXT_ASSETS));
+    std::string message;
+    Context& c = s.contexts[0];
+    c.engine = makeEngine(s, Patch {}, nullptr, message);
+    c.prepared = true;
+    std::snprintf(c.name, sizeof(c.name), "%s", "Default");
+    c.selectedChannels = 0xffff;
+    return c.engine != nullptr;
 }
 
 void destroy(const clap_plugin_t* p)
 {
     auto& s = self(p);
-    delete s.pending.exchange(nullptr);
+    delete s.pendingDefault.exchange(nullptr);
     collectRetired(s);
-    delete s.audio;
     delete &s;
 }
 
@@ -194,16 +371,13 @@ bool activate(const clap_plugin_t* p, double rate, uint32_t, uint32_t maxFrames)
     auto& s = self(p);
     s.sampleRate = rate;
     s.maxFrames = std::max<uint32_t>(1, maxFrames);
-    s.left.assign(s.maxFrames, 0.0f);
-    s.right.assign(s.maxFrames, 0.0f);
-    auto e = std::move(s.prepared);
-    if (e) {
-        e->synth.setSampleRate(static_cast<float>(rate));
-        e->synth.setSamplesPerBlock(static_cast<int>(s.maxFrames));
-    } else if (!(e = makeEngine(s, s.patch))) {
-        return false;
-    }
-    s.audio = e.release();
+    // A choke fades over 3 ms (Oscairn RFC 0018)
+    s.chokeFrames = std::max<uint32_t>(1, static_cast<uint32_t>(rate * 0.003 + 0.5));
+    for (auto* v : { &s.left, &s.right, &s.mixLeft, &s.mixRight })
+        v->assign(s.maxFrames, 0.0f);
+    for (auto& c : s.contexts)
+        if (c.engine)
+            configure(s, c.engine->synth);
     s.active = true;
     return true;
 }
@@ -212,12 +386,17 @@ void deactivate(const clap_plugin_t* p)
 {
     auto& s = self(p);
     s.active = false;
-    delete s.pending.exchange(nullptr);
+    if (Engine* e = s.pendingDefault.exchange(nullptr)) {
+        collectRetired(s);
+        s.retired.store(s.contexts[0].engine.release());
+        s.contexts[0].engine.reset(e);
+    }
     collectRetired(s);
-    s.prepared.reset(s.audio); // s.patch is the newest; activate rebuilds if they differ
-    if (s.prepared && (s.prepared->patch.text != s.patch.text || s.prepared->patch.directory != s.patch.directory))
-        s.prepared.reset();
-    s.audio = nullptr;
+    for (auto& c : s.contexts) {
+        c.sounding = 0;
+        if (c.engine)
+            c.engine->synth.allSoundOff();
+    }
     s.noteCount = 0;
 }
 
@@ -227,8 +406,9 @@ void stopProcessing(const clap_plugin_t*) {}
 void reset(const clap_plugin_t* p)
 {
     auto& s = self(p);
-    if (s.audio)
-        s.audio->synth.allSoundOff();
+    for (auto& c : s.contexts)
+        if (c.sounding.load() && c.engine)
+            c.engine->synth.allSoundOff();
 }
 
 clap_process_status process(const clap_plugin_t* p, const clap_process_t* process)
@@ -236,17 +416,27 @@ clap_process_status process(const clap_plugin_t* p, const clap_process_t* proces
     auto& s = self(p);
     if (process->audio_outputs_count < 1 || process->audio_outputs[0].channel_count < 2)
         return CLAP_PROCESS_ERROR;
-    // Take a new patch only once the main thread has collected the last replaced synth
+    const clap_output_events_t* out = process->out_events;
+
+    // A new default patch: only once the main thread has collected the last replaced one
     if (!s.retired.load(std::memory_order_acquire)) {
-        if (Engine* next = s.pending.exchange(nullptr, std::memory_order_acq_rel)) {
-            s.retired.store(s.audio, std::memory_order_release);
-            s.audio = next;
-            endNotes(s, process->out_events, 0); // the old synth's voices stop with it
+        if (Engine* next = s.pendingDefault.exchange(nullptr, std::memory_order_acq_rel)) {
+            size_t kept = 0; // the old synth's voices stop with it; its notes end now
+            for (size_t i = 0; i < s.noteCount; ++i) {
+                if (s.notes[i].context == 0)
+                    endNote(out, s.notes[i], 0);
+                else
+                    s.notes[kept++] = s.notes[i];
+            }
+            s.noteCount = kept;
+            s.retired.store(s.contexts[0].engine.release(), std::memory_order_release);
+            s.contexts[0].engine.reset(next);
             if (s.host->request_callback)
                 s.host->request_callback(s.host);
         }
     }
-    sfz::Sfizz& synth = s.audio->synth;
+    applySelections(s);
+
     float* outL = process->audio_outputs[0].data32[0];
     float* outR = process->audio_outputs[0].data32[1];
     const uint32_t frames = process->frames_count;
@@ -258,20 +448,43 @@ clap_process_status process(const clap_plugin_t* p, const clap_process_t* proces
             const auto* h = process->in_events->get(process->in_events, e);
             if (h->time >= start + n)
                 break;
-            applyEvent(s, synth, h, static_cast<int>(h->time >= start ? h->time - start : 0));
+            applyEvent(s, h, static_cast<int>(h->time >= start ? h->time - start : 0));
         }
-        float* buffers[2] = { s.left.data(), s.right.data() };
-        synth.renderBlock(buffers, n, 1);
-        std::copy(s.left.begin(), s.left.begin() + n, outL + start);
-        std::copy(s.right.begin(), s.right.begin() + n, outR + start);
+        std::fill(s.mixLeft.begin(), s.mixLeft.begin() + n, 0.0f);
+        std::fill(s.mixRight.begin(), s.mixRight.begin() + n, 0.0f);
+        for (uint32_t i = 0; i < contextCount; ++i) {
+            Context& c = s.contexts[i];
+            // Check the flags before the engine: an unused context's engine may be freed
+            if ((!c.selectedChannels.load(std::memory_order_acquire) && !c.sounding.load(std::memory_order_relaxed)) || !c.engine)
+                continue;
+            float* buffers[2] = { s.left.data(), s.right.data() };
+            c.engine->synth.renderBlock(sfz::AudioSpan<float>(buffers, 2, 0, n));
+            for (uint32_t k = 0; k < n; ++k) {
+                s.mixLeft[k] += s.left[k];
+                s.mixRight[k] += s.right[k];
+            }
+        }
+        std::copy(s.mixLeft.begin(), s.mixLeft.begin() + n, outL + start);
+        std::copy(s.mixRight.begin(), s.mixRight.begin() + n, outR + start);
     }
     for (; e < count; ++e)
-        applyEvent(s, synth, process->in_events->get(process->in_events, e), 0);
-    if (synth.getNumActiveVoices() == 0) {
-        endNotes(s, process->out_events, frames ? frames - 1 : 0);
-        return CLAP_PROCESS_SLEEP;
+        applyEvent(s, process->in_events->get(process->in_events, e), 0);
+
+    endFinishedNotes(s, out, frames ? frames - 1 : 0);
+    uint32_t notesPerContext[contextCount] {};
+    for (size_t i = 0; i < s.noteCount; ++i)
+        ++notesPerContext[s.notes[i].context];
+    bool anySound = false;
+    for (uint32_t i = 0; i < contextCount; ++i) {
+        Context& c = s.contexts[i];
+        const bool rendered = c.selectedChannels.load(std::memory_order_acquire) || c.sounding.load(std::memory_order_relaxed);
+        if (!rendered && !notesPerContext[i])
+            continue;
+        const bool sounding = notesPerContext[i] > 0 || (c.engine && c.engine->synth.getNumActiveVoices() > 0);
+        c.sounding.store(sounding ? 1 : 0, std::memory_order_release);
+        anySound = anySound || sounding;
     }
-    return CLAP_PROCESS_CONTINUE;
+    return anySound ? CLAP_PROCESS_CONTINUE : CLAP_PROCESS_SLEEP;
 }
 
 void onMainThread(const clap_plugin_t* p) { collectRetired(self(p)); }
@@ -314,8 +527,8 @@ bool notePortGet(const clap_plugin_t*, uint32_t index, bool isInput, clap_note_p
 
 const clap_plugin_note_ports_t notePorts { notePortCount, notePortGet };
 
-// State: a version line, then the directory and the SFZ text, each as a length line and
-// the bytes.
+// State: a version line, then the directory and the SFZ text of context 0, each as a length
+// line and the bytes.
 
 bool writeAll(const clap_ostream_t* stream, const std::string& data)
 {
@@ -358,6 +571,7 @@ bool readField(const std::string& data, size_t& at, std::string& field)
 
 bool stateLoad(const clap_plugin_t* p, const clap_istream_t* stream)
 {
+    auto& s = self(p);
     std::string data;
     char buffer[4096];
     for (;;) {
@@ -375,10 +589,142 @@ bool stateLoad(const clap_plugin_t* p, const clap_istream_t* stream)
     Patch patch;
     if (!readField(data, at, patch.directory) || !readField(data, at, patch.text) || at != data.size())
         return false;
-    return setPatch(self(p), patch);
+    std::string message;
+    auto e = makeEngine(s, patch, nullptr, message);
+    if (!e)
+        return false;
+    collectRetired(s);
+    s.patch = patch;
+    if (s.active)
+        delete s.pendingDefault.exchange(e.release()); // replaces one the audio thread never took
+    else
+        s.contexts[0].engine = std::move(e);
+    return true;
 }
 
 const clap_plugin_state_t state { stateSave, stateLoad };
+
+// Sound contexts (main thread, concurrently with process)
+
+uint32_t contextCapacity(const clap_plugin_t*) { return contextCount; }
+
+bool contextGet(const clap_plugin_t* p, uint32_t slot, oscairn_sound_context_info_t* info)
+{
+    auto& s = self(p);
+    if (slot >= contextCount || !info || !s.contexts[slot].prepared)
+        return false;
+    const Context& c = s.contexts[slot];
+    *info = {};
+    info->id = c.id;
+    std::memcpy(info->name, c.name, sizeof(c.name));
+    info->selected_channels = c.selectedChannels.load(std::memory_order_acquire);
+    // shortcut: 1 while the context sounds, not a voice count
+    info->active_voices = c.sounding.load(std::memory_order_acquire);
+    info->idle = !info->selected_channels && !c.queued.load(std::memory_order_acquire) && !info->active_voices;
+    return true;
+}
+
+uint32_t contextPrepare(const clap_plugin_t* p, const char* name, const oscairn_sound_parameter_t*, uint32_t count,
+                        const char* patchText, const oscairn_asset_ref_t* base, char* message, uint32_t capacity)
+{
+    auto& s = self(p);
+    auto fail = [&](const std::string& why) {
+        if (message && capacity)
+            std::snprintf(message, capacity, "%s", why.c_str());
+        return CLAP_INVALID_ID;
+    };
+    if (count)
+        return fail("this plugin has no parameters");
+    if (!patchText)
+        return fail("a patch is required");
+    Context* slot = nullptr;
+    for (uint32_t i = 1; i < contextCount && !slot; ++i)
+        if (!s.contexts[i].prepared)
+            slot = &s.contexts[i];
+    if (!slot || s.nextId == CLAP_INVALID_ID)
+        return fail("no free sound context");
+    Patch patch;
+    patch.text = patchText;
+    std::string why;
+    auto e = makeEngine(s, patch, base, why);
+    if (!e)
+        return fail(why);
+    slot->engine = std::move(e);
+    slot->id = s.nextId++;
+    std::snprintf(slot->name, sizeof(slot->name), "%s", name ? name : "");
+    slot->prepared = true;
+    return slot->id;
+}
+
+bool contextSelect(const clap_plugin_t* p, uint32_t id, int16_t channel)
+{
+    auto& s = self(p);
+    if (channel < -1 || channel > 15)
+        return false;
+    const uint32_t head = s.selectionHead.load(std::memory_order_relaxed);
+    if (head - s.selectionTail.load(std::memory_order_acquire) == selectionCapacity)
+        return false;
+    for (uint32_t i = 0; i < contextCount; ++i) {
+        Context& c = s.contexts[i];
+        if (!c.prepared || c.id != id)
+            continue;
+        c.queued.fetch_add(1, std::memory_order_relaxed);
+        s.selections[head % selectionCapacity] = { i, channel };
+        s.selectionHead.store(head + 1, std::memory_order_release);
+        return true;
+    }
+    return false;
+}
+
+bool contextDiscard(const clap_plugin_t* p, uint32_t id)
+{
+    auto& s = self(p);
+    if (id == 0)
+        return false;
+    for (uint32_t i = 1; i < contextCount; ++i) {
+        Context& c = s.contexts[i];
+        if (!c.prepared || c.id != id)
+            continue;
+        // Only the main thread queues selections, and notes only start on selected channels,
+        // so once all three are clear the audio thread no longer touches this synth.
+        if (c.selectedChannels.load(std::memory_order_acquire) || c.queued.load(std::memory_order_acquire)
+            || c.sounding.load(std::memory_order_acquire))
+            return false;
+        c.prepared = false;
+        c.engine.reset();
+        return true;
+    }
+    return false;
+}
+
+const oscairn_plugin_sound_contexts_t soundContexts { contextCapacity, contextGet, contextPrepare, contextSelect, contextDiscard, nullptr };
+
+// Asset dependencies: every context's resolved samples
+
+uint32_t dependencyCount(const clap_plugin_t* p)
+{
+    uint32_t n = 0;
+    for (auto& c : self(p).contexts)
+        if (c.prepared && c.engine)
+            n += static_cast<uint32_t>(c.engine->assets.size());
+    return n;
+}
+
+bool dependencyGet(const clap_plugin_t* p, uint32_t index, oscairn_asset_ref_t* ref)
+{
+    for (auto& c : self(p).contexts) {
+        if (!c.prepared || !c.engine)
+            continue;
+        if (index < c.engine->assets.size()) {
+            *ref = c.engine->assets[index];
+            return true;
+        }
+        index -= static_cast<uint32_t>(c.engine->assets.size());
+    }
+    return false;
+}
+
+const oscairn_plugin_asset_dependencies_t dependencies { dependencyCount, dependencyGet };
 
 const void* getExtension(const clap_plugin_t*, const char* id)
 {
@@ -388,6 +734,10 @@ const void* getExtension(const clap_plugin_t*, const char* id)
         return &notePorts;
     if (!std::strcmp(id, CLAP_EXT_STATE))
         return &state;
+    if (!std::strcmp(id, OSCAIRN_EXT_SOUND_CONTEXTS))
+        return &soundContexts;
+    if (!std::strcmp(id, OSCAIRN_EXT_ASSET_DEPENDENCIES))
+        return &dependencies;
     return nullptr;
 }
 

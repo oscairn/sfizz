@@ -7,7 +7,12 @@
 // Tests of the CLAP instrument through its entry point, with a minimal host.
 
 #include "plugin.h"
+#include <oscairn-clap/assets.h>
+#include <oscairn-clap/sound-contexts.h>
 #include <dlfcn.h>
+#include <atomic>
+#include <cstdlib>
+#include <new>
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -21,7 +26,31 @@ int failures = 0;
 #define CHECK(x) do { if (!(x)) { std::printf("FAILED %s:%d: %s\n", __FILE__, __LINE__, #x); ++failures; } } while (0)
 
 int callbacks = 0;
-const void* hostExtension(const clap_host_t*, const char*) { return nullptr; }
+// Allocation guard: counts allocations the processing thread makes inside process() (sfizz's
+// own loader threads may allocate meanwhile)
+thread_local bool guarded = false;
+std::atomic<int> guardedAllocations { 0 };
+
+// Assets: the test library "lib" maps to the sfizz test files folder; "missing" fails
+bool resolveAsset(const clap_host_t*, oscairn_asset_ref_t* ref, char* path, uint32_t capacity, char* message, uint32_t messageCapacity)
+{
+    if (std::strcmp(ref->library, "lib") != 0) {
+        std::snprintf(message, messageCapacity, "%s", "no such library");
+        return false;
+    }
+    std::string p = ref->path;
+    if (p.compare(0, 4, "sub/") == 0)
+        p = p.substr(4);
+    std::snprintf(path, capacity, "%s/%s", OSCAIRN_TEST_FILES, p.c_str());
+    std::snprintf(ref->sha256, sizeof(ref->sha256), "%s", "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef");
+    return true;
+}
+const oscairn_host_assets_t hostAssets { resolveAsset };
+bool offerAssets = false;
+const void* hostExtension(const clap_host_t*, const char* id)
+{
+    return offerAssets && !std::strcmp(id, OSCAIRN_EXT_ASSETS) ? &hostAssets : nullptr;
+}
 void hostRequest(const clap_host_t*) {}
 void hostCallback(const clap_host_t*) { ++callbacks; }
 const clap_host_t host { CLAP_VERSION_INIT, nullptr, "test", "", "", "1", hostExtension, hostRequest, hostRequest, hostCallback };
@@ -38,7 +67,10 @@ struct Events {
     static bool push(const clap_output_events_t* l, const clap_event_header_t* h)
     {
         auto* b = reinterpret_cast<const uint8_t*>(h);
+        const bool was = guarded; // the host's own storage is not the plugin's
+        guarded = false;
         static_cast<Events*>(l->ctx)->out.emplace_back(b, b + h->size);
+        guarded = was;
         return true;
     }
     template <class T> void add(const T& e)
@@ -46,12 +78,19 @@ struct Events {
         auto* b = reinterpret_cast<const uint8_t*>(&e);
         in.emplace_back(b, b + sizeof(T));
     }
-    void note(uint16_t type, uint32_t time, int32_t id, int16_t key, double velocity)
+    void note(uint16_t type, uint32_t time, int32_t id, int16_t key, double velocity, int16_t channel = 0)
     {
         clap_event_note_t n {};
         n.header = { sizeof(n), time, CLAP_CORE_EVENT_SPACE_ID, type, 0 };
-        n.note_id = id; n.port_index = 0; n.channel = 0; n.key = key; n.velocity = velocity;
+        n.note_id = id; n.port_index = 0; n.channel = channel; n.key = key; n.velocity = velocity;
         add(n);
+    }
+    void volume(uint32_t time, int32_t id, double value)
+    {
+        clap_event_note_expression_t x {};
+        x.header = { sizeof(x), time, CLAP_CORE_EVENT_SPACE_ID, CLAP_EVENT_NOTE_EXPRESSION, 0 };
+        x.expression_id = CLAP_NOTE_EXPRESSION_VOLUME; x.note_id = id; x.port_index = 0; x.channel = -1; x.key = -1; x.value = value;
+        add(x);
     }
     int ends(int32_t id) const
     {
@@ -78,7 +117,9 @@ struct Run {
         clap_process_t p {};
         p.frames_count = frames; p.audio_outputs = &out; p.audio_outputs_count = 1;
         p.in_events = &events.input; p.out_events = &events.output; p.steady_time = -1;
+        guarded = true;
         status = plugin->process(plugin, &p);
+        guarded = false;
         peak = 0;
         for (uint32_t i = 0; i < frames; ++i)
             peak = std::fmax(peak, std::fmax(std::fabs(left[i]), std::fabs(right[i])));
@@ -219,7 +260,138 @@ int main(int argc, char** argv)
         CHECK(save(plugin) == stateFor(silent));
         plugin->destroy(plugin);
     }
+    { // per-note NOTE_END: a released note ends while another keeps sounding
+        auto* plugin = create();
+        CHECK(load(plugin, stateFor("<region> sample=*sine ampeg_release=0.005\n")));
+        CHECK(plugin->activate(plugin, 48000, 1, 256));
+        Run run { plugin };
+        Events events;
+        events.note(CLAP_EVENT_NOTE_ON, 0, 1, 60, 1.0);
+        events.note(CLAP_EVENT_NOTE_ON, 0, 2, 64, 1.0);
+        run.block(events, 256);
+        events.note(CLAP_EVENT_NOTE_OFF, 0, 1, 60, 0.0);
+        for (int i = 0; i < 40 && !events.ends(1); ++i)
+            run.block(events, 256);
+        CHECK(events.ends(1) == 1);
+        CHECK(events.ends(2) == 0);
+        CHECK(run.peak > 0.1f && run.status == CLAP_PROCESS_CONTINUE);
+        // a choke fades note 2 over 3 ms (144 frames) and ends it, although its release is long
+        events.note(CLAP_EVENT_NOTE_CHOKE, 10, 2, 64, 0.0);
+        run.block(events, 256);
+        CHECK(run.left[5] != 0.0f);
+        CHECK(run.left[10 + 144 + 2] == 0.0f && run.left[255] == 0.0f);
+        CHECK(events.ends(2) == 1);
+        CHECK(run.status == CLAP_PROCESS_SLEEP);
+        plugin->deactivate(plugin);
+        plugin->destroy(plugin);
+    }
+    { // per-note volume scales only its note
+        auto* plugin = create();
+        CHECK(load(plugin, stateFor("<region> sample=*sine amp_veltrack=0\n")));
+        CHECK(plugin->activate(plugin, 48000, 1, 512));
+        Run run { plugin };
+        Events events;
+        events.note(CLAP_EVENT_NOTE_ON, 0, 5, 69, 1.0);
+        for (int i = 0; i < 4; ++i)
+            run.block(events, 512);
+        const float full = run.peak;
+        events.volume(0, 5, 0.25);
+        for (int i = 0; i < 8; ++i)
+            run.block(events, 512);
+        CHECK(std::fabs(run.peak - 0.25f * full) < 0.01f * full);
+        plugin->deactivate(plugin);
+        plugin->destroy(plugin);
+    }
+    { // sound contexts: prepare, select per channel, held notes keep theirs, discard rules
+        auto* plugin = create();
+        CHECK(load(plugin, stateFor("<region> sample=*silence\n")));
+        auto* ctx = static_cast<const oscairn_plugin_sound_contexts_t*>(plugin->get_extension(plugin, OSCAIRN_EXT_SOUND_CONTEXTS));
+        CHECK(ctx && ctx->capacity(plugin) == 8);
+        char message[256] {};
+        const uint32_t sineId = ctx->prepare(plugin, "Sine", nullptr, 0, "<region> sample=*sine ampeg_release=0.005", nullptr, message, sizeof(message));
+        CHECK(sineId != CLAP_INVALID_ID && sineId != 0);
+        CHECK(ctx->prepare(plugin, "Bad", nullptr, 1, "<region> sample=*sine", nullptr, message, sizeof(message)) == CLAP_INVALID_ID);
+        CHECK(plugin->activate(plugin, 48000, 1, 256));
+        Run run { plugin };
+        Events events;
+        CHECK(ctx->select(plugin, sineId, 1));
+        events.note(CLAP_EVENT_NOTE_ON, 0, 10, 69, 1.0, 0); // default (silent) context
+        run.block(events, 256);
+        CHECK(run.peak == 0.0f);
+        events.note(CLAP_EVENT_NOTE_ON, 0, 11, 69, 1.0, 1); // sine on channel 1
+        run.block(events, 256);
+        CHECK(run.peak > 0.1f);
+        oscairn_sound_context_info_t info {};
+        CHECK(ctx->get(plugin, 1, &info) && info.id == sineId && info.selected_channels == 2u);
+        // switching channel 1 back to the default keeps note 11 on the sine context
+        CHECK(ctx->select(plugin, 0, 1));
+        run.block(events, 256);
+        CHECK(run.peak > 0.1f);
+        CHECK(!ctx->discard(plugin, sineId)); // still sounding
+        events.note(CLAP_EVENT_NOTE_OFF, 0, 11, 69, 0.0, 1);
+        for (int i = 0; i < 40 && !events.ends(11); ++i)
+            run.block(events, 256);
+        run.block(events, 256);
+        CHECK(events.ends(11) == 1);
+        CHECK(ctx->get(plugin, 1, &info) && info.idle);
+        CHECK(ctx->discard(plugin, sineId));
+        CHECK(!ctx->get(plugin, 1, &info));
+        CHECK(!ctx->discard(plugin, 0));
+        plugin->deactivate(plugin);
+        plugin->destroy(plugin);
+    }
+    { // assets: samples resolved through the host and listed as dependencies
+        offerAssets = true;
+        auto* plugin = create();
+        auto* ctx = static_cast<const oscairn_plugin_sound_contexts_t*>(plugin->get_extension(plugin, OSCAIRN_EXT_SOUND_CONTEXTS));
+        auto* deps = static_cast<const oscairn_plugin_asset_dependencies_t*>(plugin->get_extension(plugin, OSCAIRN_EXT_ASSET_DEPENDENCIES));
+        oscairn_asset_ref_t base {};
+        std::snprintf(base.library, sizeof(base.library), "%s", "lib");
+        std::snprintf(base.path, sizeof(base.path), "%s", "sub");
+        char message[256] {};
+        const uint32_t id = ctx->prepare(plugin, "Kick", nullptr, 0, "<region> sample=kick.wav", &base, message, sizeof(message));
+        CHECK(id != CLAP_INVALID_ID);
+        CHECK(deps && deps->count(plugin) == 1);
+        oscairn_asset_ref_t ref {};
+        CHECK(deps->get(plugin, 0, &ref) && !std::strcmp(ref.path, "sub/kick.wav") && !std::strcmp(ref.library, "lib") && std::strlen(ref.sha256) == 64);
+        std::snprintf(base.library, sizeof(base.library), "%s", "missing");
+        CHECK(ctx->prepare(plugin, "Kick", nullptr, 0, "<region> sample=kick.wav", &base, message, sizeof(message)) == CLAP_INVALID_ID);
+        CHECK(std::strstr(message, "kick.wav") != nullptr);
+        CHECK(ctx->prepare(plugin, "Up", nullptr, 0, "<region> sample=../kick.wav", &base, message, sizeof(message)) == CLAP_INVALID_ID);
+        // the kick plays
+        CHECK(plugin->activate(plugin, 48000, 1, 256));
+        Run run { plugin };
+        Events events;
+        CHECK(ctx->select(plugin, id, -1));
+        events.note(CLAP_EVENT_NOTE_ON, 0, 1, 60, 1.0);
+        run.block(events, 256);
+        run.block(events, 256);
+        CHECK(run.peak > 0.01f);
+        plugin->deactivate(plugin);
+        plugin->destroy(plugin);
+        offerAssets = false;
+    }
+    // No allocation in any process call above
+    CHECK(guardedAllocations.load() == 0);
+    if (guardedAllocations.load())
+        std::printf("%d allocations while processing\n", guardedAllocations.load());
+
     clap_entry.deinit();
     std::printf(failures ? "%d failures\n" : "All CLAP tests passed\n", failures);
     return failures ? 1 : 0;
 }
+
+// Allocation guard (see `guarded`)
+void* operator new(std::size_t size)
+{
+    if (guarded)
+        guardedAllocations.fetch_add(1, std::memory_order_relaxed);
+    if (void* p = std::malloc(size ? size : 1))
+        return p;
+    throw std::bad_alloc();
+}
+void* operator new[](std::size_t size) { return operator new(size); }
+void operator delete(void* p) noexcept { std::free(p); }
+void operator delete[](void* p) noexcept { std::free(p); }
+void operator delete(void* p, std::size_t) noexcept { std::free(p); }
+void operator delete[](void* p, std::size_t) noexcept { std::free(p); }
