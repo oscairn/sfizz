@@ -7,6 +7,7 @@
 // A five-level pitch envelope with raw parameters (doc/oscairn-plan.md, section 4), as
 // measured on the reference (oscairn/measurement): it starts at the hold level, holds, then
 // moves to the attack, decay 1 and decay 2 levels and after note-off to the release level.
+// The hold time has its own measured table (pitchHoldSeconds).
 // Each move is a straight line in cents taking the decay table's full-scale time for its
 // index (1.5 times the time per 60 dB), whatever distance it covers. A level step is
 // 37.5 cents (raw 0-255, 128 = 0; 255 counts as +4800), scaled by depth / 64 (+63 counts
@@ -24,6 +25,11 @@ struct ElementPitchParameters {
     int32_t holdLevel { 128 }, attackLevel { 128 }, decay1Level { 128 }, decay2Level { 128 }, releaseLevel { 128 };
     int32_t depth { 20 }; // -64..+63
 };
+
+/**
+ * @brief Seconds the pitch envelope holds its hold level at a hold-time index.
+ */
+float pitchHoldSeconds(int32_t index) noexcept;
 
 /**
  * @brief Cents of a raw level (0-255) at a depth (-64..+63).

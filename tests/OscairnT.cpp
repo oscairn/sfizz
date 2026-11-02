@@ -421,3 +421,23 @@ TEST_CASE("[Oscairn] Envelope velocity shifts truncate, +63 counts as 64")
     p.timeVelocitySensitivity = -32;
     REQUIRE(sfz::oscairn::timeShifts(p, 60, 127).decay == -31); // toward zero
 }
+
+TEST_CASE("[Oscairn] Pitch envelope hold")
+{
+    REQUIRE(sfz::oscairn::pitchHoldSeconds(0) == 0.0f);
+    REQUIRE(sfz::oscairn::pitchHoldSeconds(64) == Approx(0.421f));
+    REQUIRE(sfz::oscairn::pitchHoldSeconds(48) == Approx(std::sqrt(0.075f * 0.421f)));
+    sfz::oscairn::ElementPitchParameters p;
+    p.holdLevel = 192;
+    p.attackLevel = p.decay1Level = p.decay2Level = 128;
+    p.holdTime = 64;
+    p.attackTime = 64;
+    p.depth = 63;
+    sfz::oscairn::ElementPitchEnvelope eg;
+    eg.setSampleRate(48000);
+    eg.start(p, 0);
+    std::vector<float> c(48000, 0.0f);
+    eg.processAdd(absl::MakeSpan(c));
+    REQUIRE(c[static_cast<size_t>(0.41 * 48000)] == Approx(2400.0f));
+    REQUIRE(c[static_cast<size_t>(0.6 * 48000)] < 2400.0f);
+}

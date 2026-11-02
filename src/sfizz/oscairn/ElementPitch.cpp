@@ -19,6 +19,24 @@ float pitchLevelCents(int32_t level, int32_t depth) noexcept
     return static_cast<float>(steps) * 37.5f * static_cast<float>(d) / 64.0f;
 }
 
+float pitchHoldSeconds(int32_t index) noexcept
+{
+    // Measured at 16, 32, 64 and 80 (0.027, 0.075, 0.421, 0.978 s); interpolated in log time,
+    // extended beyond 80 at the 64-80 slope.
+    // shortcut: four knots, no checks between them yet
+    static constexpr float knots[4] = { 16.0f, 32.0f, 64.0f, 80.0f };
+    static constexpr float seconds[4] = { 0.027f, 0.075f, 0.421f, 0.978f };
+    if (index <= 0)
+        return 0.0f;
+    if (index <= 16)
+        return seconds[0] * static_cast<float>(index) / 16.0f;
+    int i = 1;
+    while (i < 3 && index > knots[i])
+        ++i;
+    const float f = (static_cast<float>(index) - knots[i - 1]) / (knots[i] - knots[i - 1]);
+    return std::exp(std::log(seconds[i - 1]) + f * (std::log(seconds[i]) - std::log(seconds[i - 1])));
+}
+
 void ElementPitchEnvelope::start(const ElementPitchParameters& parameters, int delay) noexcept
 {
     p_ = parameters;
@@ -47,8 +65,8 @@ void ElementPitchEnvelope::enter(Stage stage) noexcept
     case Stage::Release: index = p_.releaseTime; level = p_.releaseLevel; break;
     default: step_ = 0.0; left_ = 0; return;
     }
-    // shortcut: a hold time above 0 uses the decay table too (not measured yet)
-    left_ = std::max(1L, std::lround(1.5 * decaySecondsPer60dB(index) * sampleRate_));
+    const double seconds = stage == Stage::Hold ? pitchHoldSeconds(index) : 1.5 * decaySecondsPer60dB(index);
+    left_ = std::max(1L, std::lround(seconds * sampleRate_));
     target_ = pitchLevelCents(level, p_.depth);
     step_ = (target_ - cents_) / static_cast<double>(left_);
 }
