@@ -320,6 +320,7 @@ void ElementFilter::start(const ElementFilterParameters& parameters, int note, i
 
 void ElementFilter::update(float cents) noexcept
 {
+    cents_ = cents;
     const float shift = keyCents_ + cents;
     const float hz = filterCutoffHz(p_.cutoff, shift);
     Section& first = sections_[0];
@@ -379,7 +380,8 @@ void ElementFilter::process(absl::Span<float> left, absl::Span<float> right, abs
     const bool stereo = !right.empty();
     const size_t n = stereo ? std::min(left.size(), right.size()) : left.size();
     for (size_t i = 0; i < n; ++i) {
-        if (!cents.empty() && i % kControlInterval == 0 && i < cents.size())
+        // the coefficients only change with the cutoff
+        if (!cents.empty() && i % kControlInterval == 0 && i < cents.size() && cents[i] != cents_)
             update(cents[i]);
         for (int ch = 0; ch < (stereo ? 2 : 1); ++ch) {
             float& sample = ch == 0 ? left[i] : right[i];

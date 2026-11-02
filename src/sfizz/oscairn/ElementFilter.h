@@ -108,6 +108,7 @@ private:
     bool parallel_ { false }; // the two sections summed instead of in series
     float damping_ { 2.0f };
     float keyCents_ { 0.0f };
+    float cents_ { 0.0f }; // the shift the coefficients are designed for
     float gain_ { 1.0f };
 };
 
