@@ -642,12 +642,94 @@ between 44.1, 48 and 96 kHz. Below the valid spans the tables hold measured valu
 are not checked (attack 2.7-7.8 ms; decay and release below 56, where the measured falls
 are not straight lines in dB).
 
-Open in milestone 2: decay above 103 (measured up to 10 % shorter than the octave rule;
-the probes hold only 16 s, so whether this is the reference or the measurement is
-unresolved); attack above 111 (needs every index of an octave); an attack that starts from
-an initial level, and an attack to a level below 127 (index 96 to level 64 took 0.385 s
-against 0.337 s for a constant rate: neither constant rate nor constant time); the time
-velocity and key-follow parameters; velocity and level curves; element level.
+The open items above were taken up in the second session (below).
+
+### Second session (2026-11-02): amp envelope finished, velocity and pan, pitch envelope, Oscairn integration
+
+Reference batches `lv1`, `lv2`, `eg4`-`eg6`, `pf1`, `pf2` (about 640 renders, 44.1 kHz,
+same probe set-up as above).
+
+**Amp envelope** (`781b0147`):
+
+- *Attacks between levels.* On a grid of 25 (initial, attack) level pairs at one index the
+  attack is still a straight line in amplitude, and its time is the index's full-scale time
+  times the larger level's amplitude times a factor that depends only on the ratio of the
+  smaller to the larger level (in level steps), the same up and down: 2.0 at 1/16, 3.8 at
+  1/4, 6.1 at 1/2, 9.0 at 7/8. From or to level 0 it is 1.29, 1.17, 1.08 and 1 for the
+  other level at 32, 64, 96, 127. 27 renders compared (index 80, and 96 where the render
+  held long enough): all within 2.5 % at 44.1, 48 and 96 kHz, largest 2.3 %; 16 of them
+  were not used for the fit. Ratios between 0 and 1/16 are not measured.
+- *Velocity and key scaling of times.* Each shifts the segment's index: velocity by
+  sensitivity * velocity / 128 steps, the key by sensitivity * semitones from the centre / 64
+  steps, both truncated toward zero with +63 counting as 64 (a 16-velocity fine grid at
+  +32 and a 9-point grid at +63 pinned the rounding). The velocity shift applies to the
+  segments the segment switch selects (attack; attack + decay; decay; attack + release;
+  all: seen on the reference at all five; the engine comparison covers "all"). The release gets the key shift times 2^((adjustment-127)/32),
+  truncated. 52 renders compared at three rates: 50 within 2.5 %; the two outside shift the
+  decay below index 56, outside its valid span.
+- *Tables.* Every attack index from 112 to 127 measured (re-measured indices agree within
+  0.3 %); decays above 104 scaled to three renders that held 40 s (the earlier 16 s renders
+  at 113 and 115 read 5-7 % shorter); releases at 77-95 measured, 0.6-4.1 % below the octave
+  rule. Valid spans: attack 40-127, decay 56-103 (105-117 fitted only), release 56-121.
+  47 checks, all within 2.5 % at 44.1, 48 and 96 kHz (attack 2.25 %, decay 0.21 %, release
+  0.68 %).
+
+**Velocity, level and pan** (`0509c480`):
+
+- Element level is the level law, `(level/127)^2`: the converter writes it as `volume`
+  (40 log10(level/127) dB); no engine change.
+- Velocity: velocity plus offset (at most 127), then one of five curves (curve 3 changes
+  nothing; 0, 1, 2 and 4 are measured at 12 velocities and interpolated in dB), then the
+  sensitivity: positive values scale the distance below 127 by k, negative ones the distance
+  above 1, with k = s/32 up to 32 and 31.5/(63.5 - s) above; gain (result/127)^2.
+  `oscairn_amp_velsens`, `_veloffset`, `_velcurve`; the converter sets `amp_veltrack=0`.
+- Element pan is a balance: the far side falls as sin^2 of its distance from the edge, the
+  near side keeps its level (centre: both full). `oscairn_pan`.
+- Compared with 451 reference levels at three rates (all of them used to choose the rules,
+  so these are checks against the fitting renders): above -24 dB, 375 of 381 within
+  0.4 dB, largest 0.70 dB; below -24 dB, largest 1.27 dB. The reference's levels fall on a
+  grid of about 0.375 dB steps whose rounding rule is not identified; a 0.2 dB tolerance is
+  not met. Proposed: 0.4 dB above -24 dB.
+- Part level: Part volume is 40 log10(v/127) and Part pan equal power,
+  θ = (π/2)(P-1)/126, for sample Parts too (5 volume and 6 pan renders, within 0.05 dB and
+  0.2 dB). They stay in the converter.
+
+**Pitch envelope** (`adc846f3`, `ed7b70df`): levels in steps of 37.5 cents times depth/64
+(255 and +63 count as the full end), moves straight in cents over the amp decay table's
+full-scale time, a measured hold table. 15 static offsets within 1 cent except +4800 at full
+depth, where the reference stopped at 4573 cents (a pitch ceiling, not modelled); attack
+glides within 0.2 % and releases within 2.1 %, at three rates. Depth and time sensitivity
+to velocity and key: not measured.
+
+**Not done in this session:**
+
+- *Filters.* LPF12+HPF12 renders with white noise (22 cutoffs, 4 resonances, 3 HPF cutoffs)
+  and three other types at 3 cutoffs are recorded. Up to cutoff 512 the response is a
+  two-pole low-pass with Q about 0.5 (fits within 0.4 dB rms), corner 89 Hz at 256 to 480 Hz
+  at 512; above that a two-pole model no longer fits. Resonance at cutoff 512 peaks 6, 18, 27
+  and 35 dB at 32, 64, 96 and 127. No filter in the engine yet.
+- *FEG*, *element LFO*: with the element LFO's pitch or amplitude depth at 16-127, any speed,
+  delay and fade-in (including 19 and 19, as factory sounds use), the reference rendered no
+  modulation at all (under 0.1 cent and 0.02 dB). Something else enables it; not found.
+
+**Oscairn integration** (`dd73d7aa`, `0a245ce1`): per-note voice count, gain and fade-out in
+`sfz::Synth` (upstreamable); the CLAP plugin ends each note (NOTE_END) when its context has
+no voice left on its key, fades a choked key over 3 ms, applies per-note volume, offers
+eight native sound contexts and resolves samples through `oscairn.assets` with
+`oscairn.asset-dependencies` (patches with `#include`, or whose samples resolve to more than
+one folder, are refused). Tests cover each, and count allocations by the processing thread
+inside `process()`: none (a deliberate allocation makes the test fail). Oscairn's
+`kick-clap-scan` lists the plugin, and `oscairn-render` loads and runs it (silent: it cannot
+set a patch). Oscairn's host tests were not run against it. Notes sharing a key in one
+context end and are choked together; per-note volume acts per key; the snapshot (exclusive
+state) of contexts is not implemented; contexts do not share decoded samples.
+
+**Factory waveforms** (RFC 0013 step 1): all 7,647 waveform SFZ files of the imported library
+load in the fork without errors or unknown opcodes (86,676 regions) and sound on their root
+note or on 36, 60 or 84. Loops: 40 looped waveforms picked at random (seed 2), rendered for
+30 s at their root note: no click larger than 1.62 times the strongest 3rd difference in its
+50 ms neighbourhood (Clarinet3 ff St at 8.05 s; proposed criterion, not listened to). The
+Salamander piano is not here.
 
 ### Upstream merge test (2026-11-01)
 
