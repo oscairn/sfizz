@@ -373,26 +373,156 @@ void ElementFilter::update(float cents) noexcept
     }
 }
 
+#if defined(__GNUC__) // vector extensions; other compilers take the per-sample path
+namespace {
+// One sample of a section whose reference-rate delay is the allpass alone (delay_ 0: 48 and
+// 96 kHz), with the delays' states in locals. run()'s equations with the allpass's output
+// substituted, so that each state depends on the previous ones through four multiply-adds
+// instead of about nine (the loop is bound by that latency); the output is picked by
+// 0/1 weights and the one-pole is the same equations with its own coefficients, which
+// leaves no branches in the loop.
+struct DirectCoefficients {
+    // high = inv x - ci band' - ki low'; band = kf high + k band';
+    // low = kl low' + kx x + kf band' + kfg band; out = wh high + wb band + wl low
+    float inv, ci, ki, kf, k, kl, kx, kfg;
+    float c1, c2, c1m, c2m; // allpass of value v: s1 = s2' - c1 s1' + c1m v; s2 = c2m v - c2 s1'
+    float wh, wb, wl;
+};
+// The two channels as the lanes of a vector: the states of both sections then fit in
+// registers with the coefficients
+typedef float Pair __attribute__((vector_size(8)));
+struct DirectState {
+    Pair low1, low2, band1, band2;
+};
+inline Pair directRun(const DirectCoefficients& c, DirectState& s, Pair x) noexcept
+{
+    const Pair low1 = s.low1, band1 = s.band1;
+    const Pair high = c.inv * x - c.ci * band1 - c.ki * low1;
+    const Pair band = c.kf * high + c.k * band1;
+    const Pair low = (c.kl * low1 + c.kx * x + c.kf * band1) + c.kfg * band;
+    // the newest value last, to keep it off the longer path
+    s.low1 = (s.low2 - c.c1 * low1) + c.c1m * low;
+    s.low2 = c.c2m * low - c.c2 * low1;
+    s.band1 = (s.band2 - c.c1 * band1) + c.c1m * band;
+    s.band2 = c.c2m * band - c.c2 * band1;
+    return c.wh * high + c.wb * band + c.wl * low;
+}
+} // namespace
+
+template <int Channels, int Mode>
+void ElementFilter::runDirect(float* const* channels, size_t n) noexcept
+{
+    // Mode: 0 no section, 1 one, 2 two in series, 3 two in parallel
+    auto coefficients = [](const Section& s) {
+        DirectCoefficients c;
+        c.c1 = s.c1;
+        c.c2 = s.c2;
+        c.c1m = s.c1 * (1.0f - s.c2);
+        c.c2m = 1.0f - s.c2 * s.c2;
+        c.wh = c.wb = c.wl = 0.0f;
+        if (s.output == Output::OnePole) { // y = (f x + (1 - f) y') inv
+            c.inv = c.ci = c.ki = c.kf = c.k = c.kfg = 0.0f;
+            c.kl = (1.0f - s.f) * s.inv;
+            c.kx = s.f * s.inv;
+            c.wl = 1.0f;
+            return c;
+        }
+        c.inv = s.inv;
+        c.ci = s.cs * s.inv;
+        c.ki = s.k * s.inv;
+        c.kf = s.k * s.f;
+        c.k = c.kl = s.k;
+        c.kx = 0.0f;
+        c.kfg = s.k * s.f * s.g;
+        switch (s.output) {
+        case Output::High: c.wh = 1.0f; break;
+        case Output::Band: c.wb = 1.0f; break;
+        case Output::Notch: c.wh = c.wl = 1.0f; break;
+        case Output::LowMinusBand: c.wl = 1.0f, c.wb = -1.0f; break;
+        default: c.wl = 1.0f;
+        }
+        return c;
+    };
+    const DirectCoefficients c0 = coefficients(sections_[0]), c1 = coefficients(sections_[1]);
+    auto load = [](const Section& s) {
+        return DirectState { Pair { s.low[0].s1, s.low[1].s1 }, Pair { s.low[0].s2, s.low[1].s2 },
+            Pair { s.band[0].s1, s.band[1].s1 }, Pair { s.band[0].s2, s.band[1].s2 } };
+    };
+    auto store = [](Section& s, const DirectState& st) {
+        for (int ch = 0; ch < 2; ++ch) {
+            s.low[ch].s1 = st.low1[ch], s.low[ch].s2 = st.low2[ch];
+            s.band[ch].s1 = st.band1[ch], s.band[ch].s2 = st.band2[ch];
+        }
+    };
+    DirectState a = load(sections_[0]), b = load(sections_[1]);
+    const float gain = gain_;
+    float* left = channels[0];
+    float* right = channels[1];
+    for (size_t i = 0; i < n; ++i) {
+        Pair x = { left[i], Channels == 2 ? right[i] : 0.0f };
+        if (Mode == 1)
+            x = directRun(c0, a, x);
+        else if (Mode == 2)
+            x = directRun(c1, b, directRun(c0, a, x));
+        else if (Mode == 3)
+            x = directRun(c0, a, x) + directRun(c1, b, x);
+        x = gain * x;
+        left[i] = x[0];
+        if (Channels == 2)
+            right[i] = x[1];
+    }
+    store(sections_[0], a);
+    store(sections_[1], b);
+}
+
+template <int Channels>
+void ElementFilter::runDirect(float* const* channels, size_t n) noexcept
+{
+    if (stages_ == 0)
+        runDirect<Channels, 0>(channels, n);
+    else if (parallel_)
+        runDirect<Channels, 3>(channels, n);
+    else if (stages_ == 1)
+        runDirect<Channels, 1>(channels, n);
+    else
+        runDirect<Channels, 2>(channels, n);
+}
+#endif
+
 void ElementFilter::process(absl::Span<float> left, absl::Span<float> right, absl::Span<const float> cents) noexcept
 {
     if (!filterTypeSupported(p_.type))
         return;
     const bool stereo = !right.empty();
     const size_t n = stereo ? std::min(left.size(), right.size()) : left.size();
-    for (size_t i = 0; i < n; ++i) {
+    float* const channels[2] = { left.data(), right.data() };
+    for (size_t i0 = 0; i0 < n; i0 += kControlInterval) {
         // the coefficients only change with the cutoff
-        if (!cents.empty() && i % kControlInterval == 0 && i < cents.size() && cents[i] != cents_)
-            update(cents[i]);
-        for (int ch = 0; ch < (stereo ? 2 : 1); ++ch) {
-            float& sample = ch == 0 ? left[i] : right[i];
-            float x = sample;
-            if (parallel_) {
-                x = run(sections_[0], ch, sample) + run(sections_[1], ch, sample);
-            } else {
-                for (int s = 0; s < stages_; ++s)
-                    x = run(sections_[s], ch, x);
+        if (!cents.empty() && i0 < cents.size() && cents[i0] != cents_)
+            update(cents[i0]);
+        const size_t end = std::min<size_t>(n, i0 + kControlInterval);
+#if defined(__GNUC__)
+        if (delay_ == 0) {
+            float* const sub[2] = { channels[0] + i0, stereo ? channels[1] + i0 : nullptr };
+            if (stereo)
+                runDirect<2>(sub, end - i0);
+            else
+                runDirect<1>(sub, end - i0);
+            continue;
+        }
+#endif
+        for (size_t i = i0; i < end; ++i) {
+            for (int ch = 0; ch < (stereo ? 2 : 1); ++ch) {
+                float& sample = channels[ch][i];
+                float x = sample;
+                if (parallel_) {
+                    x = run(sections_[0], ch, sample) + run(sections_[1], ch, sample);
+                } else {
+                    for (int s = 0; s < stages_; ++s)
+                        x = run(sections_[s], ch, x);
+                }
+                sample = gain_ * x;
             }
-            sample = gain_ * x;
         }
     }
 }

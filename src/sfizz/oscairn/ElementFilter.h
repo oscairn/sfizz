@@ -22,6 +22,7 @@
 
 #pragma once
 #include <absl/types/span.h>
+#include <cstddef>
 #include <cstdint>
 
 namespace sfz {
@@ -96,6 +97,11 @@ private:
     void push(const Section& s, Delay& line, float value) const noexcept;
     float run(Section& s, int channel, float x) const noexcept;
     void update(float cents) noexcept;
+    // the loop for delay_ 0, `channels` 1 or 2
+    template <int Channels, int Mode>
+    void runDirect(float* const* channels, size_t n) noexcept;
+    template <int Channels>
+    void runDirect(float* const* channels, size_t n) noexcept;
 
     ElementFilterParameters p_;
     double sampleRate_ { 48000.0 };
