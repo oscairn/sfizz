@@ -17,6 +17,7 @@ const OpcodeSpec<int32_t> profileSpec { 0, Range<int32_t>(0, 1), kEnforceBounds 
 const OpcodeSpec<int32_t> bipolar64 { 0, Range<int32_t>(-64, 63), kEnforceBounds };
 const OpcodeSpec<int32_t> segments { 4, Range<int32_t>(0, 4), kEnforceBounds };
 const OpcodeSpec<int32_t> curves { 3, Range<int32_t>(0, 4), kEnforceBounds };
+const OpcodeSpec<int32_t> level255 { 128, Range<int32_t>(0, 255), kEnforceBounds };
 const OpcodeSpec<int32_t> note { 24, Range<int32_t>(0, 127), kEnforceBounds | kCanBeNote };
 }
 
@@ -61,6 +62,25 @@ bool parseRegionOpcode(const Opcode& opcode, RegionData& data)
     case hash("oscairn_amp_veloffset"): data.velocity.offset = opcode.read(index127); data.velocityEnabled = true; return true;
     case hash("oscairn_amp_velcurve"): data.velocity.curve = opcode.read(curves); data.velocityEnabled = true; return true;
     case hash("oscairn_pan"): data.pan = opcode.read(index127); data.panEnabled = true; return true;
+    case hash("oscairn_pitcheg_hold"): data.peg.holdTime = opcode.read(index127); data.pegEnabled = true; return true;
+    case hash("oscairn_pitcheg_attack"): data.peg.attackTime = opcode.read(index127); data.pegEnabled = true; return true;
+    case hash("oscairn_pitcheg_decay&"):
+    case hash("oscairn_pitcheg_decay&_level"): {
+        // the opcode hash replaces the segment number with &
+        const unsigned n = opcode.parameters.empty() ? 0 : opcode.parameters.back();
+        if (n < 1 || n > 2)
+            return false;
+        const bool level = opcode.lettersOnlyHash == hash("oscairn_pitcheg_decay&_level");
+        int32_t& v = level ? (n == 1 ? data.peg.decay1Level : data.peg.decay2Level) : (n == 1 ? data.peg.decay1Time : data.peg.decay2Time);
+        v = opcode.read(level ? level255 : index127);
+        data.pegEnabled = true;
+        return true;
+    }
+    case hash("oscairn_pitcheg_release"): data.peg.releaseTime = opcode.read(index127); data.pegEnabled = true; return true;
+    case hash("oscairn_pitcheg_hold_level"): data.peg.holdLevel = opcode.read(level255); data.pegEnabled = true; return true;
+    case hash("oscairn_pitcheg_attack_level"): data.peg.attackLevel = opcode.read(level255); data.pegEnabled = true; return true;
+    case hash("oscairn_pitcheg_release_level"): data.peg.releaseLevel = opcode.read(level255); data.pegEnabled = true; return true;
+    case hash("oscairn_pitcheg_depth"): data.peg.depth = opcode.read(bipolar64); data.pegEnabled = true; return true;
     default:
         return false;
     }

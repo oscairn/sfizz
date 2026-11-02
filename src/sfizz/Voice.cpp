@@ -7,6 +7,7 @@
 #include "Voice.h"
 #include "oscairn/ElementEnvelope.h"
 #include "oscairn/ElementLevel.h"
+#include "oscairn/ElementPitch.h"
 #include "Layer.h"
 #include "AudioBuffer.h"
 #include "Config.h"
@@ -279,6 +280,7 @@ struct Voice::Impl
 
     ADSREnvelope egAmplitude_ { resources_.getMidiState(), resources_.getCurves() };
     oscairn::ElementEnvelope oscairnAmpEG_; // replaces the amp EG when the region enables it
+    oscairn::ElementPitchEnvelope oscairnPitchEG_;
     float hostGain_ { 1.0f };
     int fadeDelay_ { -1 }; // a fade-out starts after this many frames; -1 when none
     int fadeLeft_ { 0 };
@@ -533,6 +535,11 @@ bool Voice::startVoice(Layer* layer, int delay, const TriggerEvent& event) noexc
     ModMatrix& modMatrix = resources.getModMatrix();
     modMatrix.initVoice(impl.id_, region.getId(), impl.initialDelay_);
     impl.saveModulationTargets(&region);
+    if (region.oscairn.pegEnabled) {
+        impl.oscairnPitchEG_.setSampleRate(impl.sampleRate_);
+        // fillWithData asks for pitch only once the initial delay has passed
+        impl.oscairnPitchEG_.start(region.oscairn.peg, 0);
+    }
     if (region.oscairn.ampegEnabled) {
         impl.oscairnAmpEG_.setSampleRate(impl.sampleRate_);
         impl.oscairnAmpEG_.start(region.oscairn.ampeg, impl.initialDelay_, impl.triggerEvent_.number,
@@ -597,6 +604,8 @@ void Voice::Impl::release(int delay) noexcept
     if (state_ != State::playing)
         return;
 
+    if (region_->oscairn.pegEnabled)
+        oscairnPitchEG_.release(delay);
     if (region_->oscairn.ampegEnabled) {
         if (oscairnAmpEG_.getRemainingDelay() > delay)
             switchState(State::cleanMeUp);
@@ -2059,6 +2068,9 @@ void Voice::Impl::pitchEnvelope(absl::Span<float> pitchSpan) noexcept
 
     if (float* mod = mm.getModulation(pitchTarget_))
         add<float>(absl::MakeSpan(mod, numFrames), pitchSpan);
+
+    if (region_->oscairn.pegEnabled)
+        oscairnPitchEG_.processAdd(pitchSpan);
 }
 
 void Voice::Impl::resetSmoothers() noexcept

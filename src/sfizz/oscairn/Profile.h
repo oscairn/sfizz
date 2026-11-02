@@ -13,6 +13,7 @@
 #include "../Opcode.h"
 #include "ElementEnvelope.h"
 #include "ElementLevel.h"
+#include "ElementPitch.h"
 
 namespace sfz {
 namespace oscairn {
@@ -29,6 +30,9 @@ struct RegionData {
     // Balance-law pan, after sfizz's pan stage
     bool panEnabled { false };
     int32_t pan { 64 };
+    // Pitch envelope, added to the voice's pitch in cents
+    bool pegEnabled { false };
+    ElementPitchParameters peg;
 };
 
 /**

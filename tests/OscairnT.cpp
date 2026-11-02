@@ -312,6 +312,63 @@ TEST_CASE("[Oscairn] Velocity and pan opcodes reach the voice")
     REQUIRE(left.second < 1e-6f);
 }
 
+TEST_CASE("[Oscairn] Pitch envelope levels and segment times")
+{
+    using sfz::oscairn::pitchLevelCents;
+    REQUIRE(pitchLevelCents(144, 63) == Approx(600.0f)); // +63 counts as 64
+    REQUIRE(pitchLevelCents(144, 32) == Approx(300.0f));
+    REQUIRE(pitchLevelCents(64, 32) == Approx(-1200.0f));
+    REQUIRE(pitchLevelCents(255, 32) == Approx(2400.0f)); // 255 counts as +128 steps
+    REQUIRE(pitchLevelCents(0, 63) == Approx(-4800.0f));
+    for (double rate : { 44100.0, 48000.0, 96000.0 }) {
+        sfz::oscairn::ElementPitchParameters p;
+        p.holdLevel = 192;
+        p.attackLevel = p.decay1Level = p.decay2Level = 128;
+        p.attackTime = 64;
+        p.depth = 63;
+        p.releaseLevel = 160;
+        p.releaseTime = 56;
+        sfz::oscairn::ElementPitchEnvelope eg;
+        eg.setSampleRate(rate);
+        eg.start(p, 0);
+        const double full = 1.5 * sfz::oscairn::decaySecondsPer60dB(64);
+        eg.release(static_cast<int>(2 * rate));
+        std::vector<float> c(static_cast<size_t>(3 * rate), 0.0f);
+        eg.processAdd(absl::MakeSpan(c));
+        REQUIRE(c[0] == Approx(2400.0f).margin(1.0f));
+        REQUIRE(c[static_cast<size_t>(full / 2 * rate)] == Approx(1200.0f).margin(2.0f)); // straight line in cents
+        REQUIRE(c[static_cast<size_t>(1.9 * rate)] == Approx(0.0f).margin(0.01f));
+        const double rel = 1.5 * sfz::oscairn::decaySecondsPer60dB(56);
+        REQUIRE(c[static_cast<size_t>((2 + rel / 2) * rate)] == Approx(600.0f).margin(2.0f));
+        REQUIRE(c.back() == Approx(1200.0f).margin(0.01f));
+    }
+}
+
+TEST_CASE("[Oscairn] Pitch envelope opcodes")
+{
+    sfz::Synth synth;
+    synth.loadSfzString(fs::current_path() / "tests/TestFiles/oscairn.sfz", R"(
+        <control> oscairn_profile=1
+        <region> sample=*sine oscairn_pitcheg_hold=3 oscairn_pitcheg_attack=70 oscairn_pitcheg_decay1=71 oscairn_pitcheg_decay2=72
+            oscairn_pitcheg_release=73 oscairn_pitcheg_hold_level=10 oscairn_pitcheg_attack_level=20 oscairn_pitcheg_decay1_level=30
+            oscairn_pitcheg_decay2_level=40 oscairn_pitcheg_release_level=50 oscairn_pitcheg_depth=-12
+    )");
+    const auto& peg = synth.getRegionView(0)->oscairn.peg;
+    REQUIRE(synth.getRegionView(0)->oscairn.pegEnabled);
+    REQUIRE(peg.holdTime == 3);
+    REQUIRE(peg.attackTime == 70);
+    REQUIRE(peg.decay1Time == 71);
+    REQUIRE(peg.decay2Time == 72);
+    REQUIRE(peg.releaseTime == 73);
+    REQUIRE(peg.holdLevel == 10);
+    REQUIRE(peg.attackLevel == 20);
+    REQUIRE(peg.decay1Level == 30);
+    REQUIRE(peg.decay2Level == 40);
+    REQUIRE(peg.releaseLevel == 50);
+    REQUIRE(peg.depth == -12);
+    REQUIRE(synth.getUnknownOpcodes().empty());
+}
+
 TEST_CASE("[Oscairn] Attack time between two levels")
 {
     using sfz::oscairn::attackDurationFactor;
