@@ -14,6 +14,7 @@
 #include "ElementEnvelope.h"
 #include "ElementFilter.h"
 #include "ElementLevel.h"
+#include "ElementLfo.h"
 #include "ElementPitch.h"
 
 namespace sfz {
@@ -37,6 +38,9 @@ struct RegionData {
     // Element filter, ahead of sfizz's own filters
     bool filterEnabled { false };
     ElementFilterParameters filter;
+    // Element LFO (reference mode by default)
+    bool lfoEnabled { false };
+    ElementLfoParameters lfo;
 };
 
 /**

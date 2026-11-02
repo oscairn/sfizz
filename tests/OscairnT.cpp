@@ -11,6 +11,7 @@
 #include "sfizz/Region.h"
 #include "sfizz/oscairn/ElementEnvelope.h"
 #include "sfizz/oscairn/ElementFilter.h"
+#include "sfizz/oscairn/ElementLfo.h"
 #include "TestHelpers.h"
 #include "catch2/catch.hpp"
 #include <algorithm>
@@ -775,4 +776,214 @@ TEST_CASE("[Oscairn] A profile voice sounds the same at every sample rate")
         REQUIRE(20 * std::log10(r.right / ref.right) == Approx(0.0).margin(0.1));
         REQUIRE(r.release == Approx(ref.release).margin(0.01));
     }
+}
+
+namespace {
+// The element LFO's pitch cents over `seconds` at `rate`, with the controllers at `cc` (0-1)
+std::vector<float> lfoPitch(const sfz::oscairn::ElementLfoParameters& p, double rate, double seconds, float cc, unsigned clock = 0)
+{
+    sfz::oscairn::ElementLfo lfo;
+    lfo.setSampleRate(rate);
+    lfo.start(p, clock, 0);
+    std::vector<float> out;
+    const size_t block = 256;
+    std::vector<float> cents(block);
+    for (size_t done = 0; done < static_cast<size_t>(seconds * rate); done += block) {
+        lfo.beginBlock(block, cc, cc);
+        std::fill(cents.begin(), cents.end(), 0.0f);
+        lfo.addPitch(absl::MakeSpan(cents));
+        out.insert(out.end(), cents.begin(), cents.end());
+    }
+    return out;
+}
+std::vector<float> lfoGainDb(const sfz::oscairn::ElementLfoParameters& p, double rate, double seconds, float cc)
+{
+    sfz::oscairn::ElementLfo lfo;
+    lfo.setSampleRate(rate);
+    lfo.start(p, 0, 0);
+    std::vector<float> out;
+    const size_t block = 256;
+    std::vector<float> gain(block);
+    for (size_t done = 0; done < static_cast<size_t>(seconds * rate); done += block) {
+        lfo.beginBlock(block, cc, cc);
+        std::fill(gain.begin(), gain.end(), 1.0f);
+        lfo.applyGain(absl::MakeSpan(gain));
+        for (float g : gain)
+            out.push_back(20.0f * std::log10(g));
+    }
+    return out;
+}
+float at(const std::vector<float>& v, double rate, double t) { return v[static_cast<size_t>(std::lround(t * rate))]; }
+} // namespace
+
+TEST_CASE("[Oscairn] Element LFO, reference mode")
+{
+    // Measured: 4.848 Hz triangle from zero, falling; the element's speed, wave, delay, fade
+    // and depths change nothing; depth only through the controller-set destinations
+    sfz::oscairn::ElementLfoParameters p;
+    p.speed = 5;
+    p.wave = 2;
+    p.delay = 100;
+    p.fade = 100;
+    p.pitchDepth = 127;
+    p.ampDepth = 127;
+    p.filterDepth = 127;
+    p.pitchCC = 1;
+    p.pitchRatio = 63;
+    const double period = 1.0 / 4.848;
+    // p-p 1118 * 2^((126 + 127 - 253) / 16) = 1118 cents at controller 127
+    for (double rate : { 44100.0, 48000.0, 88200.0, 96000.0, 192000.0 }) {
+        INFO("rate " << rate);
+        const auto c = lfoPitch(p, rate, 1.0, 1.0f);
+        REQUIRE(at(c, rate, 0.0) == Approx(0.0f).margin(0.5f));
+        REQUIRE(at(c, rate, 0.25 * period) == Approx(-559.0f).margin(1.0f));
+        REQUIRE(at(c, rate, 0.5 * period) == Approx(0.0f).margin(1.0f));
+        REQUIRE(at(c, rate, 0.75 * period) == Approx(559.0f).margin(1.0f));
+        REQUIRE(at(c, rate, 2.25 * period) == Approx(-559.0f).margin(1.0f));
+    }
+    // Depth law: ratio 32 at 127: 1118 * 2^(-62 / 16) = 76.3 cents; controller 64 at ratio 63
+    REQUIRE(sfz::oscairn::lfoPitchDepthCents(32, 127.0f) == Approx(76.3f).epsilon(0.01));
+    REQUIRE(sfz::oscairn::lfoPitchDepthCents(63, 64.0f) == Approx(1118.0f * std::exp2(-63.0f / 16.0f)).epsilon(1e-4));
+    REQUIRE(sfz::oscairn::lfoPitchDepthCents(127, 127.0f) == Approx(sfz::oscairn::lfoPitchDepthCents(64, 127.0f)));
+    // Nothing at controller 0, nothing without a destination
+    auto zero = lfoPitch(p, 48000.0, 0.5, 0.0f);
+    REQUIRE(*std::max_element(zero.begin(), zero.end()) == 0.0f);
+    p.pitchCC = -1;
+    zero = lfoPitch(p, 48000.0, 0.5, 1.0f);
+    REQUIRE(*std::max_element(zero.begin(), zero.end()) == 0.0f);
+    REQUIRE(*std::min_element(zero.begin(), zero.end()) == 0.0f);
+    // Amplitude: a dip in dB from 0 at note-on; ratio 63 at controller 64 acts as ratio 32
+    // (11.8 dB peak to peak)
+    sfz::oscairn::ElementLfoParameters a;
+    a.ampCC = 1;
+    a.ampRatio = 63;
+    const auto g = lfoGainDb(a, 48000.0, 1.0, 64.0f / 127.0f);
+    REQUIRE(at(g, 48000.0, 0.0) == Approx(0.0f).margin(0.01f));
+    REQUIRE(at(g, 48000.0, 0.5 * period) == Approx(-11.8f * 63.0f * 64.0f / 127.0f / 32.0f).margin(0.15f));
+    REQUIRE(at(g, 48000.0, period) == Approx(0.0f).margin(0.05f));
+    REQUIRE(*std::max_element(g.begin(), g.end()) <= 0.0f);
+}
+
+TEST_CASE("[Oscairn] Element LFO, settings mode")
+{
+    sfz::oscairn::ElementLfoParameters p;
+    p.mode = 1;
+    p.pitchDepth = 127;
+    // Speed: the default 38 runs at 4.848 Hz, 8 steps double it; extended speed in 1/6.5 steps
+    REQUIRE(sfz::oscairn::lfoSpeedHz(p) == Approx(4.848f));
+    p.speed = 46;
+    REQUIRE(sfz::oscairn::lfoSpeedHz(p) == Approx(9.696f));
+    p.extendedSpeed = 13;
+    REQUIRE(sfz::oscairn::lfoSpeedHz(p) == Approx(4.848f * std::exp2(-36.0f / 8.0f)));
+    p.extendedSpeed = -1;
+    const double period = 1.0 / 9.696;
+    // depth 127: 1118 * 2^(1 / 16) cents peak to peak
+    const float half = 0.5f * 1118.0f * std::exp2(1.0f / 16.0f);
+    for (double rate : { 44100.0, 48000.0, 192000.0 }) {
+        INFO("rate " << rate);
+        // triangle falling from zero
+        auto c = lfoPitch(p, rate, 1.0, 0.0f);
+        REQUIRE(at(c, rate, 0.25 * period) == Approx(-half).margin(1.0f));
+        REQUIRE(at(c, rate, 0.75 * period) == Approx(half).margin(1.0f));
+        // saw rising from zero, square high first
+        p.wave = 0;
+        c = lfoPitch(p, rate, 1.0, 0.0f);
+        REQUIRE(at(c, rate, 0.25 * period) == Approx(0.5f * half).margin(1.0f));
+        REQUIRE(at(c, rate, 0.75 * period) == Approx(-0.5f * half).margin(1.0f));
+        p.wave = 2;
+        c = lfoPitch(p, rate, 1.0, 0.0f);
+        REQUIRE(at(c, rate, 0.25 * period) == Approx(half));
+        REQUIRE(at(c, rate, 0.75 * period) == Approx(-half));
+        p.wave = 1;
+        // delay 5 s * (64 / 127)^2 = 1.27 s with nothing, then a fade-in of the same length
+        p.delay = 64;
+        p.fade = 64;
+        c = lfoPitch(p, rate, 4.0, 0.0f);
+        const double d = 5.0 * (64.0 / 127.0) * (64.0 / 127.0);
+        float before = 0.0f;
+        for (size_t i = 0; i < static_cast<size_t>(d * rate) - 1; ++i)
+            before = std::max(before, std::abs(c[i]));
+        REQUIRE(before == 0.0f);
+        // the fade: half the depth halfway through (at a peak of the triangle)
+        const double peakTime = std::ceil((1.5 * d) / period - 0.75) * period + 0.75 * period;
+        const double fade = std::min(1.0, (peakTime - d) / d);
+        REQUIRE(at(c, rate, peakTime) == Approx(half * fade).margin(2.0f));
+        REQUIRE(std::abs(at(c, rate, 3.0 * d + 0.25 * period)) <= half + 0.01f);
+        p.delay = 0;
+        p.fade = 0;
+    }
+    // Key-on reset off: the phase follows the synth's clock; on: it starts at zero
+    p.keyOnReset = 0;
+    const auto shifted = lfoPitch(p, 48000.0, 0.2, 0.0f, static_cast<unsigned>(0.25 * period * 48000.0));
+    REQUIRE(shifted[0] == Approx(-half).margin(1.0f));
+    p.keyOnReset = 1;
+    REQUIRE(lfoPitch(p, 48000.0, 0.2, 0.0f, 12345)[0] == 0.0f);
+    // Controller-set destinations add to the element depth
+    p.pitchDepth = 64;
+    p.pitchCC = 1;
+    p.pitchRatio = 16;
+    const auto added = lfoPitch(p, 48000.0, 0.5, 1.0f);
+    REQUIRE(at(added, 48000.0, 0.75 * period) == Approx(0.5f * 1118.0f * std::exp2((96.0f - 126.0f) / 16.0f)).margin(0.5f));
+}
+
+TEST_CASE("[Oscairn] Element LFO opcodes and voice")
+{
+    // Reference mode by default; the opcodes reach the region, and the LFO moves the pitch of
+    // a voice only through its controller
+    sfz::Synth synth;
+    synth.setSampleRate(48000.0f);
+    synth.setSamplesPerBlock(256);
+    synth.loadSfzString(fs::current_path() / "tests/TestFiles/oscairn.sfz", R"(<control> oscairn_profile=1
+        <region> sample=*sine pitch_keycenter=69 oscairn_elfo_pitch_oncc1=63 oscairn_elfo_amp_oncc2=-5
+        oscairn_elfo_speed=10 oscairn_elfo_xspeed=200 oscairn_elfo_wave=0 oscairn_elfo_delay=3 oscairn_elfo_fade=4
+        oscairn_elfo_reset=0 oscairn_elfo_pitch_depth=5 oscairn_elfo_amp_depth=6 oscairn_elfo_filter_depth=7)");
+    const auto& l = synth.getRegionView(0)->oscairn;
+    REQUIRE(l.lfoEnabled);
+    REQUIRE(l.lfo.mode == 0);
+    REQUIRE(l.lfo.pitchCC == 1);
+    REQUIRE(l.lfo.pitchRatio == 63);
+    REQUIRE(l.lfo.ampCC == 2);
+    REQUIRE(l.lfo.ampRatio == -5);
+    REQUIRE(l.lfo.speed == 10);
+    REQUIRE(l.lfo.extendedSpeed == 200);
+    REQUIRE(l.lfo.wave == 0);
+    REQUIRE(l.lfo.delay == 3);
+    REQUIRE(l.lfo.fade == 4);
+    REQUIRE(l.lfo.keyOnReset == 0);
+    REQUIRE(l.lfo.pitchDepth == 5);
+    REQUIRE(l.lfo.ampDepth == 6);
+    REQUIRE(l.lfo.filterDepth == 7);
+    synth.loadSfzString(fs::current_path() / "tests/TestFiles/oscairn.sfz", "<control> oscairn_profile=1 <region> sample=*sine oscairn_elfo_mode=1");
+    REQUIRE(synth.getRegionView(0)->oscairn.lfo.mode == 1);
+
+    // Zero-crossing intervals of a 440 Hz sine: steady without the controller, swinging by
+    // about +-559 cents with it
+    auto spread = [](int cc) {
+        sfz::Synth s;
+        s.setSampleRate(48000.0f);
+        s.setSamplesPerBlock(256);
+        s.loadSfzString(fs::current_path() / "tests/TestFiles/oscairn.sfz", "<control> oscairn_profile=1 <region> sample=*sine pitch_keycenter=69 oscairn_elfo_pitch_oncc1=63");
+        s.cc(0, 1, cc);
+        s.noteOn(0, 69, 100);
+        sfz::AudioBuffer<float> buffer { 2, 256 };
+        std::vector<float> l;
+        for (int b = 0; b < 48000 / 256; ++b) {
+            s.renderBlock(buffer);
+            l.insert(l.end(), buffer.getConstSpan(0).begin(), buffer.getConstSpan(0).end());
+        }
+        std::vector<double> periods;
+        double last = -1.0;
+        for (size_t i = 4800; i + 1 < l.size(); ++i) {
+            if (l[i] <= 0.0f && l[i + 1] > 0.0f) {
+                const double t = static_cast<double>(i) + l[i] / (l[i] - l[i + 1]);
+                if (last >= 0.0)
+                    periods.push_back(t - last);
+                last = t;
+            }
+        }
+        const auto mm = std::minmax_element(periods.begin(), periods.end());
+        return 1200.0 * std::log2(*mm.second / *mm.first);
+    };
+    REQUIRE(spread(0) < 1.0);
+    REQUIRE(spread(127) == Approx(1118.0).margin(40.0));
 }

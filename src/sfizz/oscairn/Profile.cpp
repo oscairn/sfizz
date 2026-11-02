@@ -5,6 +5,7 @@
 // If not, contact the sfizz maintainers at https://github.com/sfztools/sfizz
 
 #include "Profile.h"
+#include "../Config.h"
 #include "../utility/StringViewHelpers.h"
 #include <absl/strings/match.h>
 
@@ -21,6 +22,11 @@ const OpcodeSpec<int32_t> level255 { 128, Range<int32_t>(0, 255), kEnforceBounds
 const OpcodeSpec<int32_t> index1023 { 0, Range<int32_t>(0, 1023), kEnforceBounds };
 const OpcodeSpec<int32_t> gain255 { 230, Range<int32_t>(0, 255), kEnforceBounds };
 const OpcodeSpec<int32_t> filterTypes { 18, Range<int32_t>(0, 18), kEnforceBounds };
+const OpcodeSpec<int32_t> switchSpec { 0, Range<int32_t>(0, 1), kEnforceBounds };
+const OpcodeSpec<int32_t> lfoWaves { 1, Range<int32_t>(0, 2), kEnforceBounds };
+const OpcodeSpec<int32_t> speed63 { 38, Range<int32_t>(0, 63), kEnforceBounds };
+const OpcodeSpec<int32_t> speed415 { 60, Range<int32_t>(0, 415), kEnforceBounds };
+const OpcodeSpec<int32_t> ratioSpec { 0, Range<int32_t>(-128, 127), kEnforceBounds };
 const OpcodeSpec<int32_t> note { 24, Range<int32_t>(0, 127), kEnforceBounds | kCanBeNote };
 }
 
@@ -90,6 +96,26 @@ bool parseRegionOpcode(const Opcode& opcode, RegionData& data)
     case hash("oscairn_fil_hpf_cutoff"): data.filter.hpfCutoff = opcode.read(index1023); data.filterEnabled = true; return true;
     case hash("oscairn_fil_keyfollow"): data.filter.keyFollow = opcode.read(index127); data.filterEnabled = true; return true;
     case hash("oscairn_fil_gain"): data.filter.gain = opcode.read(gain255); data.filterEnabled = true; return true;
+    case hash("oscairn_elfo_mode"): data.lfo.mode = opcode.read(switchSpec); data.lfoEnabled = true; return true;
+    case hash("oscairn_elfo_wave"): data.lfo.wave = opcode.read(lfoWaves); data.lfoEnabled = true; return true;
+    case hash("oscairn_elfo_speed"): data.lfo.speed = opcode.read(speed63); data.lfoEnabled = true; return true;
+    case hash("oscairn_elfo_xspeed"): data.lfo.extendedSpeed = opcode.read(speed415); data.lfoEnabled = true; return true;
+    case hash("oscairn_elfo_delay"): data.lfo.delay = opcode.read(index127); data.lfoEnabled = true; return true;
+    case hash("oscairn_elfo_fade"): data.lfo.fade = opcode.read(index127); data.lfoEnabled = true; return true;
+    case hash("oscairn_elfo_reset"): data.lfo.keyOnReset = opcode.read(switchSpec); data.lfoEnabled = true; return true;
+    case hash("oscairn_elfo_pitch_depth"): data.lfo.pitchDepth = opcode.read(index127); data.lfoEnabled = true; return true;
+    case hash("oscairn_elfo_amp_depth"): data.lfo.ampDepth = opcode.read(index127); data.lfoEnabled = true; return true;
+    case hash("oscairn_elfo_filter_depth"): data.lfo.filterDepth = opcode.read(index127); data.lfoEnabled = true; return true;
+    case hash("oscairn_elfo_pitch_oncc&"):
+    case hash("oscairn_elfo_amp_oncc&"): {
+        if (opcode.parameters.empty() || opcode.parameters.back() >= config::numCCs)
+            return false;
+        const bool pitch = opcode.lettersOnlyHash == hash("oscairn_elfo_pitch_oncc&");
+        (pitch ? data.lfo.pitchCC : data.lfo.ampCC) = static_cast<int32_t>(opcode.parameters.back());
+        (pitch ? data.lfo.pitchRatio : data.lfo.ampRatio) = opcode.read(ratioSpec);
+        data.lfoEnabled = true;
+        return true;
+    }
     default:
         return false;
     }

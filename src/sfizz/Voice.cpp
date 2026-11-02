@@ -8,6 +8,7 @@
 #include "oscairn/ElementEnvelope.h"
 #include "oscairn/ElementFilter.h"
 #include "oscairn/ElementLevel.h"
+#include "oscairn/ElementLfo.h"
 #include "oscairn/ElementPitch.h"
 #include "Layer.h"
 #include "AudioBuffer.h"
@@ -283,6 +284,8 @@ struct Voice::Impl
     oscairn::ElementEnvelope oscairnAmpEG_; // replaces the amp EG when the region enables it
     oscairn::ElementPitchEnvelope oscairnPitchEG_;
     oscairn::ElementFilter oscairnFilter_;
+    oscairn::ElementLfo oscairnLfo_;
+    void oscairnFilterStage(absl::Span<float> left, absl::Span<float> right) noexcept;
     float hostGain_ { 1.0f };
     int fadeDelay_ { -1 }; // a fade-out starts after this many frames; -1 when none
     int fadeLeft_ { 0 };
@@ -540,6 +543,10 @@ bool Voice::startVoice(Layer* layer, int delay, const TriggerEvent& event) noexc
     if (region.oscairn.filterEnabled) {
         impl.oscairnFilter_.setSampleRate(impl.sampleRate_);
         impl.oscairnFilter_.start(region.oscairn.filter, impl.triggerEvent_.number);
+    }
+    if (region.oscairn.lfoEnabled) {
+        impl.oscairnLfo_.setSampleRate(impl.sampleRate_);
+        impl.oscairnLfo_.start(region.oscairn.lfo, midiState.getInternalClock(), impl.initialDelay_);
     }
     if (region.oscairn.pegEnabled) {
         impl.oscairnPitchEG_.setSampleRate(impl.sampleRate_);
@@ -831,6 +838,14 @@ void Voice::renderBlock(AudioSpan<float, 2> buffer) noexcept
     if (region == nullptr || region->disabled())
         return;
 
+    if (region->oscairn.lfoEnabled) {
+        const MidiState& midiState = impl.resources_.getMidiState();
+        const oscairn::ElementLfoParameters& lfo = region->oscairn.lfo;
+        impl.oscairnLfo_.beginBlock(buffer.getNumFrames(),
+            lfo.pitchCC >= 0 ? midiState.getCCValue(lfo.pitchCC) : 0.0f,
+            lfo.ampCC >= 0 ? midiState.getCCValue(lfo.ampCC) : 0.0f);
+    }
+
     const auto delay = min(static_cast<size_t>(impl.initialDelay_), buffer.getNumFrames());
     auto delayed_buffer = buffer.subspan(delay);
     impl.initialDelay_ -= static_cast<int>(delay);
@@ -964,6 +979,8 @@ void Voice::Impl::amplitudeEnvelope(absl::Span<float> modulationSpan) noexcept
     copy(ampegOut, modulationSpan);
     if (region_->oscairn.ampegEnabled)
         oscairnAmpEG_.process(modulationSpan);
+    if (region_->oscairn.lfoEnabled)
+        oscairnLfo_.applyGain(modulationSpan);
 
     // Amplitude envelope
     applyGain1<float>(baseGain_, modulationSpan);
@@ -1102,6 +1119,23 @@ void Voice::Impl::panStageStereo(AudioSpan<float> buffer) noexcept
     applyGain1(1.9952623149688797f, rightBuffer);
 }
 
+void Voice::Impl::oscairnFilterStage(absl::Span<float> left, absl::Span<float> right) noexcept
+{
+    // The element filter, its cutoff moved by the element LFO
+    if (!(region_->oscairn.lfoEnabled && oscairnLfo_.hasFilter())) {
+        oscairnFilter_.process(left, right, {});
+        return;
+    }
+    auto cents = resources_.getBufferPool().getBuffer(left.size());
+    if (!cents) {
+        oscairnFilter_.process(left, right, {});
+        return;
+    }
+    fill(*cents, 0.0f);
+    oscairnLfo_.addFilter(*cents);
+    oscairnFilter_.process(left, right, *cents);
+}
+
 void Voice::Impl::filterStageMono(AudioSpan<float> buffer) noexcept
 {
     ScopedTiming logger { filterDuration_ };
@@ -1110,7 +1144,7 @@ void Voice::Impl::filterStageMono(AudioSpan<float> buffer) noexcept
     const float* inputChannel[1] { leftBuffer.data() };
     float* outputChannel[1] { leftBuffer.data() };
     if (region_->oscairn.filterEnabled)
-        oscairnFilter_.process(leftBuffer, {}, {});
+        oscairnFilterStage(leftBuffer, {});
     for (unsigned i = 0; i < region_->filters.size(); ++i) {
         filters_[i].process(inputChannel, outputChannel, numSamples);
     }
@@ -1130,7 +1164,7 @@ void Voice::Impl::filterStageStereo(AudioSpan<float> buffer) noexcept
     const float* inputChannels[2] { leftBuffer.data(), rightBuffer.data() };
     float* outputChannels[2] { leftBuffer.data(), rightBuffer.data() };
     if (region_->oscairn.filterEnabled)
-        oscairnFilter_.process(leftBuffer, rightBuffer, {});
+        oscairnFilterStage(leftBuffer, rightBuffer);
 
     for (unsigned i = 0; i < region_->filters.size(); ++i) {
         filters_[i].process(inputChannels, outputChannels, numSamples);
@@ -2081,6 +2115,8 @@ void Voice::Impl::pitchEnvelope(absl::Span<float> pitchSpan) noexcept
 
     if (region_->oscairn.pegEnabled)
         oscairnPitchEG_.processAdd(pitchSpan);
+    if (region_->oscairn.lfoEnabled)
+        oscairnLfo_.addPitch(pitchSpan);
 }
 
 void Voice::Impl::resetSmoothers() noexcept

@@ -207,6 +207,7 @@ list(APPEND SFIZZ_SOURCES
     sfizz/oscairn/ElementEnvelope.cpp
     sfizz/oscairn/ElementFilter.cpp
     sfizz/oscairn/ElementLevel.cpp
+    sfizz/oscairn/ElementLfo.cpp
     sfizz/oscairn/ElementPitch.cpp
     sfizz/oscairn/ElementTables.cpp)
 
