@@ -10,7 +10,8 @@
 //
 // Shapes and times follow measurements of the reference (oscairn/measurement):
 // levels are (level / 127)^2 in amplitude, with level 0 at -90 dB as a target; the attack
-// is a straight line in amplitude at the rate of a full-scale attack of the index's time;
+// is a straight line in amplitude whose time depends on the index and on both levels
+// (attackDurationFactor);
 // decays and the release are straight lines in dB that take the index's time whatever
 // distance they cover.
 
@@ -31,7 +32,22 @@ struct ElementEnvelopeParameters {
     int32_t decay2Time { 64 };
     int32_t decay2Level { 127 };
     int32_t releaseTime { 50 };
+    // Time scaling: each shifts the time indices (higher index, longer time)
+    int32_t timeVelocitySegments { 4 };     // 0 attack, 1 attack+decay, 2 decay, 3 attack+release, 4 all
+    int32_t timeVelocitySensitivity { 0 };  // -64..+63: index shift -sensitivity * velocity / 128 (truncated)
+    int32_t timeKeyFollowSensitivity { 0 }; // -64..+63: index shift -(key - center) * sensitivity / 64
+    int32_t timeKeyFollowCenter { 24 };     // note
+    int32_t timeKeyFollowReleaseAdjustment { 64 }; // 0..127: share of the key shift the release gets
 };
+
+/**
+ * @brief Time-index shifts for a note (`velocity` 1-127): what start() subtracts from each
+ * segment's index. Exposed for tests.
+ */
+struct ElementTimeShifts {
+    int32_t attack, decay, release;
+};
+ElementTimeShifts timeShifts(const ElementEnvelopeParameters& p, int key, int velocity) noexcept;
 
 /**
  * @brief Amplitude of a level index, (level / 127)^2.
@@ -41,6 +57,10 @@ float levelGain(int32_t level) noexcept;
  * @brief Seconds a full-scale attack (silence to level 127) takes at an attack index.
  */
 float attackSeconds(int32_t index) noexcept;
+/**
+ * @brief An attack's time between two levels, as a multiple of attackSeconds().
+ */
+float attackDurationFactor(int32_t from, int32_t to) noexcept;
 /**
  * @brief Seconds a decay at a decay index takes to fall by 60 dB from level 127 toward level 0
  * (a full-scale decay to -90 dB takes 1.5 times as long, and so does every decay segment).
@@ -54,7 +74,7 @@ float releaseSecondsPer60dB(int32_t index) noexcept;
 class ElementEnvelope {
 public:
     void setSampleRate(double sampleRate) noexcept { sampleRate_ = sampleRate; }
-    void start(const ElementEnvelopeParameters& parameters, int delay) noexcept;
+    void start(const ElementEnvelopeParameters& parameters, int delay, int key = 60, int velocity = 127) noexcept;
     void release(int delay) noexcept;
     void process(absl::Span<float> output) noexcept;
     bool isFinished() const noexcept { return stage_ == Stage::Done; }
@@ -66,7 +86,7 @@ private:
     void enter(Stage stage) noexcept;
     float tick() noexcept;
 
-    ElementEnvelopeParameters p_;
+    ElementEnvelopeParameters p_; // with the time indices already shifted for the note
     double sampleRate_ { 48000.0 };
     Stage stage_ { Stage::Done };
     int delay_ { 0 };

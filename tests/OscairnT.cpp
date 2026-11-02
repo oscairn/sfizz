@@ -311,3 +311,56 @@ TEST_CASE("[Oscairn] Velocity and pan opcodes reach the voice")
     REQUIRE(left.first == Approx(full.first).epsilon(0.001));
     REQUIRE(left.second < 1e-6f);
 }
+
+TEST_CASE("[Oscairn] Attack time between two levels")
+{
+    using sfz::oscairn::attackDurationFactor;
+    using sfz::oscairn::levelGain;
+    REQUIRE(attackDurationFactor(0, 127) == Approx(1.0f));
+    REQUIRE(attackDurationFactor(0, 64) == Approx(levelGain(64) * 1.166f));
+    REQUIRE(attackDurationFactor(64, 127) == Approx(attackDurationFactor(127, 64))); // the same up and down
+    REQUIRE(attackDurationFactor(32, 127) == Approx(3.82f).epsilon(0.02));
+    REQUIRE(attackDurationFactor(32, 64) == Approx(levelGain(64) * attackDurationFactor(64, 127)).epsilon(0.02));
+    REQUIRE(attackDurationFactor(0, 0) == 0.0f);
+}
+
+TEST_CASE("[Oscairn] Envelope time shifts for velocity and key")
+{
+    sfz::oscairn::ElementEnvelopeParameters p;
+    auto shifts = sfz::oscairn::timeShifts(p, 60, 127);
+    REQUIRE((shifts.attack == 0 && shifts.decay == 0 && shifts.release == 0));
+    p.timeVelocitySensitivity = 32;
+    shifts = sfz::oscairn::timeShifts(p, 60, 64);
+    REQUIRE((shifts.attack == 16 && shifts.decay == 16 && shifts.release == 16)); // segments "all"
+    p.timeVelocitySegments = 0; // attack only
+    shifts = sfz::oscairn::timeShifts(p, 60, 32);
+    REQUIRE((shifts.attack == 8 && shifts.decay == 0 && shifts.release == 0));
+    p.timeVelocitySegments = 2; // decay only
+    shifts = sfz::oscairn::timeShifts(p, 60, 32);
+    REQUIRE((shifts.attack == 0 && shifts.decay == 8 && shifts.release == 0));
+    p.timeVelocitySensitivity = 0;
+    p.timeKeyFollowSensitivity = 63;
+    p.timeKeyFollowCenter = 60;
+    shifts = sfz::oscairn::timeShifts(p, 84, 127);
+    REQUIRE((shifts.attack == 24 && shifts.decay == 24));
+    REQUIRE(shifts.release == 6); // release adjustment 64: a quarter
+    p.timeKeyFollowReleaseAdjustment = 127;
+    REQUIRE(sfz::oscairn::timeShifts(p, 84, 127).release == 24);
+    p.timeKeyFollowReleaseAdjustment = 0;
+    REQUIRE(sfz::oscairn::timeShifts(p, 84, 127).release == 1);
+    p.timeKeyFollowSensitivity = -32;
+    REQUIRE(sfz::oscairn::timeShifts(p, 36, 127).attack == 12); // lower notes, shorter times with negative values
+}
+
+TEST_CASE("[Oscairn] Envelope velocity shifts truncate, +63 counts as 64")
+{
+    sfz::oscairn::ElementEnvelopeParameters p;
+    p.timeVelocitySensitivity = 32;
+    REQUIRE(sfz::oscairn::timeShifts(p, 60, 127).decay == 31); // 31.75
+    REQUIRE(sfz::oscairn::timeShifts(p, 60, 66).decay == 16);  // 16.5
+    p.timeVelocitySensitivity = 63;
+    REQUIRE(sfz::oscairn::timeShifts(p, 60, 60).decay == 30);
+    REQUIRE(sfz::oscairn::timeShifts(p, 60, 65).decay == 32);
+    p.timeVelocitySensitivity = -32;
+    REQUIRE(sfz::oscairn::timeShifts(p, 60, 127).decay == -31); // toward zero
+}

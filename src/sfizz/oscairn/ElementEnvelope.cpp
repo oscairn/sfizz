@@ -30,12 +30,66 @@ float levelGain(int32_t level) noexcept
 }
 
 float attackSeconds(int32_t index) noexcept { return tables::attackSeconds[clampIndex(index)]; }
+
+float attackDurationFactor(int32_t from, int32_t to) noexcept
+{
+    // Fitted to attacks at one index from levels 0-112 to 127 (eight renders) and 32 to 96; the factor
+    // depends only on the ratio of the smaller level to the larger one, the same up and down.
+    // shortcut: measured knots, linear in between; ratios between 0 and 1/16 are not measured.
+    static constexpr float q[9] = { 0.0f, 0.063f, 0.126f, 0.252f, 0.333f, 0.504f, 0.756f, 0.882f, 1.0f };
+    static constexpr float g[9] = { 1.0f, 2.02f, 2.60f, 3.82f, 4.28f, 6.11f, 8.31f, 8.97f, 9.3f };
+    const int32_t lo = std::min(clampIndex(from), clampIndex(to)), hi = std::max(clampIndex(from), clampIndex(to));
+    if (hi == 0)
+        return 0.0f;
+    const float r = static_cast<float>(lo) / static_cast<float>(hi);
+    int i = 1;
+    while (i < 8 && r > q[i])
+        ++i;
+    const float f = (r - q[i - 1]) / (q[i] - q[i - 1]);
+    float factor = g[i - 1] + std::max(0.0f, std::min(1.0f, f)) * (g[i] - g[i - 1]);
+    if (lo == 0) {
+        // From (or to) level 0 the time grows a little as the other level falls: measured
+        // 1.29, 1.166, 1.08 and 1 times at 32, 64, 96 and 127 (indices 80 and 96)
+        static constexpr float levels[4] = { 32.0f, 64.0f, 96.0f, 127.0f };
+        static constexpr float slow[4] = { 1.29f, 1.166f, 1.08f, 1.0f };
+        const float h = static_cast<float>(hi);
+        int k = 1;
+        while (k < 3 && h > levels[k])
+            ++k;
+        const float u = std::max(0.0f, std::min(1.0f, (h - levels[k - 1]) / (levels[k] - levels[k - 1])));
+        factor = h < levels[0] ? slow[0] : slow[k - 1] + u * (slow[k] - slow[k - 1]);
+    }
+    return levelGain(hi) * factor;
+}
 float decaySecondsPer60dB(int32_t index) noexcept { return tables::decaySecondsPer60dB[clampIndex(index)]; }
 float releaseSecondsPer60dB(int32_t index) noexcept { return tables::releaseSecondsPer60dB[clampIndex(index)]; }
 
-void ElementEnvelope::start(const ElementEnvelopeParameters& parameters, int delay) noexcept
+ElementTimeShifts timeShifts(const ElementEnvelopeParameters& p, int key, int velocity) noexcept
+{
+    // Fitted to renders: sensitivity * velocity / 128 index steps, and key-follow sensitivity
+    // per 64 steps per semitone from the center, both truncated toward zero, with +63 counting
+    // as 64 (velocity 60 at +63 shifts by 30). The release gets the key shift scaled by
+    // 2^((adjustment - 127) / 32): all of it at 127, a quarter at 64.
+    auto full = [](int32_t s) { return s >= 63 ? 64 : s; };
+    const int32_t vel = full(p.timeVelocitySensitivity) * velocity / 128;
+    const int32_t keyShift = (key - p.timeKeyFollowCenter) * full(p.timeKeyFollowSensitivity) / 64;
+    // truncated: adjustment 0 gave a shift of 1 where 24 * 2^(-127/32) = 1.53
+    const int32_t releaseKey = static_cast<int32_t>(keyShift * std::exp2((p.timeKeyFollowReleaseAdjustment - 127) / 32.0));
+    const int s = p.timeVelocitySegments;
+    const bool velAttack = s == 0 || s == 1 || s == 3 || s == 4;
+    const bool velDecay = s == 1 || s == 2 || s == 4;
+    const bool velRelease = s == 3 || s == 4;
+    return { keyShift + (velAttack ? vel : 0), keyShift + (velDecay ? vel : 0), releaseKey + (velRelease ? vel : 0) };
+}
+
+void ElementEnvelope::start(const ElementEnvelopeParameters& parameters, int delay, int key, int velocity) noexcept
 {
     p_ = parameters;
+    const ElementTimeShifts shift = timeShifts(parameters, key, velocity);
+    p_.attackTime = clampIndex(p_.attackTime - shift.attack);
+    p_.decay1Time = clampIndex(p_.decay1Time - shift.decay);
+    p_.decay2Time = clampIndex(p_.decay2Time - shift.decay);
+    p_.releaseTime = clampIndex(p_.releaseTime - shift.release);
     delay_ = std::max(0, delay);
     releaseDelay_ = -1;
     gain_ = levelGain(p_.initialLevel);
@@ -55,10 +109,16 @@ void ElementEnvelope::enter(Stage stage) noexcept
     stage_ = stage;
     switch (stage) {
     case Stage::Attack: {
-        // A straight line in amplitude; the attack index gives the time of a full-scale rise
+        // A straight line in amplitude from the initial to the attack level. It takes the
+        // index's full-scale time, times the larger level's amplitude, times a factor of the
+        // smaller level over the larger one (in level steps)
         target_ = levelGain(p_.attackLevel);
-        const double seconds = std::max<double>(attackSeconds(p_.attackTime), 1e-6);
-        step_ = (target_ >= gain_ ? 1.0 : -1.0) / (seconds * sampleRate_);
+        const double seconds = attackSeconds(p_.attackTime)
+            * attackDurationFactor(p_.initialLevel, p_.attackLevel);
+        const double distance = target_ - gain_;
+        step_ = seconds > 0.0 ? distance / (seconds * sampleRate_) : distance;
+        if (step_ == 0.0)
+            step_ = 1e-12; // equal levels: the attack ends at once
         break;
     }
     case Stage::Decay1:

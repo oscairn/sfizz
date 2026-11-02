@@ -535,7 +535,8 @@ bool Voice::startVoice(Layer* layer, int delay, const TriggerEvent& event) noexc
     impl.saveModulationTargets(&region);
     if (region.oscairn.ampegEnabled) {
         impl.oscairnAmpEG_.setSampleRate(impl.sampleRate_);
-        impl.oscairnAmpEG_.start(region.oscairn.ampeg, impl.initialDelay_);
+        impl.oscairnAmpEG_.start(region.oscairn.ampeg, impl.initialDelay_, impl.triggerEvent_.number,
+                                 static_cast<int>(std::lround(impl.triggerEvent_.value * 127.0f)));
     }
 
     if (region.checkSustain) {

@@ -15,7 +15,9 @@ namespace {
 const OpcodeSpec<int32_t> index127 { 0, Range<int32_t>(0, 127), kEnforceBounds };
 const OpcodeSpec<int32_t> profileSpec { 0, Range<int32_t>(0, 1), kEnforceBounds };
 const OpcodeSpec<int32_t> bipolar64 { 0, Range<int32_t>(-64, 63), kEnforceBounds };
+const OpcodeSpec<int32_t> segments { 4, Range<int32_t>(0, 4), kEnforceBounds };
 const OpcodeSpec<int32_t> curves { 3, Range<int32_t>(0, 4), kEnforceBounds };
+const OpcodeSpec<int32_t> note { 24, Range<int32_t>(0, 127), kEnforceBounds | kCanBeNote };
 }
 
 bool parseControlOpcode(const Opcode& opcode, bool& profileEnabled)
@@ -50,6 +52,11 @@ bool parseRegionOpcode(const Opcode& opcode, RegionData& data)
         target = opcode.parameters.back() == 1 ? &eg.decay1Level : &eg.decay2Level;
         break;
     case hash("oscairn_ampeg_release"): target = &eg.releaseTime; break;
+    case hash("oscairn_ampeg_veltime_segments"): eg.timeVelocitySegments = opcode.read(segments); data.ampegEnabled = true; return true;
+    case hash("oscairn_ampeg_veltime"): eg.timeVelocitySensitivity = opcode.read(bipolar64); data.ampegEnabled = true; return true;
+    case hash("oscairn_ampeg_keytime"): eg.timeKeyFollowSensitivity = opcode.read(bipolar64); data.ampegEnabled = true; return true;
+    case hash("oscairn_ampeg_keytime_center"): eg.timeKeyFollowCenter = opcode.read(note); data.ampegEnabled = true; return true;
+    case hash("oscairn_ampeg_keytime_release"): target = &eg.timeKeyFollowReleaseAdjustment; break;
     case hash("oscairn_amp_velsens"): data.velocity.sensitivity = opcode.read(bipolar64); data.velocityEnabled = true; return true;
     case hash("oscairn_amp_veloffset"): data.velocity.offset = opcode.read(index127); data.velocityEnabled = true; return true;
     case hash("oscairn_amp_velcurve"): data.velocity.curve = opcode.read(curves); data.velocityEnabled = true; return true;
