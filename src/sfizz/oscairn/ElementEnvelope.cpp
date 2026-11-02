@@ -201,8 +201,43 @@ float ElementEnvelope::tick() noexcept
 
 void ElementEnvelope::process(absl::Span<float> output) noexcept
 {
-    for (float& out : output)
-        out = tick();
+    size_t i = 0;
+    const size_t n = output.size();
+    while (i < n) {
+        // held levels without a release due: a run of the same value
+        if ((stage_ == Stage::Sustain || stage_ == Stage::Done) && releaseDelay_ != 0) {
+            size_t m = n - i;
+            if (releaseDelay_ > 0)
+                m = std::min<size_t>(m, static_cast<size_t>(releaseDelay_)), releaseDelay_ -= static_cast<int>(m);
+            std::fill_n(output.begin() + i, m, stage_ == Stage::Done ? 0.0f : static_cast<float>(gain_));
+            i += m;
+            continue;
+        }
+        // within a segment: the samples that cannot reach its target (two to spare for
+        // rounding) without the per-sample checks
+        const bool attack = stage_ == Stage::Attack;
+        const bool falls = stage_ == Stage::Decay1 || stage_ == Stage::Decay2 || stage_ == Stage::Release;
+        if ((attack || falls) && releaseDelay_ != 0 && step_ != 0.0) {
+            const double left = ((attack ? gain_ : db_) - target_) / -step_ - 2.0;
+            size_t m = left > 0.0 ? static_cast<size_t>(std::min(left, static_cast<double>(n - i))) : 0;
+            if (releaseDelay_ > 0)
+                m = std::min<size_t>(m, static_cast<size_t>(releaseDelay_));
+            if (m > 0) {
+                if (attack) {
+                    for (size_t k = 0; k < m; ++k)
+                        gain_ += step_, output[i + k] = static_cast<float>(gain_);
+                } else {
+                    for (size_t k = 0; k < m; ++k)
+                        db_ += step_, gain_ *= ratio_, output[i + k] = static_cast<float>(gain_);
+                }
+                if (releaseDelay_ > 0)
+                    releaseDelay_ -= static_cast<int>(m);
+                i += m;
+                continue;
+            }
+        }
+        output[i++] = tick();
+    }
 }
 
 } // namespace oscairn
