@@ -12,6 +12,7 @@
 #pragma once
 #include "../Opcode.h"
 #include "ElementEnvelope.h"
+#include "ElementLevel.h"
 
 namespace sfz {
 namespace oscairn {
@@ -21,6 +22,13 @@ struct RegionData {
     // when any of its opcodes is given.
     bool ampegEnabled { false };
     ElementEnvelopeParameters ampeg;
+    // Velocity response; multiplies sfizz's own velocity gain (the converter sets
+    // amp_veltrack=0 so that only this one acts)
+    bool velocityEnabled { false };
+    ElementVelocity velocity;
+    // Balance-law pan, after sfizz's pan stage
+    bool panEnabled { false };
+    int32_t pan { 64 };
 };
 
 /**

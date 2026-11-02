@@ -6,6 +6,7 @@
 
 #include "Voice.h"
 #include "oscairn/ElementEnvelope.h"
+#include "oscairn/ElementLevel.h"
 #include "Layer.h"
 #include "AudioBuffer.h"
 #include "Config.h"
@@ -509,6 +510,8 @@ bool Voice::startVoice(Layer* layer, int delay, const TriggerEvent& event) noexc
     impl.baseGain_ = region.getBaseGain();
     if (impl.triggerEvent_.type != TriggerEventType::CC || region.velocityOverride == VelocityOverride::previous)
         impl.baseGain_ *= noteGain(region, impl.triggerEvent_.number, impl.triggerEvent_.value, midiState, curveSet);
+    if (region.oscairn.velocityEnabled)
+        impl.baseGain_ *= oscairn::velocityGain(region.oscairn.velocity, static_cast<int>(std::lround(impl.triggerEvent_.value * 127.0f)));
 
     impl.gainSmoother_.reset();
     impl.resetCrossfades();
@@ -832,6 +835,12 @@ void Voice::renderBlock(AudioSpan<float, 2> buffer) noexcept
         impl.ampStageMono(buffer);
         impl.filterStageMono(buffer);
         impl.panStageMono(buffer);
+    }
+    if (region->oscairn.panEnabled) {
+        float left, right;
+        oscairn::balanceGains(region->oscairn.pan, left, right);
+        applyGain1<float>(left, buffer.getSpan(0));
+        applyGain1<float>(right, buffer.getSpan(1));
     }
 
     if (region->oscairn.ampegEnabled) {

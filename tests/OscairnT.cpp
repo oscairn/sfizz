@@ -235,3 +235,79 @@ TEST_CASE("[Oscairn] Per-note voice count, gain and fade-out")
     REQUIRE(synth.getNumActiveVoicesForNote(64) == 0);
     REQUIRE(synth.getNumActiveVoicesForNote(60) == 1);
 }
+
+TEST_CASE("[Oscairn] Element velocity response")
+{
+    using sfz::oscairn::ElementVelocity;
+    using sfz::oscairn::effectiveVelocity;
+    ElementVelocity v;
+    REQUIRE(effectiveVelocity(v, 1) == 127.0f); // sensitivity 0: no response
+    v.sensitivity = 32;
+    REQUIRE(effectiveVelocity(v, 64) == Approx(64.0f));
+    REQUIRE(effectiveVelocity(v, 127) == Approx(127.0f));
+    v.sensitivity = 16;
+    REQUIRE(effectiveVelocity(v, 1) == Approx(64.0f)); // half the distance below 127
+    v.sensitivity = 48;
+    REQUIRE(effectiveVelocity(v, 96) == Approx(127.0f - 31.0f * 31.5f / 15.5f));
+    v.sensitivity = 63;
+    REQUIRE(effectiveVelocity(v, 120) == 0.0f);
+    REQUIRE(effectiveVelocity(v, 127) == 127.0f);
+    v.sensitivity = -32;
+    REQUIRE(effectiveVelocity(v, 1) == Approx(127.0f));
+    REQUIRE(effectiveVelocity(v, 64) == Approx(64.0f));
+    v.sensitivity = 32;
+    v.offset = 16;
+    REQUIRE(effectiveVelocity(v, 1) == Approx(17.0f));
+    REQUIRE(effectiveVelocity(v, 120) == Approx(127.0f));
+    v.offset = 0;
+    v.curve = 0; // measured curve: -30.1 dB at 64
+    REQUIRE(40 * std::log10(effectiveVelocity(v, 64) / 127.0f) == Approx(-30.10f).margin(0.01f));
+    REQUIRE(40 * std::log10(effectiveVelocity(v, 72) / 127.0f) == Approx(-26.34f).margin(0.01f)); // halfway in dB
+    REQUIRE(sfz::oscairn::velocityGain(ElementVelocity { 32, 0, 3 }, 64) == Approx((64.0f / 127) * (64.0f / 127)));
+}
+
+TEST_CASE("[Oscairn] Element pan is a balance")
+{
+    float l, r;
+    sfz::oscairn::balanceGains(64, l, r);
+    REQUIRE((l == 1.0f && r == 1.0f));
+    sfz::oscairn::balanceGains(1, l, r);
+    REQUIRE((l == 1.0f && r == 0.0f));
+    sfz::oscairn::balanceGains(127, l, r);
+    REQUIRE((l == 0.0f && r == 1.0f));
+    sfz::oscairn::balanceGains(32, l, r);
+    REQUIRE(l == 1.0f);
+    REQUIRE(20 * std::log10(r) == Approx(20 * std::log10(std::pow(std::sin(1.5707963f * 31 / 63), 2.0f))).margin(1e-4));
+    sfz::oscairn::balanceGains(96, l, r);
+    REQUIRE(r == 1.0f);
+    REQUIRE(l == Approx(std::pow(std::sin(1.5707963f * 31 / 63), 2.0f)));
+}
+
+TEST_CASE("[Oscairn] Velocity and pan opcodes reach the voice")
+{
+    auto peaks = [](const std::string& text, int velocity) {
+        sfz::Synth synth;
+        synth.setSamplesPerBlock(512);
+        synth.loadSfzString(fs::current_path() / "tests/TestFiles/oscairn.sfz", text);
+        sfz::AudioBuffer<float> buffer { 2, 512 };
+        synth.noteOn(0, 69, velocity);
+        float left = 0, right = 0;
+        for (int i = 0; i < 20; ++i) {
+            synth.renderBlock(buffer);
+            if (i > 10) {
+                for (float x : buffer.getConstSpan(0)) left = std::max(left, std::abs(x));
+                for (float x : buffer.getConstSpan(1)) right = std::max(right, std::abs(x));
+            }
+        }
+        return std::make_pair(left, right);
+    };
+    const auto full = peaks("<region> sample=*sine amp_veltrack=0", 64);
+    const auto vel = peaks("<control> oscairn_profile=1 <region> sample=*sine amp_veltrack=0 oscairn_amp_velsens=32", 64);
+    REQUIRE(vel.first / full.first == Approx((64.0f / 127) * (64.0f / 127)).epsilon(0.01));
+    const auto off = peaks("<region> sample=*sine amp_veltrack=0 oscairn_amp_velsens=32 oscairn_pan=1", 64);
+    REQUIRE(off.first == Approx(full.first).epsilon(0.001)); // no profile: unknown, no effect
+    REQUIRE(off.second == Approx(full.second).epsilon(0.001));
+    const auto left = peaks("<control> oscairn_profile=1 <region> sample=*sine amp_veltrack=0 oscairn_pan=1", 64);
+    REQUIRE(left.first == Approx(full.first).epsilon(0.001));
+    REQUIRE(left.second < 1e-6f);
+}
