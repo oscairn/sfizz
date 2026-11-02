@@ -129,7 +129,7 @@ TEST_CASE("[Oscairn] Element envelope levels")
 
 TEST_CASE("[Oscairn] Element envelope segments take the table times at every sample rate")
 {
-    for (double rate : { 44100.0, 48000.0, 96000.0 }) {
+    for (double rate : { 44100.0, 48000.0, 88200.0, 96000.0, 192000.0 }) {
         INFO("rate " << rate);
         ElementEnvelopeParameters p;
         p.attackTime = 96;
@@ -328,7 +328,7 @@ TEST_CASE("[Oscairn] Pitch envelope levels and segment times")
     REQUIRE(pitchLevelCents(64, 32) == Approx(-1200.0f));
     REQUIRE(pitchLevelCents(255, 32) == Approx(2400.0f)); // 255 counts as +128 steps
     REQUIRE(pitchLevelCents(0, 63) == Approx(-4800.0f));
-    for (double rate : { 44100.0, 48000.0, 96000.0 }) {
+    for (double rate : { 44100.0, 48000.0, 88200.0, 96000.0, 192000.0 }) {
         sfz::oscairn::ElementPitchParameters p;
         p.holdLevel = 192;
         p.attackLevel = p.decay1Level = p.decay2Level = 128;
