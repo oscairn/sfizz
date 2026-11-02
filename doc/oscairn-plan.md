@@ -874,6 +874,39 @@ silent by `check.py`: low velocities on steep curves, really quiet, not dropouts
 - Not done: pitch envelope sensitivities (K13), cutoff below index 144 and between knots (K20),
   HPF key follow, velocity curves between the new knots.
 
+### Fifth session (2026-11-02): CPU
+
+A converted Performance ("Cant Sleep", six elements per note, all filter type 4) took 1,152 us
+average and 2,517 us worst of a 2,667 us block (48 kHz, 128 frames) in Oscairn. Offline
+benchmark: the part's SFZ with its samples preloaded, 4-note chords changing every 2 s plus a
+melody note every 0.5 s, 20 s, about 45 voices (61 at most); "Rd 73" (from Rd 73 Chill) the
+same way, about 8 voices. us per block, average / p99 / worst, before (`ccac8b08`) -> after:
+
+| | Cant Sleep | Rd 73 |
+| --- | --- | --- |
+| macOS arm64 (M3 Max, Apple clang 17) | 253 / 365 / 489 -> 134 / 213 / 356 | 42 / 84 / 115 -> 25 / 53 / 145 |
+| Linux ARM64 (Debian trixie on the same machine, GCC 14) | 251 / 382 / 578 -> 158 / 251 / 465 | 45 / 95 / 802 -> 30 / 64 / 127 |
+
+Per voice: Cant Sleep about 5.6 -> 3.0 us per block on macOS (0.21 -> 0.11 % of the budget),
+5.6 -> 3.5 us on Linux. Worst-case figures are noisy (the machine was loaded). Changes, each
+with the arithmetic per sample unchanged except the filter loop's reassociation:
+
+- Filter coefficients are redesigned only when the cutoff shift changes (they were redesigned
+  every 16 samples whenever the filter envelope or LFO was on, also while it held still).
+- At 48 and 96 kHz (delay 0) the filter runs both channels as a two-float vector with the
+  states in registers and both sections in one loop, the allpass output substituted into the
+  state updates (four multiply-adds per state instead of about nine) and no per-sample
+  branches. Other rates and compilers without GCC vector extensions keep `run()`.
+- The pitch and filter envelopes add runs of samples between events; the amplitude envelope
+  fills held levels as runs and skips its per-sample checks where a segment cannot end.
+
+Already in place: FTZ on the audio thread (`ScopedFTZ` in `Synth::renderBlock`); voices end
+when the amplitude envelope reaches its -90 dB floor, which stops their filter and envelopes.
+All gates unchanged. What is left (K39): the filter is still about a third of a voice and
+bound by its recurrence latency; about half of a voice is stock sfizz (interpolation, gains,
+pan and width, the stock amplitude EG that still runs under the element envelope, voice
+timing, a per-sample `exp2` for the pitch).
+
 ### Upstream merge test (2026-11-01)
 
 `upstream/develop` has no commits after `f5c6e29f`: merging it into `oscairn` is a no-op
@@ -929,3 +962,4 @@ repository, or the local scripts beside the renders).
 | K36 | Element LFO in reference mode: what is not built | The filter destination through a controller set (E.LFO FMD), the controller sets' polarity and curve, and ratios below 8 or negative are not measured; the engine uses the ratio and controller value only | Not measured | Open | none yet | `ElementLfo.cpp` |
 | K37 | Filter above 22.05 kHz at 88.2 kHz and up | With the reference-rate delay the response above 22.05 kHz repeats the 44.1 kHz response mirrored (a low-pass passes again toward 44.1 kHz); inaudible, but sample content up there is not attenuated as an analog-style filter would | Consequence of decision 20's design | Accepted by Jacob (inaudible; no ultrasonic low-pass) | none | `ElementFilter.cpp` |
 | K38 | Filter at rates other than the five, or above 705.6 kHz | Rates between 44.1 and 48 kHz put the allpass's pole near Nyquist; above 16 x 44.1 kHz the delay line is capped (comment in the code); neither is tested | Design limits | Unverified | none | `ElementFilter.cpp` `setSampleRate` |
+| K39 | CPU per voice | Cant Sleep: about 3.0 us per voice per 128-frame block at 48 kHz on an M3 Max (3.5 us under Linux ARM64), half of it stock sfizz; not measured on a small ARM board | The filter's recurrence latency (one section pair per voice, about 6 ns per stereo frame); stock voice stages | Open. Next: the two sections' four recurrences as one four-float vector (the second section a sample behind), filter coefficients without the double-precision pin per update, skipping the stock amplitude EG under the element envelope | Benchmark described in section 11 (fifth session), not in the repository (it needs the converted samples) | `ElementFilter.cpp` `runDirect`; `Voice.cpp` |
