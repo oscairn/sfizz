@@ -20,6 +20,19 @@
 // Files: with the host's oscairn.assets, every sample a patch uses is resolved through the
 // host, and oscairn.asset-dependencies lists them; without it, paths resolve from the
 // patch's directory.
+//
+// State (version 2; version 1, without the two base fields, still loads): UTF-8 text,
+//   oscairn-sfizz-2\n
+// then four fields, each its byte length in decimal, \n, the bytes, \n:
+//   directory   - local folder relative sample paths resolve from when no base is given
+//                 (or when the host offers no oscairn.assets); may be empty
+//   library     - base asset reference: library name (under 64 bytes); empty for none
+//   path        - base asset reference: folder inside the library (under 1024 bytes,
+//                 may be empty for the library's root)
+//   patch       - the SFZ text
+// With a base, every sample= path (relative, no "..", after default_path) is resolved through
+// the host as the asset <library>/<path>/<sample path> and listed in
+// oscairn.asset-dependencies; a sample the host cannot resolve fails the state load.
 
 #include "plugin.h"
 #include "sfizz/Synth.h"
@@ -41,7 +54,8 @@
 
 namespace {
 
-constexpr const char* stateVersion = "oscairn-sfizz-1";
+constexpr const char* stateVersion = "oscairn-sfizz-2";
+constexpr const char* stateVersion1 = "oscairn-sfizz-1";
 constexpr size_t maxStateBytes = 64 << 20;
 constexpr size_t maxNotes = 256;
 constexpr uint32_t contextCount = 8;
@@ -49,6 +63,8 @@ constexpr uint32_t selectionCapacity = 32;
 
 struct Patch {
     std::string directory; // where relative sample and include paths resolve
+    std::string library;   // base asset reference for host-resolved samples (empty: none)
+    std::string basePath;
     std::string text;      // SFZ
 };
 
@@ -545,8 +561,8 @@ bool stateSave(const clap_plugin_t* p, const clap_ostream_t* stream)
 {
     const Patch& patch = self(p).patch;
     std::string data = std::string(stateVersion) + "\n";
-    data += std::to_string(patch.directory.size()) + "\n" + patch.directory + "\n";
-    data += std::to_string(patch.text.size()) + "\n" + patch.text + "\n";
+    for (const std::string* f : { &patch.directory, &patch.library, &patch.basePath, &patch.text })
+        data += std::to_string(f->size()) + "\n" + *f + "\n";
     return writeAll(stream, data);
 }
 
@@ -583,14 +599,31 @@ bool stateLoad(const clap_plugin_t* p, const clap_istream_t* stream)
         data.append(buffer, static_cast<size_t>(n));
     }
     const std::string header = std::string(stateVersion) + "\n";
-    if (data.compare(0, header.size(), header) != 0)
+    const std::string header1 = std::string(stateVersion1) + "\n";
+    const bool v1 = data.compare(0, header1.size(), header1) == 0;
+    if (!v1 && data.compare(0, header.size(), header) != 0)
         return false;
-    size_t at = header.size();
+    size_t at = v1 ? header1.size() : header.size();
     Patch patch;
-    if (!readField(data, at, patch.directory) || !readField(data, at, patch.text) || at != data.size())
+    if (!readField(data, at, patch.directory))
         return false;
+    if (!v1 && (!readField(data, at, patch.library) || !readField(data, at, patch.basePath)))
+        return false;
+    if (!readField(data, at, patch.text) || at != data.size())
+        return false;
+    oscairn_asset_ref_t base {};
+    const bool hasBase = !patch.library.empty();
+    if (hasBase) {
+        if (patch.library.size() >= sizeof(base.library) || patch.basePath.size() >= sizeof(base.path))
+            return false;
+        std::snprintf(base.library, sizeof(base.library), "%s", patch.library.c_str());
+        std::snprintf(base.path, sizeof(base.path), "%s", patch.basePath.c_str());
+        // without the host's assets a base can only fall back to a local directory
+        if (!s.assets && patch.directory.empty())
+            return false;
+    }
     std::string message;
-    auto e = makeEngine(s, patch, nullptr, message);
+    auto e = makeEngine(s, patch, hasBase ? &base : nullptr, message);
     if (!e)
         return false;
     collectRetired(s);

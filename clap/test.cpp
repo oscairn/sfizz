@@ -143,9 +143,13 @@ struct Buffer {
     }
 };
 
-std::string stateFor(const std::string& text)
+// State version 2: directory, base library, base path, patch text
+std::string stateFor(const std::string& text, const std::string& library = "", const std::string& path = "", const std::string& directory = "")
 {
-    return "oscairn-sfizz-1\n0\n\n" + std::to_string(text.size()) + "\n" + text + "\n";
+    std::string s = "oscairn-sfizz-2\n";
+    for (const std::string* f : { &directory, &library, &path, &text })
+        s += std::to_string(f->size()) + "\n" + *f + "\n";
+    return s;
 }
 
 bool load(const clap_plugin_t* plugin, const std::string& state)
@@ -240,6 +244,9 @@ int main(int argc, char** argv)
     { // state round trip, rejection of bad state, a patch swapped while active
         auto* plugin = create();
         CHECK(load(plugin, stateFor(sine)));
+        CHECK(save(plugin) == stateFor(sine));
+        // version 1 (no base asset reference) still loads
+        CHECK(load(plugin, "oscairn-sfizz-1\n0\n\n" + std::to_string(sine.size()) + "\n" + sine + "\n"));
         CHECK(save(plugin) == stateFor(sine));
         CHECK(!load(plugin, "oscairn-sfizz-1\n0\n\n999\nshort\n"));
         CHECK(!load(plugin, "something else\n"));
@@ -369,7 +376,33 @@ int main(int argc, char** argv)
         CHECK(run.peak > 0.01f);
         plugin->deactivate(plugin);
         plugin->destroy(plugin);
+        // the state carries a base asset reference: its samples resolve through the host, are
+        // listed as dependencies, play, and round-trip
+        plugin = create();
+        deps = static_cast<const oscairn_plugin_asset_dependencies_t*>(plugin->get_extension(plugin, OSCAIRN_EXT_ASSET_DEPENDENCIES));
+        const std::string kick = "<region> sample=kick.wav";
+        CHECK(load(plugin, stateFor(kick, "lib", "sub")));
+        CHECK(deps->count(plugin) == 1);
+        ref = {};
+        CHECK(deps->get(plugin, 0, &ref) && !std::strcmp(ref.path, "sub/kick.wav") && !std::strcmp(ref.library, "lib") && std::strlen(ref.sha256) == 64);
+        CHECK(save(plugin) == stateFor(kick, "lib", "sub"));
+        CHECK(!load(plugin, stateFor(kick, "missing", "sub"))); // the host cannot resolve it
+        CHECK(!load(plugin, stateFor("<region> sample=../kick.wav", "lib", "sub")));
+        CHECK(save(plugin) == stateFor(kick, "lib", "sub")); // a failed load keeps the state
+        CHECK(plugin->activate(plugin, 48000, 1, 256));
+        Run kickRun { plugin };
+        Events kickEvents;
+        kickEvents.note(CLAP_EVENT_NOTE_ON, 0, 1, 60, 1.0);
+        kickRun.block(kickEvents, 256);
+        kickRun.block(kickEvents, 256);
+        CHECK(kickRun.peak > 0.01f);
+        plugin->deactivate(plugin);
+        plugin->destroy(plugin);
         offerAssets = false;
+        // without the host's assets, a base needs a local directory to fall back to
+        plugin = create();
+        CHECK(!load(plugin, stateFor(kick, "lib", "sub")));
+        plugin->destroy(plugin);
     }
     // No allocation in any process call above
     CHECK(guardedAllocations.load() == 0);
