@@ -517,12 +517,13 @@ TEST_CASE("[Oscairn] Note shift and bend range are not limited to the reference'
 }
 
 namespace {
-// Steady-state gain (dB) of the element filter for a sine at `hz`
-double filterGainDb(const sfz::oscairn::ElementFilterParameters& p, double rate, double hz)
+// Steady-state gain (dB) of the element filter for a sine at `hz`, relative to its passband
+// (the filter gain taken out)
+double filterGainDb(const sfz::oscairn::ElementFilterParameters& p, double rate, double hz, int note = 60)
 {
     sfz::oscairn::ElementFilter filter;
     filter.setSampleRate(rate);
-    filter.start(p);
+    filter.start(p, note);
     const size_t n = static_cast<size_t>(rate);
     std::vector<float> x(n);
     for (size_t i = 0; i < n; ++i)
@@ -534,7 +535,7 @@ double filterGainDb(const sfz::oscairn::ElementFilterParameters& p, double rate,
         in += s * s;
         out += static_cast<double>(x[i]) * x[i];
     }
-    return 10.0 * std::log10(out / in);
+    return 10.0 * std::log10(out / in) - 20.0 * std::log10(sfz::oscairn::filterGain(p.gain));
 }
 } // namespace
 
@@ -568,6 +569,42 @@ TEST_CASE("[Oscairn] Element filter responses match the reference")
     }
 }
 
+TEST_CASE("[Oscairn] Element filter near the top of the range, key follow and gain")
+{
+    using namespace sfz::oscairn;
+    // Reference renders relative to their passband; proposed tolerance 1 dB, all five rates
+    struct Case {
+        int cutoff, keyFollow, note;
+        double hz[4], db[4];
+    };
+    const Case cases[] = {
+        { 864, 64, 60, { 2000, 4000, 6000, 8000 }, { -0.05, -2.44, -3.53, -4.49 } }, // damping limited to 1.47
+        { 880, 64, 60, { 2000, 4000, 6000, 8000 }, { -0.44, -1.31, -2.44, -3.36 } }, // 1.32
+        { 624, 64, 60, { 500, 1000, 2000, 4000 }, { -1.96, -5.88, -13.22, -23.08 } },
+        { 512, 96, 84, { 500, 1000, 2000, 4000 }, { -1.21, -2.39, -6.69, -14.03 } }, // +100 cents per key
+        { 512, 32, 36, { 250, 500, 1000, 2000 }, { 0.02, -0.51, -2.23, -6.78 } }, // -100 cents per key
+    };
+    for (double rate : { 44100.0, 48000.0, 88200.0, 96000.0, 192000.0 }) {
+        for (const Case& c : cases) {
+            ElementFilterParameters p;
+            p.type = 4;
+            p.cutoff = c.cutoff;
+            p.keyFollow = c.keyFollow;
+            for (int k = 0; k < 4; ++k) {
+                INFO("rate " << rate << " cutoff " << c.cutoff << " key follow " << c.keyFollow << " note " << c.note << " at " << c.hz[k] << " Hz");
+                REQUIRE(filterGainDb(p, rate, c.hz[k], c.note) == Approx(c.db[k]).margin(1.0));
+            }
+        }
+    }
+    // Filter gain: passband levels measured at the default 230 and at 255; 0 is silent
+    REQUIRE(20 * std::log10(filterGain(230)) == Approx(-5.45).margin(0.01));
+    REQUIRE(20 * std::log10(filterGain(255)) == Approx(3.25).margin(0.01));
+    REQUIRE(filterGain(0) == 0.0f);
+    // The top of the range stays at 7290 Hz
+    REQUIRE(filterCutoffHz(1023) == Approx(7290.0f).epsilon(1e-4));
+    REQUIRE(filterCutoffHz(960) == Approx(7290.0f).epsilon(1e-4));
+}
+
 TEST_CASE("[Oscairn] Element filter cutoff and damping laws")
 {
     using namespace sfz::oscairn;
@@ -581,7 +618,7 @@ TEST_CASE("[Oscairn] Element filter cutoff and damping laws")
     // Types without a model pass the signal through unchanged
     REQUIRE_FALSE(filterTypeSupported(18));
     ElementFilterParameters thru;
-    REQUIRE(std::abs(filterGainDb(thru, 48000.0, 1000.0)) < 1e-4);
+    REQUIRE(std::abs(filterGainDb(thru, 48000.0, 1000.0) + 20.0 * std::log10(filterGain(thru.gain))) < 1e-4);
 }
 
 TEST_CASE("[Oscairn] The element filter only acts with the profile")
@@ -589,13 +626,15 @@ TEST_CASE("[Oscairn] The element filter only acts with the profile")
     sfz::Synth synth;
     synth.loadSfzString(fs::current_path() / "tests/TestFiles/oscairn.sfz", "<region> sample=*sine oscairn_fil_type=0 oscairn_fil_cutoff=100");
     REQUIRE_FALSE(synth.getRegionView(0)->oscairn.filterEnabled);
-    synth.loadSfzString(fs::current_path() / "tests/TestFiles/oscairn.sfz", "<control> oscairn_profile=1 <region> sample=*sine oscairn_fil_type=0 oscairn_fil_cutoff=100 oscairn_fil_resonance=32 oscairn_fil_hpf_cutoff=7");
+    synth.loadSfzString(fs::current_path() / "tests/TestFiles/oscairn.sfz", "<control> oscairn_profile=1 <region> sample=*sine oscairn_fil_type=0 oscairn_fil_cutoff=100 oscairn_fil_resonance=32 oscairn_fil_hpf_cutoff=7 oscairn_fil_keyfollow=96 oscairn_fil_gain=200");
     const auto& f = synth.getRegionView(0)->oscairn;
     REQUIRE(f.filterEnabled);
     REQUIRE(f.filter.type == 0);
     REQUIRE(f.filter.cutoff == 100);
     REQUIRE(f.filter.resonance == 32);
     REQUIRE(f.filter.hpfCutoff == 7);
+    REQUIRE(f.filter.keyFollow == 96);
+    REQUIRE(f.filter.gain == 200);
 }
 
 TEST_CASE("[Oscairn] The element filter follows its 44.1 kHz response at every rate")

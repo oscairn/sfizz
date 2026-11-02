@@ -539,7 +539,7 @@ bool Voice::startVoice(Layer* layer, int delay, const TriggerEvent& event) noexc
     impl.saveModulationTargets(&region);
     if (region.oscairn.filterEnabled) {
         impl.oscairnFilter_.setSampleRate(impl.sampleRate_);
-        impl.oscairnFilter_.start(region.oscairn.filter);
+        impl.oscairnFilter_.start(region.oscairn.filter, impl.triggerEvent_.number);
     }
     if (region.oscairn.pegEnabled) {
         impl.oscairnPitchEG_.setSampleRate(impl.sampleRate_);
