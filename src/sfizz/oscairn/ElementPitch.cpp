@@ -130,35 +130,62 @@ void ElementPitchEnvelope::enter(Stage stage) noexcept
 
 void ElementPitchEnvelope::processAdd(absl::Span<float> out) noexcept
 {
-    for (float& c : out) {
+    // Runs of samples up to the next event (the release, a segment's end), with the
+    // per-sample arithmetic unchanged
+    size_t i = 0;
+    const size_t n = out.size();
+    while (i < n) {
         if (releaseDelay_ == 0) {
             releaseDelay_ = -1;
             enter(Stage::Release);
-        } else if (releaseDelay_ > 0) {
-            --releaseDelay_;
         }
+        size_t m = n - i;
+        if (releaseDelay_ > 0)
+            m = std::min<size_t>(m, static_cast<size_t>(releaseDelay_));
         switch (stage_) {
-        case Stage::Delay:
-            if (--delay_ <= 0)
+        case Stage::Delay: {
+            m = std::min<size_t>(m, static_cast<size_t>(std::max(1, delay_)));
+            const float c = static_cast<float>(cents_);
+            for (size_t k = 0; k < m; ++k)
+                out[i + k] += c;
+            delay_ -= static_cast<int>(m);
+            if (delay_ <= 0)
                 enter(p_.holdTime > 0 ? Stage::Hold : Stage::Attack);
             break;
+        }
         case Stage::Hold:
         case Stage::Attack:
         case Stage::Decay1:
         case Stage::Decay2:
-        case Stage::Release:
-            cents_ += step_;
-            if (--left_ <= 0) {
+        case Stage::Release: {
+            const bool ends = static_cast<long>(m) >= left_;
+            if (ends)
+                m = static_cast<size_t>(std::max(1L, left_));
+            const size_t ramp = ends ? m - 1 : m;
+            for (size_t k = 0; k < ramp; ++k) {
+                cents_ += step_;
+                out[i + k] += static_cast<float>(cents_);
+            }
+            left_ -= static_cast<long>(m);
+            if (ends) {
                 cents_ = target_;
+                out[i + m - 1] += static_cast<float>(cents_);
                 enter(stage_ == Stage::Hold ? Stage::Attack : stage_ == Stage::Attack ? Stage::Decay1
                       : stage_ == Stage::Decay1 ? Stage::Decay2 : stage_ == Stage::Decay2 ? Stage::Sustain : Stage::Done);
             }
             break;
+        }
         case Stage::Sustain:
-        case Stage::Done:
+        case Stage::Done: {
+            const float c = static_cast<float>(cents_);
+            for (size_t k = 0; k < m; ++k)
+                out[i + k] += c;
             break;
         }
-        c += static_cast<float>(cents_);
+        }
+        if (releaseDelay_ > 0)
+            releaseDelay_ -= static_cast<int>(m);
+        i += m;
     }
 }
 
