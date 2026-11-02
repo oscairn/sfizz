@@ -12,16 +12,31 @@ namespace sfz {
 namespace oscairn {
 
 namespace {
-// Velocity curves 0, 1, 2 and 4 in dB at measured velocities (sensitivity +32, offset 0);
-// interpolated linearly in dB between them. Curve 3 is (velocity / 127)^2.
-// shortcut: knots every 8-16 velocities; intermediate velocities are not checked yet.
-constexpr int knotVelocities[12] = { 1, 8, 16, 32, 48, 64, 80, 96, 104, 112, 120, 127 };
-constexpr float curveDb[5][12] = {
-    { -84.29f, -64.35f, -56.07f, -45.54f, -37.63f, -30.10f, -22.58f, -15.43f, -11.29f, -7.53f, -3.76f, 0.0f },
-    { -95.21f, -89.93f, -83.92f, -71.88f, -59.83f, -47.79f, -35.75f, -23.71f, -17.31f, -11.29f, -5.27f, 0.0f },
-    { -94.45f, -85.42f, -75.64f, -58.33f, -42.90f, -29.73f, -18.82f, -10.28f, -6.40f, -3.77f, -1.51f, 0.0f },
+// Velocity curves 0, 1, 2 and 4 in dB at measured velocities (sensitivity +32, offset 0):
+// velocity 1 and every fourth velocity (renders fl3 vk_*); interpolated linearly in dB
+// between them. Curve 3 is (velocity / 127)^2.
+// shortcut: velocities between the knots are not checked; curve 4 rises 14 dB per 4
+// velocities between 60 and 68
+constexpr int kKnots = 33;
+constexpr int knotVelocities[kKnots] = { 1, 4, 8, 12, 16, 20, 24, 28, 32, 36, 40, 44, 48, 52, 56, 60, 64, 68, 72, 76, 80, 84, 88, 92, 96, 100, 104, 108, 112, 116, 120, 124, 127 };
+constexpr float curveDb[5][kKnots] = {
+    {
+        -84.29f, -71.49f, -64.34f, -59.83f, -56.07f, -53.06f, -50.42f, -47.79f, -45.53f, -43.27f, -41.39f, -39.51f,
+        -37.63f, -35.37f, -33.49f, -31.61f, -30.10f, -28.22f, -26.34f, -24.46f, -22.58f, -21.07f, -19.19f, -17.31f,
+        -15.43f, -13.17f, -11.29f, -9.41f, -7.53f, -5.64f, -3.76f, -1.88f, 0.00f },
+    {
+        -95.20f, -92.94f, -89.93f, -86.92f, -83.91f, -80.90f, -77.89f, -74.88f, -71.87f, -68.86f, -65.85f, -62.84f,
+        -59.83f, -56.82f, -53.81f, -50.80f, -47.79f, -44.78f, -41.77f, -38.76f, -35.75f, -32.74f, -29.73f, -26.72f,
+        -23.71f, -20.32f, -17.31f, -14.30f, -11.29f, -8.28f, -5.27f, -2.26f, 0.00f },
+    {
+        -94.45f, -90.69f, -85.42f, -80.90f, -75.63f, -71.12f, -66.98f, -62.46f, -58.32f, -54.19f, -50.42f, -46.66f,
+        -42.90f, -39.51f, -36.12f, -32.74f, -29.73f, -26.72f, -24.08f, -21.45f, -18.81f, -16.56f, -14.30f, -12.04f,
+        -10.16f, -8.28f, -6.40f, -5.27f, -3.76f, -2.26f, -1.51f, -0.38f, 0.00f },
     {},
-    { -95.21f, -89.94f, -83.54f, -71.12f, -57.58f, -30.10f, -9.79f, -5.27f, -3.39f, -2.26f, -1.13f, 0.0f },
+    {
+        -95.20f, -92.94f, -89.93f, -86.92f, -83.54f, -80.52f, -77.51f, -74.50f, -71.12f, -67.73f, -64.72f, -61.33f,
+        -57.57f, -53.81f, -49.67f, -44.03f, -30.10f, -16.93f, -13.55f, -11.29f, -9.78f, -8.28f, -7.15f, -6.02f,
+        -5.27f, -4.14f, -3.39f, -3.01f, -2.26f, -1.51f, -1.13f, -0.38f, 0.00f },
 };
 
 float curveVelocity(int curve, float v)
@@ -29,7 +44,7 @@ float curveVelocity(int curve, float v)
     if (curve == 3 || curve < 0 || curve > 4)
         return v;
     int i = 1;
-    while (i < 11 && v > knotVelocities[i])
+    while (i < kKnots - 1 && v > knotVelocities[i])
         ++i;
     const float a = static_cast<float>(knotVelocities[i - 1]), b = static_cast<float>(knotVelocities[i]);
     const float f = std::max(0.0f, std::min(1.0f, (v - a) / (b - a)));

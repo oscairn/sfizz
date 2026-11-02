@@ -268,7 +268,12 @@ TEST_CASE("[Oscairn] Element velocity response")
     v.offset = 0;
     v.curve = 0; // measured curve: -30.1 dB at 64
     REQUIRE(40 * std::log10(effectiveVelocity(v, 64) / 127.0f) == Approx(-30.10f).margin(0.01f));
-    REQUIRE(40 * std::log10(effectiveVelocity(v, 72) / 127.0f) == Approx(-26.34f).margin(0.01f)); // halfway in dB
+    REQUIRE(40 * std::log10(effectiveVelocity(v, 72) / 127.0f) == Approx(-26.34f).margin(0.01f));
+    REQUIRE(40 * std::log10(effectiveVelocity(v, 74) / 127.0f) == Approx(-25.40f).margin(0.01f)); // halfway in dB
+    // curve 4 between the old knots 48, 64 and 80 (K2): measured -49.67 dB at 56, -13.55 at 72
+    v.curve = 4;
+    REQUIRE(40 * std::log10(effectiveVelocity(v, 56) / 127.0f) == Approx(-49.67f).margin(0.01f));
+    REQUIRE(40 * std::log10(effectiveVelocity(v, 72) / 127.0f) == Approx(-13.55f).margin(0.01f));
     // on the 0.375 dB grid at 2048-step resolution: velocity 64 is 32 steps, 80 is 22, 104 is 9
     REQUIRE(20 * std::log10(sfz::oscairn::velocityGain(ElementVelocity { 32, 0, 3 }, 64)) == Approx(-32 * 0.375).margin(1e-4));
     REQUIRE(20 * std::log10(sfz::oscairn::velocityGain(ElementVelocity { 32, 0, 3 }, 80)) == Approx(-22 * 0.375).margin(1e-4));
