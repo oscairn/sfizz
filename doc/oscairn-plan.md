@@ -364,7 +364,7 @@ the wrapper implements the extension directly.
 | Factory, complete plugin interface | Written in `clap/`; a test loads the bundle through `clap_entry` and checks every function pointer |
 | Audio/note ports | One stereo output (two more for element outputs A/B later), no input; one note port, CLAP preferred, MIDI accepted |
 | Parameters | None in milestone 0; later the Part-level offsets and switches, with real units and module paths |
-| State | Patch text, its base asset reference and the sample hashes; deterministic, locale-independent |
+| State | Version 2 (`69fe1f5f`): text `oscairn-sfizz-2\n`, then four length-prefixed fields (decimal byte length, `\n`, bytes, `\n`): local directory, base asset library, base asset path, SFZ text. With a base, every `sample=` path (relative, no `..`) resolves through `oscairn.assets` as `<library>/<path>/<sample>` and is listed in `oscairn.asset-dependencies`; an unresolvable sample fails the load; without the host extension a base falls back to the directory and fails if it is empty. Version 1 (directory and text only) still loads. Documented at the top of `clap/plugin.cpp` |
 | Activation | Any rate and maximum block; `sfz::Synth::setSampleRate`/`setSamplesPerBlock` on activate |
 | Linux ARM64 | CI job on `ubuntu-24.04-arm` |
 
@@ -460,7 +460,7 @@ passes its cross-rate check at 44.1, 48 and 96 kHz (section 6).
 | 1 | RFC 0013 step 1 check: the imported factory waveform library and the Salamander piano | All 7,647 waveform files load without errors; loops continuous over 30 s notes (no discontinuity above a proposed threshold at loop points) |
 | 2 | Measurement harness in `measurement/awm2/` and the first fitted tables: AEG times and levels, then level/velocity curves; profile switch and `oscairn_ampeg_*` | Repeatable renders (two renders of one probe agree within the proposed tolerance); AEG checks within proposed tolerances at indices not used for fitting; the same checks at 44.1, 48 and 96 kHz; profile tests fail with the change undone |
 | 3 | Element model: element-scoped cycle and random, element groups, assignable switches, key-off and legato rules, key-on delay with tempo sync | Articulation fixtures (synthetic) select the same elements as the reference does on matching probes |
-| 4 | Filters: LPF12+HPF12 and the LPF family, then the rest; FEG; scaling breakpoints | Frequency-response checks per type within proposed tolerances |
+| 4 | Filters: LPF12+HPF12 and the LPF family, then the rest; FEG; scaling breakpoints | Frequency-response checks per type within the accepted tolerances (decision 19) |
 | 5 | PEG, element LFO, Part LFO per context, pan modes, random pitch, element EQ, half damper | Per-feature measurement checks |
 | 6 | Drum keys, element outputs A/B; native sound contexts and assets in the CLAP plugin | Drum fixtures; routing tests; Oscairn's sound-context and asset tests against this checkout |
 | 7 | Converter coverage support: every element and drum-key parameter has an opcode | The converter's report shows no engine-parameter loss over the factory set |
@@ -477,11 +477,17 @@ passes its cross-rate check at 44.1, 48 and 96 kHz (section 6).
   - `SynthPrivate.h`: the profile flag. `Region.h`: one member, `oscairn::RegionData oscairn`.
   - `Voice.cpp`: the element envelope as a member; started in `startVoice`, applied after the
     amp EG in `amplitudeEnvelope`, released in `release`, and asked in `renderBlock` (end of
-    the voice) and `released()`. Each is an `if (region->oscairn.ampegEnabled)` branch.
+    the voice) and `released()`. Each is an `if (region->oscairn.ampegEnabled)` branch. The
+    same pattern for the pitch envelope (`pitchEnvelope`), the filter and its envelope
+    (`oscairnFilterStage`, called from the two filter stages; started in `startVoice`, released
+    in `release`) and the element LFO (`beginBlock` at the top of `renderBlock`, pitch in
+    `pitchEnvelope`, gain in `amplitudeEnvelope`, cutoff in `oscairnFilterStage`).
   - `CMakeLists.txt` (option and `add_subdirectory(clap)`), `src/CMakeLists.txt` (sources),
     `tests/CMakeLists.txt` (one test file).
   Upstream-style fixes that are not Oscairn-specific are separate commits (section 11).
-- **Candidates for upstream as they are:** the toolchain fixes (atomic_queue, the NaN test),
+- **Candidates for upstream as they are:** the streaming fix `ab0e878c` (interpolator taps
+  kept within the frames streamed in so far; `Voice.cpp`, `tests/SynthT.cpp`), the toolchain
+  fixes (atomic_queue, the NaN test),
   the CLAP target, per-instance seeded random generators, the active-voices-per-key query,
   multi-point envelopes with velocity/key time scaling, breakpoint curves, element-scoped
   sequence counters, `pan_random`-style opcodes. Upstream would want them as ordinary SFZ
@@ -555,6 +561,37 @@ Decided by Jacob (2026-11-01):
 18. **Every sample rate sounds like the reference at 44.1 kHz.** Profile features are checked
     at 44.1, 48, 88.2, 96 and 192 kHz; what still drifts is in the register (K22).
 
+Decided by Jacob (2026-11-01, fourth session):
+
+19. **Tolerances accepted:** the filter against the reference 1 dB; the filter across rates
+    0.75 dB where the 44.1 kHz response is within 20 dB of its peak and 1.5 dB from 20 to
+    40 dB below it; a whole voice across rates 0.1 dB and 10 ms.
+20. **The filter matches its 44.1 kHz response at every rate** by its design, not by internal
+    resampling, near the top of the range included; checked with the tolerances of 19 at 48,
+    88.2, 96 and 192 kHz, CPU measured against the earlier filter; coefficients computed
+    without allocation while processing. Built in `f4b72515` (section 11).
+21. **Element LFO in two modes,** chosen per region by `oscairn_elfo_mode`: 0, reference (the
+    default; what the converter writes): only the controller-set destinations act, at the
+    measured 4.848 Hz falling triangle with the K19 pitch law and the K30 amplitude points,
+    the element's own LFO settings ignored; 1, settings: speed, wave, delay, fade-in, reset
+    and depths act through documented definitions (`ElementLfo.h`). Built in `b1946dca`.
+
+Taken in the fourth session, for Jacob to confirm:
+
+22. **Filter type codes** follow the reference's codes, not the Data List's positions: 0-8 as
+    listed, 9 and 20 do not load on the reference and pass the signal through, 10-17 are the
+    Data List's BPFw to DualBEF, 18 passes untouched (but see K27), 19 is LPF12+BPF6 (fitted
+    as low-pass minus band-pass), 21 applies the filter gain only (measured flat). The
+    converter writes the raw code.
+23. **`oscairn_fil_distance`** takes the Dual types' distance as displayed, -128..+127; the
+    second section's cutoff index moves by 7 per step.
+24. **The filter envelope's release gets the whole key-follow shift** (no adjustment parameter
+    exists for it; not measured).
+25. **Output staging (K28):** the reference plays a full-scale sample 1.84 dB below sfizz at
+    the same Part Volume and CC 7. Where to put that (a profile output gain, or a `volume`
+    the converter writes) is open; nothing changed yet.
+26. **Filter code 18's late low-pass (K27)** is not modelled: factory elements use code 21.
+
 Risks and open questions:
 
 - sfizz's upstream is slow (last commit 2025-03-17); upstreaming may not happen, and the
@@ -564,10 +601,10 @@ Risks and open questions:
 - Filter types 19 and 21 in factory content are not in the Data List (RFC 0013 open
   question).
 - Stock sfizz: when playback reaches the end of the streamed part of a file, the interpolator's
-  neighbour taps can read frames the loader thread is still writing (ThreadSanitizer data race
-  in `Voice::Impl::fillInterpolatedWithQuality`, seen in 3 of 5 runs of a one-shot played 127
-  semitones up). Not introduced by the fork; the pitch-range test preloads whole files. An
-  upstream-style fix is a separate change, not made.
+  neighbour taps could read frames the loader thread is still writing (ThreadSanitizer data
+  race in `Voice::Impl::fillInterpolatedWithQuality`). Fixed in `ab0e878c` as a separate,
+  upstreamable commit: the new `[Synth] Streamed playback far up...` test raced in 5 of 5
+  TSan runs without the fix and in 0 of 5 with it.
 - `-ffast-math` makes the gate compiler-dependent: bit identity is only claimed between the
   two builds made with one compiler on one machine.
 
@@ -779,12 +816,70 @@ Salamander piano is not here.
   of the sine probes).
 - Not done this round: velocity curves between knots, pitch envelope sensitivities.
 
+### Fourth session (2026-11-01): filter at every rate, all filter types, filter envelope, element LFO
+
+Reference batches `fl3` (450 renders: filter types, filter envelope, velocity curves), `ls2`
+and `ls3` (held notes). Dropout checks: none in any render (34 renders of `fl3` are flagged
+silent by `check.py`: low velocities on steep curves, really quiet, not dropouts).
+
+| Commit | What | Upstreamable |
+| --- | --- | --- |
+| `f4b72515` | Filter: the 44.1 kHz response at every rate (decision 20) | Oscairn |
+| `b1946dca` | Element LFO, reference and settings modes (decision 21) | Oscairn |
+| `978c9f25` | Velocity curves: knots every four velocities (K2) | Oscairn |
+| `531e2214` | Filter envelope, cutoff velocity sensitivity | Oscairn; the envelope without the profile |
+| `704d872d` | The remaining filter types (decision 22) | Oscairn |
+| `ab0e878c` | Interpolator kept within the frames streamed in so far (TSan race) | yes |
+| `cd32975b` | Tests: the filter's 1 dB tolerance is accepted | Oscairn |
+| `69fe1f5f` | CLAP plugin: asset references in the state (version 2) | yes, as a generic CLAP target |
+
+- **Filter at every rate (decision 20, K22).** The two-integrator section now runs as itself
+  with each unit delay replaced by a "reference-rate delay": a pure delay of 2 or 4 samples at
+  88.2 and 176.4 kHz, otherwise z^-M times a second-order allpass whose phase equals one
+  44.1 kHz sample's at the section's cutoff and at 18 kHz (M = floor(rate / 44.1 kHz) - 2,
+  at least 0; when M is 0 the allpass's direct path closes the loop within the sample and the
+  section is solved for it). A one-pole section uses the same delay. The allpass coefficients
+  come from a 2x2 linear solve per coefficient update (every 16 samples under modulation), no
+  allocation. Engine against its own 44.1 kHz response (types 0, 4, 6, 7, cutoffs 0-992 by
+  32, resonance 0-127, 41 tones 20 Hz-20 kHz), largest error within 20 dB of the peak /
+  from 20 to 40 dB below, before -> after: 48 kHz 1.64 / 1.23 -> 0.27 / 0.31 dB; 88.2 kHz
+  5.45 / 6.13 -> 0.00 / 0.00; 96 kHz 5.74 / 6.44 -> 0.06 / 0.06; 192 kHz 12.36 / 9.00 ->
+  0.00 / 0.00. The test now covers every type (the first four on the full grid, the others on
+  a coarser one) with the accepted tolerances and fails on the earlier filter. CPU (two
+  sections, stereo, Apple M3 Max, Apple clang 17, -O3, ns per frame, unmodulated / modulated): before 9.0-9.4
+  / 12.8-14.8 at every rate; after 15.9 / 19.1 (44.1), 20.4 / 23.0 (48), 13.4 / 16.7 (88.2),
+  20.5 / 23.3 (96), 16.4 / 19.3 (192); at most 0.37 % of a core per voice at 192 kHz.
+- **Element LFO (decision 21).** Both modes, `oscairn_elfo_*`; reference mode is the default.
+  Tests: the reference mode's rate, falling start, depth laws and controller dependence at all
+  five rates, its indifference to the element's settings, a voice's zero-crossing spread
+  (1118 cents at CC 127, under 1 cent at CC 0); the settings mode's speed law, waves, delay,
+  fade-in, reset and added controller depth.
+- **Filter envelope** (`oscairn_fileg_*`, K33, K34) and **cutoff velocity sensitivity**
+  (`oscairn_fil_velsens`). Measured: 75 cents per level step at full depth (from `fe1`), the
+  pitch envelope's times, the amplitude envelope's velocity and key time shifts, depth velocity
+  sensitivity on five curves, cutoff index moved by 0.115 x sensitivity x (velocity - 115).
+- **Filter types** (decision 22, K23, K31, K32): all codes the reference loads.
+- **K2** resolved at the knots (curve 4 now within 0.16 dB in the listening sweep); **K27**:
+  filter code 18 turns into a fixed 1190 Hz low-pass about 10.5 s into a held note-60 note;
+  **K28**: 1.84 dB of output staging (decision 25).
+- **Converted patches.** All 9,993 patches of the converter's `coverage-2` output loaded in the
+  fork at `69fe1f5f`'s source (public API, preload 8192 frames; notes 36, 48, 60, 72, 84 at
+  velocity 100 for 0.43 s; `scripts/s4/loadcheck.cpp`, `loadall.log`): no unknown opcodes, no
+  non-finite output; 356 patches have no regions at all (the converter wrote the profile header
+  and nothing else) and load empty; 50 are silent on those notes (key-off parts, drum and
+  key-ranged parts among them; not looked into). Not listened to.
+- **Listening pairs** refreshed (curve 4, old files kept as `-before`) and added (filter at 96
+  and 48 kHz, five new types, filter envelope, element LFO): `measurements/listen-awm2/`.
+- Not done: pitch envelope sensitivities (K13), cutoff below index 144 and between knots (K20),
+  HPF key follow, velocity curves between the new knots.
+
 ### Upstream merge test (2026-11-01)
 
-`upstream/develop` has no commits after `f5c6e29f`: merging it into `oscairn` is a no-op.
-Of upstream's other branches, `paulfd/test-refactor` merges cleanly into `develop` but
-conflicts with `oscairn` in `CMakeLists.txt` (the `SFIZZ_CLAP` option line); the rest that
-conflict with `oscairn` conflict with `develop` too.
+`upstream/develop` has no commits after `f5c6e29f`: merging it into `oscairn` is a no-op
+(checked again at `69fe1f5f`). Of upstream's other branches, `paulfd/test-refactor` merges
+cleanly into `develop` but conflicts with `oscairn` in `CMakeLists.txt` (the `SFIZZ_CLAP`
+option line); `essej-onpolyaft` conflicts with `oscairn` (`Synth.cpp`, two tests) and with
+`develop` too.
 
 ## 12. Known differences from the reference
 
@@ -796,12 +891,12 @@ repository, or the local scripts beside the renders).
 | # | What differs | Size and where | Cause | Status | Reproduce | Code |
 | --- | --- | --- | --- | --- | --- | --- |
 | K1 | Element level, velocity and pan levels | 381 levels above -24 dB: largest 0.77 dB, 371 within 0.4 dB, 349 within 0.2 dB, 341 within 0.1 dB; below -24 dB up to 1.26 dB. The largest sit where a steep velocity sensitivity maps to a small effective velocity | Levels are rounded to whole 0.375 dB steps (level L: round(40 log10(127/L) / 0.375); velocity: the same on a 2048-step scale; pan far side: the sine law on the grid), now modelled; the rest is the velocity-spread fit | Accepted tolerance 0.4 dB above -24 dB (decision 14); below -24 dB and the spread residual unresolved | `lv1`, `lv2`; `scripts/engine_lv.py` | `oscairn/ElementLevel.cpp`, `ElementEnvelope.cpp` `levelGain` |
-| K2 | Velocity curves 0, 1, 2, 4 between measured velocities | Unknown between the 12 knots (1, 8, 16, 32, 48, 64, 80, 96, 104, 112, 120, 127). A sweep at sensitivity +32 found curve 4 off by +5.9 dB at velocity 56 and -6.2 dB at 72 (audible); curves 3 and 0 within 0.6 dB at velocities 8-127 in steps of 8 | Knots interpolated linearly in dB; curve 4 is not linear in dB between 48, 64 and 80 | Unresolved | `lv2` (`vc_*`), `ls1` (`vsw_*`); `scripts/listen.py` | `ElementLevel.cpp` `curveDb` |
+| K2 | Velocity curves 0, 1, 2, 4 between measured velocities | Now measured at velocity 1 and every fourth velocity (`fl3` `vk_*`, sensitivity +32) and interpolated linearly in dB between those; curve 4 rises 14 dB per 4 velocities between 60 and 68. The listening sweep (curve 4, sensitivity +32, velocities 8-127 in steps of 8) is within 0.16 dB per note (was +5.9 dB at 56 and -6.2 dB at 72). Those checks are against fitting renders where the sweep hits a knot; 56 and 72 are knots now | Linear in dB between knots 4 velocities apart | Resolved at the knots; between knots unverified | `fl3` (`vk_*`), `ls1` (`vsw_*`); `scripts/s4/vk.py`, `listen4.py` | `ElementLevel.cpp` `curveDb` |
 | K3 | Velocity response for curves other than 3 combined with offsets or negative sensitivity | Not measured | Order of offset, curve and sensitivity assumed | Unverified | none yet | `ElementLevel.cpp` |
 | K4 | Velocity sensitivity -64 | Reference gives a velocity of 1 about 86 dB down and silence otherwise; engine: velocity 1 at -84 dB, otherwise silent | Edge case approximated | Accepted approximation | `lv1` (`vs_0_*`) | `ElementLevel.cpp` |
 | K5 | Attack time between levels, level ratios 0 < smaller/larger < 1/16 | Not measured (larger levels with smaller level 1-7) | Factor interpolated between 1 (level 0) and 2.02 (ratio 1/16) | Unverified | `eg5`; `scripts/engine_att.py` | `ElementEnvelope.cpp` `attackDurationFactor` |
 | K6 | Attack times below index 40 | 2.7-7.8 ms in the table, unchecked | Measured knots only | Unverified | `eg2` | `ElementTables.cpp` |
-| K7 | Decay times above 103 | 105-117 fitted from three 40 s renders (ratios to the octave rule 0.974-0.979); 119-127 extrapolated with the 117 ratio; 16 s renders at 113/115 read 5-7 % shorter | Long decays need long holds | Fitted only, no checks | `eg4` (`decl_*`), `eg3`; `collect.py` | `ElementTables.cpp` |
+| K7 | Decay times above 103 | 105-117 fitted from three 40 s renders (ratios to the octave rule 0.974-0.979); 119-127 extrapolated with the 117 ratio; 16 s renders at 113/115 read 5-7 % shorter. Those renders use filter code 18, whose late low-pass (K27) lowers a 440 Hz sine by about 1 dB from about 10.5 s on: the long-decay fits may carry that bias (not re-measured) | Long decays need long holds | Fitted only, no checks | `eg4` (`decl_*`), `eg3`; `collect.py` | `ElementTables.cpp` |
 | K8 | Decay and release below index 56 | Measured knots, and the falls are not straight lines in dB; engine renders measured the same way differ from 4 % (index 50) to 3.9 times (release index 4) | Fast segments not modelled | Unresolved | `eg2`; `compare_eg.py` | `ElementTables.cpp` |
 | K9 | Release 77-95 | Measured directly (0.6-4.1 % below the octave rule); the curve deviates from a straight dB line by 0.3-0.8 dB here | Unknown | Table follows the measurements; shape difference unresolved | `eg2`, `eg4` (`rel_*`) | `ElementTables.cpp` |
 | K10 | Envelope velocity/key shifts that move an index below 56 | Up to 10 % (decay index 55) | Outside the decay table's valid span | Unresolved | `eg6` (`tvd_127_66/67`) | `ElementEnvelope.cpp` |
@@ -811,18 +906,25 @@ repository, or the local scripts beside the renders).
 | K14 | Note ends, chokes and per-note volume in the CLAP plugin | Per key, not per note: notes sharing a key in one context end, choke and scale together | sfizz voices know their key, not a note ID | Accepted limitation | `clap/test.cpp` | `clap/plugin.cpp` |
 | K15 | Loop continuity | 40 waveforms checked; largest click metric 1.62 (Clarinet3 ff St at 8.05 s), criterion proposed, not listened to | - | Unverified | `loops.py` (scratchpad) | - |
 | K16 | Factory waveform playback | Loads and sounds; level and timbre against the reference not compared per waveform | - | Unverified | `loadcheck` | - |
-| K17 | Element EQ, Part LFO, filter envelope, element LFO | Not in the engine. Filter envelope measured so far (`fe1`): at depth +63 a level step moves the cutoff about 75 cents (16, 32, 64 steps: +1197, +2405, +4817 cents), scaled by depth / 64 (+32 gives 37.5 cents per step); errors up to 62 cents against that law. Its velocity sensitivities do not fit a simple law yet (cutoff velocity sensitivity +32 and -32 both lower the cutoff at velocity 64; depth velocity sensitivity changes depth at velocity 127 too) | Not built this round | Open | `fe1`; `scripts/fl2.py`, `filt.py` | - |
-| K18 | Element LFO parameters | In the reference renders the element's LFO speed (0-63), wave, delay, fade-in, key-on reset and pitch depth parameters change nothing; the LFO driven through a controller set ("E.LFO PMD"/"AMD") runs at 4.848 Hz as a triangle from note-on whatever they are set to, and the extended speed range gives no modulation at all | Not known. The Part LFO's speed (0-63), wave, delay and fade do not change it either (`lf4`), so the rate has no parameter found yet | Unresolved | `lf2`, `lf3`, `lf4`; `scripts/lfo.py` | not yet in the engine |
-| K19 | Element LFO pitch depth through a controller set | Model: peak-to-peak cents = 1118 x 2^((min(2 ratio, 127) + cc - 253) / 16); 17 probes within -73..+54 cents of depth (4.3 %), the CC series reads up to 4 % low at CC 80-112; ratios below 8 and negative ratios not measured | Fitted law | Proposed | `lf3` (`dr_*`, `dc_*`); `scripts/lfo.py` | not yet in the engine |
+| K17 | Element EQ, Part LFO | Not in the engine. (The filter envelope and the element LFO are, from `531e2214` and `b1946dca`: K33-K36) | Not built | Open | none yet | - |
+| K18 | Element LFO parameters | In the reference renders the element's LFO speed (0-63), wave, delay, fade-in, key-on reset and pitch depth change nothing; the LFO driven through a controller set ("E.LFO PMD"/"AMD") runs at 4.848 Hz as a triangle from note-on, and the extended speed range gives no modulation at all; the Part LFO's settings do not set the rate either (`lf4`) | Not known | Modelled as the reference mode (decision 21); the settings mode makes them act by definition (K35) | `lf2`, `lf3`, `lf4`; `scripts/lfo.py` | `oscairn/ElementLfo.cpp` |
+| K19 | Element LFO pitch depth through a controller set | Model: peak-to-peak cents = 1118 x 2^((min(2 \|ratio\|, 127) + cc - 253) / 16), nothing at controller value 0 (`lf2`: 0.04 cents at CC 0); 17 probes within -73..+54 cents of depth (4.3 %), the CC series reads up to 4 % low at CC 80-112; ratios below 8 and negative ratios not measured (negative ratios invert the wave, assumed). Listening pair 15 (ratio 40): envelope within 0.08 / 0.36 dB | Fitted law | In the engine (reference mode) | `lf3` (`dr_*`, `dc_*`); `scripts/lfo.py` | `ElementLfo.cpp` `lfoPitchDepthCents` |
 | K20 | Filter cutoff table | Knots measured every 8 indices from 144 to 912; between knots linear in cents, unverified. The measured curve rises fast after roughly every 104 indices (one octave) and slower after, up to 190 cents in 8 indices; below 144 (cutoffs under 30 Hz, not measurable) the table continues at 11.54 cents per index; from 928 up the reference stays at 7290 Hz | Knots from `fl1` and `fl2` | Measured; between knots and below 144 unverified | `fl1`, `fl2`; `scripts/fl2.py knots` | `oscairn/ElementFilter.cpp` `kCutoffKnots` |
 | K21 | Filter gain, key follow | Gain: passband levels measured at 64, 128, 192, 230 (default) and 255 (-68.34, -44.38, -20.18, -5.45, +3.25 dB), linear in dB between; 0 is silent; below 64 0.375 dB per step assumed. Key follow: (sensitivity - 64) * 3.125 cents per key from note 60 leaves errors of -15 to +94 cents at notes 36 and 84; the largest at the default 74, where both notes read about 90 cents high (a note-60 render at 74 would show whether it is an offset). HPF key follow not measured or modelled | Fitted laws | Gain measured; key follow residual unresolved | `fl2` (`g4_*`, `k4_*`); `scripts/fl2.py gain`, `fl2.py key` | `ElementFilter.cpp` `filterGain`, `start` |
-| K22 | Filter at other sample rates | Within 0.64 dB of the 44.1 kHz response where it is above -20 dB, and 1.28 dB from -20 to -40 dB, for cutoffs up to index 700 (about 2.2 kHz) and tones up to 5 kHz; per section up to 1.6 dB below 5 kHz near the 7350 Hz cutoff limit and up to 4 dB above 10 kHz (twice that for two-section types), at 88.2-192 kHz | A two-pole filter at another rate cannot follow the 44.1 kHz response near its Nyquist; the sections are carried over by an allpass frequency transform pinned at DC, the cutoff and Nyquist | Unresolved residual (decision 18) | `OscairnT.cpp` cross-rate tests; `xform.py` (scratchpad) | `ElementFilter.cpp` `coefficients` |
-| K23 | Filter types | Implemented: 0 (two low-pass sections), 4 (low-pass, then high-pass with damping 1), 6 (two high-pass), 7 (one high-pass). Others pass the signal through. Measured but not built: 8 (BPF12D) fits two band-pass sections with the resonance damping (rms 0.08-0.61 dB); 1 fits two sections with damping 1.405 at resonance 0 but not its resonance; 2 fits a section times a one-pole. The six type-9 renders all show the type-8 768/64 response whatever their cutoff and resonance, so the reference kept the earlier filter (or the recorder carried it over): re-record. Types 3, 5, 10-17 not analysed yet | Not yet modelled | Open | `fl1`, `fl2` (`ty*`); `scripts/types.py` | `ElementFilter.cpp` `filterTypeSupported` |
+| K22 | Filter at other sample rates | Resolved by design (decision 20, `f4b72515`): each section is the 44.1 kHz section with its unit delays replaced by a pure delay (88.2, 176.4 kHz) or z^-M times a second-order allpass pinned to one 44.1 kHz sample at the section's cutoff and at 18 kHz. Engine against its own 44.1 kHz response, types 0, 4, 6, 7, cutoffs 0-992 in steps of 32, resonance 0-127, 41 tones 20 Hz-20 kHz: largest error 0.27 dB at 48 kHz, 0.00 at 88.2, 0.06 at 96, 0.00 at 192 kHz (was 1.64, 5.45, 5.74, 12.36 dB with the allpass frequency transform). The test covers every type. Above 22.05 kHz at 88.2 kHz and up the response repeats the 44.1 kHz one mirrored (ultrasonic, K37). CPU, two sections stereo: 1.3-2.2 times the earlier filter (section 11) | - | Resolved within the accepted tolerances | `OscairnT.cpp` cross-rate test; `scripts/s4/xrate.cpp`, `scripts/s4/xr*.py` | `ElementFilter.cpp` `pin`, `run` |
+| K23 | Filter types | All codes the reference loads are built (`704d872d`, decision 22). Fitted on `fl1`-`fl3` renders with the engine's cutoff and damping laws, rms over each type's renders: 1 (resonant section + damping-1 section) 0.39 dB, 2 (section + one-pole) 0.36, 3 (one-pole + section 4097 cents higher) 4.2 (K31), 5 (one-pole + HPF section) 0.31, 8 (two band-pass) 0.30 below resonance 96 (K24), 10 (low-pass and high-pass with damping 1, 38.2 cents apart per resonance step above 7.5) 0.37, 11 (band-pass) 0.33, 12 (two notch) 0.75, 13 (notch) 0.61, 14-16 (two sections summed) 0.28, 0.23, 0.33, 17 (two notch in series) 0.76, 19 (low-pass minus band-pass) 0.83 over 5 renders. Test points outside 1 dB, left out of the test: 2 at 512/64 at 223 Hz +1.08, 10 at 512/32 at 223 Hz +1.20, 12 at 512/0 at 223 Hz +1.13, 14 at 512/64 at 223 Hz +1.38, 17 at 512/64 at 223 Hz +1.37 (all half the cutoff, at index 512). Codes 9 and 20 do not load on the reference (the recorder keeps the previous performance; re-recorded in `fl3` with the same result); 21 is flat at the filter gain | Fitted models | Built; checks are against fitting renders | `fl1`, `fl2`, `fl3` (`ty*`); `scripts/s4/types2.py`, `tfit*.py`, `t1.py`, `t10.py`, `t19.py` | `ElementFilter.cpp` `start`, `update` |
 | K29 | Filter damping near the top of the range | At resonance 0 the reference's damping falls from 2 at index 816 to 1 at about 912 (0.0104 per index), measured; the engine follows that through the knots. How it combines with resonance there is not measured (the engine takes the smaller) | - | Partly measured | `fl2` (`t4_816`-`t4_912`) | `ElementFilter.cpp` `dampingLimit` |
-| K30 | Element LFO amplitude depth through a controller set | A downward triangle in dB from 0 at note-on; peak-to-peak 2.2, 4.8, 8.1, 11.8, 16.9, 23.9 dB at ratios 8, 16, 24, 32, 40, 48 (CC 127) and about 83 dB at 63; at ratio 63 CC 32, 64, 96 gives the ratio 16, 32, 48 values, so ratio and CC multiply (unlike the pitch depth, K19). No law found; values above 24 dB need a measurement without the analysis's -26 dB floor | Measured points | Open | `lf3` (`amd_*`), `lf4` (`pa_*`, `pac_*`); `scripts/lfo.py` | not yet in the engine |
-| K24 | Two-section filters at resonance 96 and above | The reference's response peaks at about 50-55 dB instead of the 60-80 dB that two undamped sections would give; the engine follows the linear model | Probably internal limiting; not measured with a level sweep | Unresolved | `fl1` (`t0r_512_*`, `t6r_512_*`) | `ElementFilter.cpp` |
-| K25 | Filter under cutoff modulation | The engine runs each section as a biquad with the reference's response and updates it every 16 samples; the reference's structure under fast cutoff changes is not compared | - | Unverified | none yet | `ElementFilter.cpp` |
+| K30 | Element LFO amplitude depth through a controller set | A downward triangle in dB from 0 at note-on; peak-to-peak 2.2, 4.8, 8.1, 11.8, 16.9, 23.9 dB at ratios 8, 16, 24, 32, 40, 48 (CC 127) and about 83 dB at 63; at ratio 63 CC 32, 64, 96 gives the ratio 16, 32, 48 values, so ratio and CC multiply (unlike the pitch depth, K19). The engine interpolates those points linearly at \|ratio\| x cc / 127; values above 24 dB need a measurement without the analysis's -26 dB floor. Listening pair 16 (ratio 48): envelope within 0.22 / 0.61 dB | Measured points | In the engine; no law | `lf3` (`amd_*`), `lf4` (`pa_*`, `pac_*`); `scripts/lfo.py` | `ElementLfo.cpp` `lfoAmpDepthDb` |
+| K24 | Two-section filters at resonance 96 and above | The reference's response peaks at about 50-55 dB instead of the 60-80 dB that two undamped sections would give; type 8 at 96 and 127 is far from any linear model (rms 8-10 dB); the engine follows the linear model | Probably internal limiting; not measured with a level sweep | Unresolved | `fl1` (`t0r_512_*`, `t6r_512_*`), `fl3` (`ty8_512_96`, `_127`) | `ElementFilter.cpp` |
+| K25 | Filter under cutoff modulation | The engine runs the state-variable structure itself (since `f4b72515`) and redesigns it every 16 samples from the filter envelope and LFO cents; the reference's update rate and structure under fast cutoff changes are not compared | - | Unverified | none yet | `ElementFilter.cpp` `process` |
 | K26 | Note shift, transpose, coarse tune and bend range | The reference's documented ranges are narrower (Part and Performance note shift and element coarse tune +-48 semitones, bend range -48 to +24 semitones); Oscairn takes transpose to +-127 semitones and bends to +-120 semitones, unclamped | - | Deliberate (decision 17) | `OscairnT.cpp` "Note shift and bend range" | stock `Defaults.cpp` (permissive bounds) |
-| K27 | Level of held looped waveforms | Over 30 s held notes the reference's level steps while Oscairn stays flat within 0.2 dB with the same samples and loop points: Oboe2 Med R+ about +-1.8 dB (1.0, 12.2, 17.8 s), Clarinet3 ff St falls about 0.8 dB near 14 s, Fat PWM L 4-4.7 dB (17.1, 22.0, 26.0 s), CinemaStr Vn mf St about +-1.9 dB (14.2, 14.5, 21.1 s) | Unknown | Unresolved | `ls1` (`wave_*`); `scripts/listen.py`, pairs in `measurements/listen-awm2/` | - |
-| K28 | Overall level of the sine probes | Oscairn 1.7-1.9 dB louder than the reference in every sine probe, constant across envelopes, velocities, pan and pitch; waveform probes 1.5-4.3 dB louder | Not established; the probe SFZ files carry no Part or Performance volume | Unresolved | `listen-awm2/pairs.json`; `scripts/listen.py` | - |
-
+| K27 | Level of held looped waveforms | The steps are a low-pass: the probes use filter code 18, which the reference passes untouched at first and then, about 10.5 s after a note-60 note-on, turns into a fixed two-pole low-pass at about 1190 Hz with damping 2 (fit rms 0.09 dB), fading in over about 1.5 s, whatever the element's cutoff (384 or 640) and resonance (0 or 64); at note 84 nothing within 16 s; code 21 shows nothing within 16 s. Held noise shows it directly; repeated Oboe2 render agrees | Reference behaviour of code 18; factory elements do not use code 18 | Not modelled (decision 26); reproduces | `ls1`, `ls2` (`noise_hold`), `ls3` | - |
+| K28 | Overall level of the sine probes | The reference plays a full-scale sample at Part Volume 127, pan centre, at -9.19 dB per channel (`lv1` `pv_127`); sfizz at CC 7 127 at -7.35 dB (its fixed global volume; its default CC 7 of 100 is -4.15 dB, exactly the probes' Part Volume 100). So the sine pairs' +1.7 to +1.9 dB is 1.84 dB of output staging (the equal-power centre -3.01 dB and a further -6.18 dB on the reference side) | Output staging | Cause found; where to compensate is decision 25 | `lv1`; `scripts/s4/k28` | stock `Defaults.h` `globalVolume` |
+| K31 | Filter type 3 where its section passes the top of the range | The section sits 4097 cents above the cutoff and is held at 7290 Hz; with resonance there the reference shows a weak peak (fit damping 1.36 at cutoff 768, resonance 64) where the engine has the full one (15 dB rms off); low cutoffs (64-448 at resonance 0) 1.2-3.7 dB rms | Not measured near the top | Unresolved | `fl1`, `fl2` (`t3*`, `ty3*`) | `ElementFilter.cpp` `update` case 3 |
+| K32 | Dual types with a distance that pushes the second section past the top | At distance +127 (cutoff 512, resonance 32) the reference's second section is near 16 kHz, above 7290 Hz; the engine holds it at 7290 Hz (rms 6.7-7.8 dB for that render); distances -128, -64, +64 fit within 0.13-0.96 dB with 7 index steps per distance step | Above-top frequencies not modelled | Unresolved | `fl3` (`ty14d_*`-`ty16d_*`); `scripts/s4/tdist.py` | `ElementFilter.cpp` `update` cases 14-17 |
+| K33 | Filter envelope times | The engine uses the pitch envelope's law (the decay table's full-scale time, hold table); glides measured from noise renders agree within the analysis's spread: attack 72 -2 to -7 %, decay 80 -3 to +5 %, time velocity (+63 at velocity 32) -2 to -11 %, key follow (+63 at note 84) -12 to +6 %, at 44.1, 48 and 96 kHz; attack 48 and release 48 read 20-25 % shorter on the reference than the table (too fast for the analysis window) | Shared law, measured only at these points | Partly checked | `fl3` (`fa_*`, `fd_*`, `fr_*`, `ftv_*`, `ftk_*`); `scripts/s4/eng_feg.py` | `ElementPitch.cpp` |
+| K34 | Filter envelope depth and cutoff velocity sensitivity | Cutoff velocity sensitivity: the index moves by 0.115 x sensitivity x (velocity - 115), negative sensitivities mirrored; engine against 80 renders at 44.1, 48, 96 kHz: rms 44-46 cents, largest 138-158. Depth velocity sensitivity: the depth at +63 measured per curve, other sensitivities scale the distance from 1, negative mirrored; 72 renders: rms 36-38 cents, largest 74-82. Both are checks against the fitting renders. Curves 0, 1, 3, 4 measured at 5 velocities and assumed 0 at velocity 1 | Fitted laws | Built | `fl3` (`cv_*`, `dv_*`, `dc_*`); `scripts/s4/cv.py`, `cvfit.py`, `eng_feg.py` | `ElementFilter.cpp` `cutoffVelocityCents`; `ElementPitch.cpp` `filterDepthVelocityFactor` |
+| K35 | Element LFO settings mode | Speed, extended speed, wave, delay, fade-in, reset and depth mappings are definitions (decision 21), not measurements: the reference ignores those parameters | By definition | Deliberate | `OscairnT.cpp` "Element LFO, settings mode" | `ElementLfo.h` |
+| K36 | Element LFO in reference mode: what is not built | The filter destination through a controller set (E.LFO FMD), the controller sets' polarity and curve, and ratios below 8 or negative are not measured; the engine uses the ratio and controller value only | Not measured | Open | none yet | `ElementLfo.cpp` |
+| K37 | Filter above 22.05 kHz at 88.2 kHz and up | With the reference-rate delay the response above 22.05 kHz repeats the 44.1 kHz response mirrored (a low-pass passes again toward 44.1 kHz); inaudible, but sample content up there is not attenuated as an analog-style filter would | Consequence of decision 20's design | Accepted (inaudible); a fixed ultrasonic low-pass would cost more CPU | none | `ElementFilter.cpp` |
+| K38 | Filter at rates other than the five, or above 705.6 kHz | Rates between 44.1 and 48 kHz put the allpass's pole near Nyquist; above 16 x 44.1 kHz the delay line is capped (comment in the code); neither is tested | Design limits | Unverified | none | `ElementFilter.cpp` `setSampleRate` |
