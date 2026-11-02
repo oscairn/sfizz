@@ -375,6 +375,17 @@ public:
     void off(int delay, bool fast = false) noexcept;
 
     /**
+     * @brief Scales the voice by a host's per-note gain (smoothed with the amplitude).
+     */
+    void setHostGain(float gain) noexcept;
+
+    /**
+     * @brief Fades the voice out linearly over `frames` from `delay`, then frees it,
+     *        whatever its envelope is doing (a host's choke).
+     */
+    void fadeOut(int delay, int frames) noexcept;
+
+    /**
      * @brief gets the age of the Voice
      *
      * @return

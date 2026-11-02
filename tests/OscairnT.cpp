@@ -216,3 +216,22 @@ TEST_CASE("[Oscairn] A region with the element envelope plays through it and end
         synth.renderBlock(buffer);
     REQUIRE(synth.getNumActiveVoices() == 0);
 }
+
+TEST_CASE("[Oscairn] Per-note voice count, gain and fade-out")
+{
+    sfz::Synth synth;
+    synth.setSampleRate(48000);
+    synth.setSamplesPerBlock(256);
+    synth.loadSfzString(fs::current_path() / "tests/TestFiles/oscairn.sfz", "<region> sample=*sine amp_veltrack=0 ampeg_release=10");
+    sfz::AudioBuffer<float> buffer { 2, 256 };
+    synth.noteOn(0, 60, 100);
+    synth.noteOn(0, 64, 100);
+    synth.renderBlock(buffer);
+    REQUIRE(synth.getNumActiveVoicesForNote(60) == 1);
+    REQUIRE(synth.getNumActiveVoicesForNote(64) == 1);
+    REQUIRE(synth.getNumActiveVoicesForNote(61) == 0);
+    synth.fadeOutNote(10, 64, 144);
+    synth.renderBlock(buffer);
+    REQUIRE(synth.getNumActiveVoicesForNote(64) == 0);
+    REQUIRE(synth.getNumActiveVoicesForNote(60) == 1);
+}

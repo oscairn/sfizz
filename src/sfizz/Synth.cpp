@@ -1837,6 +1837,31 @@ const Region* Synth::getRegionById(NumericId<Region> id) const noexcept
     return layer ? &layer->getRegion() : nullptr;
 }
 
+int Synth::getNumActiveVoicesForNote(int noteNumber) const noexcept
+{
+    const Impl& impl = *impl_;
+    int count = 0;
+    for (auto v = impl.voiceManager_.cbegin(); v != impl.voiceManager_.cend(); ++v)
+        count += !v->isFree() && v->getTriggerEvent().number == noteNumber;
+    return count;
+}
+
+void Synth::setNoteGain(int noteNumber, float gain) noexcept
+{
+    Impl& impl = *impl_;
+    for (Voice& v : impl.voiceManager_)
+        if (!v.isFree() && v.getTriggerEvent().number == noteNumber)
+            v.setHostGain(gain);
+}
+
+void Synth::fadeOutNote(int delay, int noteNumber, int frames) noexcept
+{
+    Impl& impl = *impl_;
+    for (Voice& v : impl.voiceManager_)
+        if (!v.isFree() && v.getTriggerEvent().number == noteNumber)
+            v.fadeOut(delay, frames);
+}
+
 const Voice* Synth::getVoiceView(int idx) const noexcept
 {
     Impl& impl = *impl_;

@@ -278,6 +278,10 @@ struct Voice::Impl
 
     ADSREnvelope egAmplitude_ { resources_.getMidiState(), resources_.getCurves() };
     oscairn::ElementEnvelope oscairnAmpEG_; // replaces the amp EG when the region enables it
+    float hostGain_ { 1.0f };
+    int fadeDelay_ { -1 }; // a fade-out starts after this many frames; -1 when none
+    int fadeLeft_ { 0 };
+    int fadeLength_ { 0 };
     std::unique_ptr<ADSREnvelope> egPitch_;
     std::unique_ptr<ADSREnvelope> egFilter_;
 
@@ -607,6 +611,20 @@ void Voice::Impl::release(int delay) noexcept
     modMatrix.releaseVoice(id_, region_->getId(), delay);
 }
 
+void Voice::setHostGain(float gain) noexcept
+{
+    impl_->hostGain_ = gain;
+}
+
+void Voice::fadeOut(int delay, int frames) noexcept
+{
+    Impl& impl = *impl_;
+    if (impl.fadeDelay_ >= 0)
+        return; // already fading
+    impl.fadeDelay_ = std::max(0, delay);
+    impl.fadeLength_ = impl.fadeLeft_ = std::max(1, frames);
+}
+
 void Voice::off(int delay, bool fast) noexcept
 {
     Impl& impl = *impl_;
@@ -829,6 +847,9 @@ void Voice::renderBlock(AudioSpan<float, 2> buffer) noexcept
             impl.switchState(State::cleanMeUp);
     }
 
+    if (impl.fadeDelay_ == 0 && impl.fadeLeft_ == 0)
+        impl.switchState(State::cleanMeUp);
+
     impl.powerFollower_.process(buffer);
 
     impl.age_ += buffer.getNumFrames();
@@ -934,7 +955,17 @@ void Voice::Impl::amplitudeEnvelope(absl::Span<float> modulationSpan) noexcept
     }
 
     // Smooth the gain transitions
+    applyGain1<float>(hostGain_, modulationSpan);
     gainSmoother_.process(modulationSpan, modulationSpan);
+    for (size_t i = 0; fadeDelay_ >= 0 && i < numSamples; ++i) {
+        if (fadeDelay_ > 0) {
+            --fadeDelay_;
+            continue;
+        }
+        modulationSpan[i] *= static_cast<float>(fadeLeft_) / static_cast<float>(fadeLength_);
+        if (fadeLeft_ > 0)
+            --fadeLeft_;
+    }
 }
 
 void Voice::Impl::ampStageMono(AudioSpan<float> buffer) noexcept
@@ -1722,6 +1753,8 @@ void Voice::reset() noexcept
     impl.switchState(State::idle);
     impl.layer_ = nullptr;
     impl.region_ = nullptr;
+    impl.hostGain_ = 1.0f;
+    impl.fadeDelay_ = -1;
     impl.currentPromise_.reset();
     impl.sourcePosition_ = 0;
     impl.age_ = 0;

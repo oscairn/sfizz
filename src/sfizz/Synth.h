@@ -675,6 +675,22 @@ public:
     void allSoundOff() noexcept;
 
     /**
+     * @brief Number of voices playing for a note number (including released ones).
+     */
+    int getNumActiveVoicesForNote(int noteNumber) const noexcept;
+
+    /**
+     * @brief Scales the voices playing for a note number (a host's per-note volume).
+     */
+    void setNoteGain(int noteNumber, float gain) noexcept;
+
+    /**
+     * @brief Fades out the voices playing for a note number over `frames`, then frees them
+     *        (a host's choke).
+     */
+    void fadeOutNote(int delay, int noteNumber, int frames) noexcept;
+
+    /**
      * @brief Add external definitions prior to loading.
      *
      */
