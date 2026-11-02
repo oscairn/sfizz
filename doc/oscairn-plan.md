@@ -665,7 +665,7 @@ are not straight lines in dB).
 
 The open items above were taken up in the second session (below).
 
-### Second session (2026-11-02): amp envelope finished, velocity and pan, pitch envelope, Oscairn integration
+### Second session (2026-11-01): amp envelope finished, velocity and pan, pitch envelope, Oscairn integration
 
 Reference batches `lv1`, `lv2`, `eg4`-`eg6`, `pf1`, `pf2` (about 640 renders, 44.1 kHz,
 same probe set-up as above).
@@ -752,6 +752,33 @@ note or on 36, 60 or 84. Loops: 40 looped waveforms picked at random (seed 2), r
 50 ms neighbourhood (Clarinet3 ff St at 8.05 s; proposed criterion, not listened to). The
 Salamander piano is not here.
 
+### Third session (2026-11-01): level grid, filter, element LFO findings, sample rates
+
+- **Level grid.** Element level, velocity gain and balance-pan gains are rounded to whole
+  0.375 dB steps, the rule found from the renders (register K1).
+- **Element filter** (`oscairn_fil_type`, `_cutoff`, `_resonance`, `_hpf_cutoff`,
+  `_keyfollow`, `_gain`): types 0, 4, 6, 7 as two-integrator state-variable sections matching
+  the reference at 44.1 kHz, cutoff knots every 8 indices, measured top of range, damping limit,
+  key follow and gain (K20-K25, K29). Types 1, 2, 8 measured, not built; type 9 renders need
+  re-recording (K23).
+- **Sample rates (decision 18).** Envelope, pitch envelope and filter tests run at 44.1, 48,
+  88.2, 96 and 192 kHz; a voice using all profile features keeps its level within 0.1 dB and its
+  release timing within 10 ms across those rates. The filter is carried to other rates by an
+  allpass frequency transform; the residual is K22.
+- **Pitch range (decision 17).** No profile limit on note shift or bend; a test plays +-127
+  semitones with 120-semitone bends (K26).
+- **Element LFO.** Through controller sets ("E.LFO PMD"/"AMD") the reference's element LFO runs
+  at 4.848 Hz as a triangle starting at zero and falling, whatever the element's own speed,
+  wave, delay and fade say (K18); pitch depth law fitted (K19); amplitude depth is a downward
+  triangle in dB (K30). The Part LFO's settings do not set the rate either. Not built this
+  round.
+- **Filter envelope.** Level law measured (75 cents per step at full depth); times and
+  velocity sensitivities not resolved; not built (K17).
+- **Listening pairs** in `measurements/listen-awm2/` (not committed) with a README; they
+  brought out K2 (curve 4 between knots), K27 (held-waveform level steps) and K28 (overall level
+  of the sine probes).
+- Not done this round: velocity curves between knots, pitch envelope sensitivities.
+
 ### Upstream merge test (2026-11-01)
 
 `upstream/develop` has no commits after `f5c6e29f`: merging it into `oscairn` is a no-op.
@@ -784,13 +811,15 @@ repository, or the local scripts beside the renders).
 | K14 | Note ends, chokes and per-note volume in the CLAP plugin | Per key, not per note: notes sharing a key in one context end, choke and scale together | sfizz voices know their key, not a note ID | Accepted limitation | `clap/test.cpp` | `clap/plugin.cpp` |
 | K15 | Loop continuity | 40 waveforms checked; largest click metric 1.62 (Clarinet3 ff St at 8.05 s), criterion proposed, not listened to | - | Unverified | `loops.py` (scratchpad) | - |
 | K16 | Factory waveform playback | Loads and sounds; level and timbre against the reference not compared per waveform | - | Unverified | `loadcheck` | - |
-| K17 | Element EQ, Part LFO, filter envelope | Not in the engine | - | Open | `pf1`, `pf2` | - |
-| K18 | Element LFO parameters | In the reference renders the element's LFO speed (0-63), wave, delay, fade-in, key-on reset and pitch depth parameters change nothing; the LFO driven through a controller set ("E.LFO PMD"/"AMD") runs at 4.848 Hz as a triangle from note-on whatever they are set to, and the extended speed range gives no modulation at all | Not known; whether the rate comes from the Part LFO is being measured (`lf4`) | Unresolved | `lf2`, `lf3`; `scripts/lfo.py` | not yet in the engine |
+| K17 | Element EQ, Part LFO, filter envelope, element LFO | Not in the engine. Filter envelope measured so far (`fe1`): at depth +63 a level step moves the cutoff about 75 cents (16, 32, 64 steps: +1197, +2405, +4817 cents), scaled by depth / 64 (+32 gives 37.5 cents per step); errors up to 62 cents against that law. Its velocity sensitivities do not fit a simple law yet (cutoff velocity sensitivity +32 and -32 both lower the cutoff at velocity 64; depth velocity sensitivity changes depth at velocity 127 too) | Not built this round | Open | `fe1`; `scripts/fl2.py`, `filt.py` | - |
+| K18 | Element LFO parameters | In the reference renders the element's LFO speed (0-63), wave, delay, fade-in, key-on reset and pitch depth parameters change nothing; the LFO driven through a controller set ("E.LFO PMD"/"AMD") runs at 4.848 Hz as a triangle from note-on whatever they are set to, and the extended speed range gives no modulation at all | Not known. The Part LFO's speed (0-63), wave, delay and fade do not change it either (`lf4`), so the rate has no parameter found yet | Unresolved | `lf2`, `lf3`, `lf4`; `scripts/lfo.py` | not yet in the engine |
 | K19 | Element LFO pitch depth through a controller set | Model: peak-to-peak cents = 1118 x 2^((min(2 ratio, 127) + cc - 253) / 16); 17 probes within -73..+54 cents of depth (4.3 %), the CC series reads up to 4 % low at CC 80-112; ratios below 8 and negative ratios not measured | Fitted law | Proposed | `lf3` (`dr_*`, `dc_*`); `scripts/lfo.py` | not yet in the engine |
-| K20 | Filter cutoff table | Measured every 16-32 indices from 128 to 832 (white noise, resonance 0); the measured cutoff wiggles up to 150 cents around a straight line in cents, so values between knots are unverified; below 128 and above 832 extrapolated at 11.5 cents per index up to the 7350 Hz limit | Knots from `fl1` | Provisional until the `fl2` knots (every 8 indices) | `fl1`; `scripts/svf.py` | `oscairn/ElementFilter.cpp` `kCutoffKnots` |
-| K21 | Filter passband level | Reference passband sits 5.2-5.6 dB below the unfiltered level at the default filter gain; the engine's filter has unity passband | Filter gain not modelled yet | Open (measuring in `fl2`) | `fl1`; `scripts/svf.py` | `ElementFilter.cpp` |
+| K20 | Filter cutoff table | Knots measured every 8 indices from 144 to 912; between knots linear in cents, unverified. The measured curve rises fast after roughly every 104 indices (one octave) and slower after, up to 190 cents in 8 indices; below 144 (cutoffs under 30 Hz, not measurable) the table continues at 11.54 cents per index; from 928 up the reference stays at 7290 Hz | Knots from `fl1` and `fl2` | Measured; between knots and below 144 unverified | `fl1`, `fl2`; `scripts/fl2.py knots` | `oscairn/ElementFilter.cpp` `kCutoffKnots` |
+| K21 | Filter gain, key follow | Gain: passband levels measured at 64, 128, 192, 230 (default) and 255 (-68.34, -44.38, -20.18, -5.45, +3.25 dB), linear in dB between; 0 is silent; below 64 0.375 dB per step assumed. Key follow: (sensitivity - 64) * 3.125 cents per key from note 60 leaves errors of -15 to +94 cents at notes 36 and 84; the largest at the default 74, where both notes read about 90 cents high (a note-60 render at 74 would show whether it is an offset). HPF key follow not measured or modelled | Fitted laws | Gain measured; key follow residual unresolved | `fl2` (`g4_*`, `k4_*`); `scripts/fl2.py gain`, `fl2.py key` | `ElementFilter.cpp` `filterGain`, `start` |
 | K22 | Filter at other sample rates | Within 0.64 dB of the 44.1 kHz response where it is above -20 dB, and 1.28 dB from -20 to -40 dB, for cutoffs up to index 700 (about 2.2 kHz) and tones up to 5 kHz; per section up to 1.6 dB below 5 kHz near the 7350 Hz cutoff limit and up to 4 dB above 10 kHz (twice that for two-section types), at 88.2-192 kHz | A two-pole filter at another rate cannot follow the 44.1 kHz response near its Nyquist; the sections are carried over by an allpass frequency transform pinned at DC, the cutoff and Nyquist | Unresolved residual (decision 18) | `OscairnT.cpp` cross-rate tests; `xform.py` (scratchpad) | `ElementFilter.cpp` `coefficients` |
-| K23 | Filter types | Implemented: 0 (two low-pass sections), 4 (low-pass, then high-pass with damping 1), 6 (two high-pass), 7 (one high-pass). Others pass the signal through: 1 fits two sections with damping 1.405 at resonance 0 but not its resonance; 2 fits a section times a one-pole at 1-1.8 times the cutoff; the rest are being measured | Not yet modelled | Open | `fl1`, `fl2`; `scripts/svf.py` | `ElementFilter.cpp` `filterTypeSupported` |
+| K23 | Filter types | Implemented: 0 (two low-pass sections), 4 (low-pass, then high-pass with damping 1), 6 (two high-pass), 7 (one high-pass). Others pass the signal through. Measured but not built: 8 (BPF12D) fits two band-pass sections with the resonance damping (rms 0.08-0.61 dB); 1 fits two sections with damping 1.405 at resonance 0 but not its resonance; 2 fits a section times a one-pole. The six type-9 renders all show the type-8 768/64 response whatever their cutoff and resonance, so the reference kept the earlier filter (or the recorder carried it over): re-record. Types 3, 5, 10-17 not analysed yet | Not yet modelled | Open | `fl1`, `fl2` (`ty*`); `scripts/types.py` | `ElementFilter.cpp` `filterTypeSupported` |
+| K29 | Filter damping near the top of the range | At resonance 0 the reference's damping falls from 2 at index 816 to 1 at about 912 (0.0104 per index), measured; the engine follows that through the knots. How it combines with resonance there is not measured (the engine takes the smaller) | - | Partly measured | `fl2` (`t4_816`-`t4_912`) | `ElementFilter.cpp` `dampingLimit` |
+| K30 | Element LFO amplitude depth through a controller set | A downward triangle in dB from 0 at note-on; peak-to-peak 2.2, 4.8, 8.1, 11.8, 16.9, 23.9 dB at ratios 8, 16, 24, 32, 40, 48 (CC 127) and about 83 dB at 63; at ratio 63 CC 32, 64, 96 gives the ratio 16, 32, 48 values, so ratio and CC multiply (unlike the pitch depth, K19). No law found; values above 24 dB need a measurement without the analysis's -26 dB floor | Measured points | Open | `lf3` (`amd_*`), `lf4` (`pa_*`, `pac_*`); `scripts/lfo.py` | not yet in the engine |
 | K24 | Two-section filters at resonance 96 and above | The reference's response peaks at about 50-55 dB instead of the 60-80 dB that two undamped sections would give; the engine follows the linear model | Probably internal limiting; not measured with a level sweep | Unresolved | `fl1` (`t0r_512_*`, `t6r_512_*`) | `ElementFilter.cpp` |
 | K25 | Filter under cutoff modulation | The engine runs each section as a biquad with the reference's response and updates it every 16 samples; the reference's structure under fast cutoff changes is not compared | - | Unverified | none yet | `ElementFilter.cpp` |
 | K26 | Note shift, transpose, coarse tune and bend range | The reference's documented ranges are narrower (Part and Performance note shift and element coarse tune +-48 semitones, bend range -48 to +24 semitones); Oscairn takes transpose to +-127 semitones and bends to +-120 semitones, unclamped | - | Deliberate (decision 17) | `OscairnT.cpp` "Note shift and bend range" | stock `Defaults.cpp` (permissive bounds) |
