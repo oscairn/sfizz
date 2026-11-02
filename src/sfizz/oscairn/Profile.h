@@ -12,6 +12,7 @@
 #pragma once
 #include "../Opcode.h"
 #include "ElementEnvelope.h"
+#include "ElementFilter.h"
 #include "ElementLevel.h"
 #include "ElementPitch.h"
 
@@ -33,6 +34,9 @@ struct RegionData {
     // Pitch envelope, added to the voice's pitch in cents
     bool pegEnabled { false };
     ElementPitchParameters peg;
+    // Element filter, ahead of sfizz's own filters
+    bool filterEnabled { false };
+    ElementFilterParameters filter;
 };
 
 /**

@@ -18,6 +18,8 @@ const OpcodeSpec<int32_t> bipolar64 { 0, Range<int32_t>(-64, 63), kEnforceBounds
 const OpcodeSpec<int32_t> segments { 4, Range<int32_t>(0, 4), kEnforceBounds };
 const OpcodeSpec<int32_t> curves { 3, Range<int32_t>(0, 4), kEnforceBounds };
 const OpcodeSpec<int32_t> level255 { 128, Range<int32_t>(0, 255), kEnforceBounds };
+const OpcodeSpec<int32_t> index1023 { 0, Range<int32_t>(0, 1023), kEnforceBounds };
+const OpcodeSpec<int32_t> filterTypes { 18, Range<int32_t>(0, 18), kEnforceBounds };
 const OpcodeSpec<int32_t> note { 24, Range<int32_t>(0, 127), kEnforceBounds | kCanBeNote };
 }
 
@@ -81,6 +83,10 @@ bool parseRegionOpcode(const Opcode& opcode, RegionData& data)
     case hash("oscairn_pitcheg_attack_level"): data.peg.attackLevel = opcode.read(level255); data.pegEnabled = true; return true;
     case hash("oscairn_pitcheg_release_level"): data.peg.releaseLevel = opcode.read(level255); data.pegEnabled = true; return true;
     case hash("oscairn_pitcheg_depth"): data.peg.depth = opcode.read(bipolar64); data.pegEnabled = true; return true;
+    case hash("oscairn_fil_type"): data.filter.type = opcode.read(filterTypes); data.filterEnabled = true; return true;
+    case hash("oscairn_fil_cutoff"): data.filter.cutoff = opcode.read(index1023); data.filterEnabled = true; return true;
+    case hash("oscairn_fil_resonance"): data.filter.resonance = opcode.read(index127); data.filterEnabled = true; return true;
+    case hash("oscairn_fil_hpf_cutoff"): data.filter.hpfCutoff = opcode.read(index1023); data.filterEnabled = true; return true;
     default:
         return false;
     }

@@ -6,6 +6,7 @@
 
 #include "Voice.h"
 #include "oscairn/ElementEnvelope.h"
+#include "oscairn/ElementFilter.h"
 #include "oscairn/ElementLevel.h"
 #include "oscairn/ElementPitch.h"
 #include "Layer.h"
@@ -281,6 +282,7 @@ struct Voice::Impl
     ADSREnvelope egAmplitude_ { resources_.getMidiState(), resources_.getCurves() };
     oscairn::ElementEnvelope oscairnAmpEG_; // replaces the amp EG when the region enables it
     oscairn::ElementPitchEnvelope oscairnPitchEG_;
+    oscairn::ElementFilter oscairnFilter_;
     float hostGain_ { 1.0f };
     int fadeDelay_ { -1 }; // a fade-out starts after this many frames; -1 when none
     int fadeLeft_ { 0 };
@@ -535,6 +537,10 @@ bool Voice::startVoice(Layer* layer, int delay, const TriggerEvent& event) noexc
     ModMatrix& modMatrix = resources.getModMatrix();
     modMatrix.initVoice(impl.id_, region.getId(), impl.initialDelay_);
     impl.saveModulationTargets(&region);
+    if (region.oscairn.filterEnabled) {
+        impl.oscairnFilter_.setSampleRate(impl.sampleRate_);
+        impl.oscairnFilter_.start(region.oscairn.filter);
+    }
     if (region.oscairn.pegEnabled) {
         impl.oscairnPitchEG_.setSampleRate(impl.sampleRate_);
         // fillWithData asks for pitch only once the initial delay has passed
@@ -1103,6 +1109,8 @@ void Voice::Impl::filterStageMono(AudioSpan<float> buffer) noexcept
     const auto leftBuffer = buffer.getSpan(0);
     const float* inputChannel[1] { leftBuffer.data() };
     float* outputChannel[1] { leftBuffer.data() };
+    if (region_->oscairn.filterEnabled)
+        oscairnFilter_.process(leftBuffer, {}, {});
     for (unsigned i = 0; i < region_->filters.size(); ++i) {
         filters_[i].process(inputChannel, outputChannel, numSamples);
     }
@@ -1121,6 +1129,8 @@ void Voice::Impl::filterStageStereo(AudioSpan<float> buffer) noexcept
 
     const float* inputChannels[2] { leftBuffer.data(), rightBuffer.data() };
     float* outputChannels[2] { leftBuffer.data(), rightBuffer.data() };
+    if (region_->oscairn.filterEnabled)
+        oscairnFilter_.process(leftBuffer, rightBuffer, {});
 
     for (unsigned i = 0; i < region_->filters.size(); ++i) {
         filters_[i].process(inputChannels, outputChannels, numSamples);

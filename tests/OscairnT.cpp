@@ -10,6 +10,7 @@
 #include "sfizz/Synth.h"
 #include "sfizz/Region.h"
 #include "sfizz/oscairn/ElementEnvelope.h"
+#include "sfizz/oscairn/ElementFilter.h"
 #include "TestHelpers.h"
 #include "catch2/catch.hpp"
 #include <algorithm>
@@ -513,4 +514,170 @@ TEST_CASE("[Oscairn] Note shift and bend range are not limited to the reference'
     auto shot = renderShift("<region> sample=kick.wav pitch_keycenter=60 transpose=127", 0, 20);
     REQUIRE(shot.finite);
     REQUIRE(shot.voices == 0);
+}
+
+namespace {
+// Steady-state gain (dB) of the element filter for a sine at `hz`
+double filterGainDb(const sfz::oscairn::ElementFilterParameters& p, double rate, double hz)
+{
+    sfz::oscairn::ElementFilter filter;
+    filter.setSampleRate(rate);
+    filter.start(p);
+    const size_t n = static_cast<size_t>(rate);
+    std::vector<float> x(n);
+    for (size_t i = 0; i < n; ++i)
+        x[i] = static_cast<float>(std::sin(2.0 * M_PI * hz * static_cast<double>(i) / rate));
+    filter.process(absl::MakeSpan(x), {}, {});
+    double in = 0.0, out = 0.0;
+    for (size_t i = n / 2; i < n; ++i) {
+        const double s = std::sin(2.0 * M_PI * hz * static_cast<double>(i) / rate);
+        in += s * s;
+        out += static_cast<double>(x[i]) * x[i];
+    }
+    return 10.0 * std::log10(out / in);
+}
+} // namespace
+
+TEST_CASE("[Oscairn] Element filter responses match the reference")
+{
+    // Reference renders (white noise) at 250, 500, 1000 and 2000 Hz, relative to the passband;
+    // proposed tolerance 1 dB (largest residual 0.85 dB), at 44.1, 48, 88.2, 96 and 192 kHz.
+    struct Case {
+        int type, cutoff, resonance;
+        double db[4];
+    };
+    const Case cases[] = {
+        { 4, 512, 0, { -2.81, -6.73, -15.27, -25.26 } },
+        { 4, 512, 64, { 2.71, 11.65, -12.06, -24.90 } },
+        { 0, 576, 0, { -1.98, -6.18, -17.38, -34.49 } },
+        { 6, 576, 0, { -39.93, -20.67, -7.43, -1.07 } },
+        { 7, 576, 0, { -19.88, -10.31, -3.72, -0.58 } },
+    };
+    const double hz[4] = { 250.0, 500.0, 1000.0, 2000.0 };
+    for (double rate : { 44100.0, 48000.0, 88200.0, 96000.0, 192000.0 }) {
+        for (const Case& c : cases) {
+            sfz::oscairn::ElementFilterParameters p;
+            p.type = c.type;
+            p.cutoff = c.cutoff;
+            p.resonance = c.resonance;
+            for (int k = 0; k < 4; ++k) {
+                INFO("rate " << rate << " type " << c.type << " cutoff " << c.cutoff << " resonance " << c.resonance << " at " << hz[k] << " Hz");
+                REQUIRE(filterGainDb(p, rate, hz[k]) == Approx(c.db[k]).margin(1.0));
+            }
+        }
+    }
+}
+
+TEST_CASE("[Oscairn] Element filter cutoff and damping laws")
+{
+    using namespace sfz::oscairn;
+    // Measured: index 512 is 446 Hz and 576 is 751 Hz; damping halves every 16 resonance steps
+    REQUIRE(filterCutoffHz(512) == Approx(445.9f).epsilon(0.01));
+    REQUIRE(filterCutoffHz(576) == Approx(750.7f).epsilon(0.01));
+    REQUIRE(filterCutoffHz(512, 1200.0f) == Approx(2.0f * filterCutoffHz(512)).epsilon(1e-4));
+    REQUIRE(filterDamping(0) == Approx(2.0f));
+    REQUIRE(filterDamping(32) == Approx(0.5f));
+    REQUIRE(filterDamping(64) == Approx(0.125f));
+    // Types without a model pass the signal through unchanged
+    REQUIRE_FALSE(filterTypeSupported(18));
+    ElementFilterParameters thru;
+    REQUIRE(std::abs(filterGainDb(thru, 48000.0, 1000.0)) < 1e-4);
+}
+
+TEST_CASE("[Oscairn] The element filter only acts with the profile")
+{
+    sfz::Synth synth;
+    synth.loadSfzString(fs::current_path() / "tests/TestFiles/oscairn.sfz", "<region> sample=*sine oscairn_fil_type=0 oscairn_fil_cutoff=100");
+    REQUIRE_FALSE(synth.getRegionView(0)->oscairn.filterEnabled);
+    synth.loadSfzString(fs::current_path() / "tests/TestFiles/oscairn.sfz", "<control> oscairn_profile=1 <region> sample=*sine oscairn_fil_type=0 oscairn_fil_cutoff=100 oscairn_fil_resonance=32 oscairn_fil_hpf_cutoff=7");
+    const auto& f = synth.getRegionView(0)->oscairn;
+    REQUIRE(f.filterEnabled);
+    REQUIRE(f.filter.type == 0);
+    REQUIRE(f.filter.cutoff == 100);
+    REQUIRE(f.filter.resonance == 32);
+    REQUIRE(f.filter.hpfCutoff == 7);
+}
+
+TEST_CASE("[Oscairn] The element filter follows its 44.1 kHz response at every rate")
+{
+    // Proposed bounds for the transformed sections, for cutoffs up to about 2.2 kHz (index
+    // 700) and tones up to 5 kHz: within 0.75 dB of the 44.1 kHz response where it is above
+    // -20 dB (largest 0.64), 1.5 dB from -20 to -40 dB (largest 1.28, two sections); resonance
+    // up to 96, so the ringing has died down before the measurement window
+    // (doc/oscairn-plan.md, known differences, for higher cutoffs and tones)
+    for (int type : { 0, 4, 6, 7 }) {
+        for (int cutoff : { 256, 384, 512, 640, 700 }) {
+            for (int resonance : { 0, 32, 64, 96 }) {
+                sfz::oscairn::ElementFilterParameters p;
+                p.type = type;
+                p.cutoff = cutoff;
+                p.resonance = resonance;
+                for (double hz : { 100.0, 250.0, 500.0, 1000.0, 2000.0, 3500.0, 5000.0 }) {
+                    const double reference = filterGainDb(p, 44100.0, hz);
+                    if (reference < -40.0)
+                        continue;
+                    for (double rate : { 48000.0, 88200.0, 96000.0, 192000.0 }) {
+                        INFO("type " << type << " cutoff " << cutoff << " resonance " << resonance << " " << hz << " Hz at " << rate);
+                        REQUIRE(filterGainDb(p, rate, hz) == Approx(reference).margin(reference > -20.0 ? 0.75 : 1.5));
+                    }
+                }
+            }
+        }
+    }
+}
+
+TEST_CASE("[Oscairn] A profile voice sounds the same at every sample rate")
+{
+    // Envelope, velocity, balance pan, pitch envelope and filter together: the steady level
+    // and the time the release reaches -20 dB agree with 44.1 kHz at 48, 88.2, 96 and 192 kHz
+    const char* text = R"(<control> oscairn_profile=1
+        <region> sample=*sine pitch_keycenter=60 oscairn_ampeg_attack=40 oscairn_ampeg_decay1_level=96
+        oscairn_ampeg_decay2_level=96 oscairn_ampeg_release=64 oscairn_amp_velsens=20 oscairn_pan=40
+        oscairn_pitcheg_hold_level=140 oscairn_pitcheg_attack=60 oscairn_pitcheg_depth=32
+        oscairn_fil_type=0 oscairn_fil_cutoff=560 oscairn_fil_resonance=24)";
+    struct Result {
+        double left, right, release;
+    };
+    auto run = [&](double rate) {
+        sfz::Synth synth;
+        synth.setSampleRate(static_cast<float>(rate));
+        synth.setSamplesPerBlock(256);
+        synth.loadSfzString(fs::current_path() / "tests/TestFiles/oscairn.sfz", text);
+        sfz::AudioBuffer<float> buffer { 2, 256 };
+        std::vector<float> l, r;
+        synth.noteOn(0, 60, 90);
+        const size_t total = static_cast<size_t>(2.5 * rate), off = static_cast<size_t>(1.0 * rate);
+        for (size_t done = 0; done < total; done += 256) {
+            if (done <= off && off < done + 256)
+                synth.noteOff(static_cast<int>(off - done), 60, 0);
+            synth.renderBlock(buffer);
+            l.insert(l.end(), buffer.getConstSpan(0).begin(), buffer.getConstSpan(0).end());
+            r.insert(r.end(), buffer.getConstSpan(1).begin(), buffer.getConstSpan(1).end());
+        }
+        auto rms = [&](const std::vector<float>& v, double t0, double t1) {
+            double s = 0.0;
+            const size_t a = static_cast<size_t>(t0 * rate), b = static_cast<size_t>(t1 * rate);
+            for (size_t i = a; i < b; ++i)
+                s += static_cast<double>(v[i]) * v[i];
+            return std::sqrt(s / static_cast<double>(b - a));
+        };
+        Result res { rms(l, 0.8, 0.95), rms(r, 0.8, 0.95), -1.0 };
+        const double target = res.left * 0.1;
+        for (double t = 1.0; t < 2.4; t += 0.005) {
+            if (rms(l, t, t + 0.02) <= target) {
+                res.release = t - 1.0;
+                break;
+            }
+        }
+        return res;
+    };
+    const Result ref = run(44100.0);
+    REQUIRE(ref.release > 0.0);
+    for (double rate : { 48000.0, 88200.0, 96000.0, 192000.0 }) {
+        INFO("rate " << rate);
+        const Result r = run(rate);
+        REQUIRE(20 * std::log10(r.left / ref.left) == Approx(0.0).margin(0.1));
+        REQUIRE(20 * std::log10(r.right / ref.right) == Approx(0.0).margin(0.1));
+        REQUIRE(r.release == Approx(ref.release).margin(0.01));
+    }
 }

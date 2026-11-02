@@ -205,6 +205,7 @@ sfizz_add_simd_sources(SFIZZ_SOURCES ".")
 list(APPEND SFIZZ_SOURCES
     sfizz/oscairn/Profile.cpp
     sfizz/oscairn/ElementEnvelope.cpp
+    sfizz/oscairn/ElementFilter.cpp
     sfizz/oscairn/ElementLevel.cpp
     sfizz/oscairn/ElementPitch.cpp
     sfizz/oscairn/ElementTables.cpp)
