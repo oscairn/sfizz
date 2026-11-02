@@ -88,9 +88,24 @@ bool filterTypeSupported(int32_t type) noexcept
 {
     switch (type) {
     case 0: // two low-pass sections
+    case 1: // low-pass sections with the resonance and with damping 1
+    case 2: // low-pass section and a one-pole low-pass
+    case 3: // one-pole low-pass and a low-pass section 4097 cents higher
     case 4: // low-pass section, then a high-pass section with damping 1
+    case 5: // one-pole low-pass, then a high-pass section with damping 1
     case 6: // two high-pass sections
     case 7: // one high-pass section
+    case 8: // two band-pass sections
+    case 10: // low-pass and high-pass sections with damping 1 spread by the resonance
+    case 11: // one band-pass section
+    case 12: // two notch sections
+    case 13: // one notch section
+    case 14: // low-pass sections at the cutoff and at the distance, summed
+    case 15: // high-pass sections, summed
+    case 16: // band-pass sections, summed
+    case 17: // notch sections at the cutoff and at the distance, in series
+    case 19: // low-pass minus band-pass of one section
+    case 21: // the filter gain only (measured flat)
         return true;
     default:
         return false;
@@ -159,32 +174,47 @@ void ElementFilter::setSampleRate(double sampleRate) noexcept
     pin2_[2] = static_cast<float>(-std::sin(alpha));
 }
 
+void ElementFilter::pin(Section& s, double h) const noexcept
+{
+    s.c1 = s.c2 = s.g = 0.0f;
+    if (!allpass_)
+        return;
+    // The allpass (c2 + c1 z^-1 + z^-2) / (1 + c1 z^-1 + c2 z^-2) lags by
+    // 2 phi + 2 arg(1 + c1 e^-j phi + c2 e^-j2phi); pin z^-M times it to one 44.1 kHz
+    // sample at the cutoff and at 18 kHz
+    const double r = sampleRate_ / kReferenceRate;
+    const double theta = 2.0 * kPi * h / kReferenceRate;
+    const double phi = theta / r;
+    const double alpha = (theta - delay_ * phi - 2.0 * phi) / 2.0;
+    const double a0 = std::sin(phi + alpha), a1 = std::sin(2.0 * phi + alpha), b = -std::sin(alpha);
+    const double det = a0 * pin2_[1] - a1 * pin2_[0];
+    s.c1 = static_cast<float>((b * pin2_[1] - a1 * pin2_[2]) / det);
+    s.c2 = static_cast<float>((a0 * pin2_[2] - b * pin2_[0]) / det);
+    if (delay_ == 0)
+        s.g = s.c2; // the allpass's direct path closes the loop within the sample
+}
+
 void ElementFilter::design(Section& s, float hz, float damping) const noexcept
 {
     const double h = std::min<double>(hz, kTopHz);
     s.f = static_cast<float>(2.0 * std::sin(kPi * h / kReferenceRate));
     s.d = std::min(damping, dampingLimit(h));
-    s.c1 = s.c2 = s.g = 0.0f;
-    if (allpass_) {
-        // The allpass (c2 + c1 z^-1 + z^-2) / (1 + c1 z^-1 + c2 z^-2) lags by
-        // 2 phi + 2 arg(1 + c1 e^-j phi + c2 e^-j2phi); pin z^-M times it to one 44.1 kHz
-        // sample at the cutoff and at 18 kHz
-        const double r = sampleRate_ / kReferenceRate;
-        const double theta = 2.0 * kPi * h / kReferenceRate;
-        const double phi = theta / r;
-        const double alpha = (theta - delay_ * phi - 2.0 * phi) / 2.0;
-        const double a0 = std::sin(phi + alpha), a1 = std::sin(2.0 * phi + alpha), b = -std::sin(alpha);
-        const double det = a0 * pin2_[1] - a1 * pin2_[0];
-        s.c1 = static_cast<float>((b * pin2_[1] - a1 * pin2_[2]) / det);
-        s.c2 = static_cast<float>((a0 * pin2_[2] - b * pin2_[0]) / det);
-        if (delay_ == 0)
-            s.g = s.c2; // the allpass's direct path closes the loop within the sample
-    }
+    pin(s, h);
     const float f = s.f, d = s.d, g = s.g;
     s.k = 1.0f / (1.0f - g);
     const float k = s.k;
     s.cs = k * f + k * k * f * g + d * g * k + d;
     s.inv = 1.0f / (1.0f + k * k * f * f * g + d * g * k * f);
+}
+
+void ElementFilter::designOnePole(Section& s, float hz) const noexcept
+{
+    // y = f x + (1 - f) y', f = min(1, 2 sin(pi fc / 44100)); with the reference-rate delay
+    // y' = g y + known: y = (f x + (1 - f) known) / (1 - (1 - f) g)
+    const double h = std::min<double>(hz, kTopHz);
+    s.f = std::min(1.0f, static_cast<float>(2.0 * std::sin(kPi * h / kReferenceRate)));
+    pin(s, h);
+    s.inv = 1.0f / (1.0f - (1.0f - s.f) * s.g);
 }
 
 // The part of the reference-rate delay's output known before this sample's input
@@ -215,9 +245,15 @@ void ElementFilter::push(const Section& s, Delay& line, float value) const noexc
 
 float ElementFilter::run(Section& s, int channel, float x) const noexcept
 {
+    Delay& lowLine = s.low[channel];
+    if (s.output == Output::OnePole) {
+        const float y1 = delayedValue(s, lowLine);
+        const float y = (s.f * x + (1.0f - s.f) * y1) * s.inv;
+        push(s, lowLine, y);
+        return y;
+    }
     // Two-integrator state-variable section: low = low' + f band'; high = x - low - d band';
     // band = f high + band', with every prime the reference-rate delay of its signal
-    Delay& lowLine = s.low[channel];
     Delay& bandLine = s.band[channel];
     const float low1 = delayedValue(s, lowLine);
     const float band1 = delayedValue(s, bandLine);
@@ -226,7 +262,13 @@ float ElementFilter::run(Section& s, int channel, float x) const noexcept
     const float low = s.k * (low1 + s.f * band1) + s.k * s.f * s.g * band;
     push(s, lowLine, low);
     push(s, bandLine, band);
-    return s.highPass ? high : low;
+    switch (s.output) {
+    case Output::High: return high;
+    case Output::Band: return band;
+    case Output::Notch: return high + low;
+    case Output::LowMinusBand: return low - band;
+    default: return low;
+    }
 }
 
 void ElementFilter::start(const ElementFilterParameters& parameters, int note, int velocity) noexcept
@@ -238,28 +280,95 @@ void ElementFilter::start(const ElementFilterParameters& parameters, int note, i
     for (auto& s : sections_)
         s = Section {};
     damping_ = filterDamping(p_.resonance);
-    const bool highPass = p_.type == 6 || p_.type == 7;
-    sections_[0].highPass = highPass;
-    sections_[1].highPass = highPass || p_.type == 4;
-    if (p_.type == 4)
+    using O = Output;
+    struct Layout {
+        O first, second;
+        int stages;
+        bool parallel;
+    };
+    const Layout layout = [this]() -> Layout {
+        switch (p_.type) {
+        case 0: return { O::Low, O::Low, 2, false };
+        case 1: return { O::Low, O::Low, 2, false };
+        case 2: return { O::Low, O::OnePole, 2, false };
+        case 3: return { O::OnePole, O::Low, 2, false };
+        case 4: return { O::Low, O::High, 2, false };
+        case 5: return { O::OnePole, O::High, 2, false };
+        case 6: return { O::High, O::High, 2, false };
+        case 7: return { O::High, O::High, 1, false };
+        case 8: return { O::Band, O::Band, 2, false };
+        case 10: return { O::Low, O::High, 2, false };
+        case 11: return { O::Band, O::Band, 1, false };
+        case 12: return { O::Notch, O::Notch, 2, false };
+        case 13: return { O::Notch, O::Notch, 1, false };
+        case 14: return { O::Low, O::Low, 2, true };
+        case 15: return { O::High, O::High, 2, true };
+        case 16: return { O::Band, O::Band, 2, true };
+        case 17: return { O::Notch, O::Notch, 2, false };
+        case 19: return { O::LowMinusBand, O::Low, 1, false };
+        default: return { O::Low, O::Low, 0, false };
+        }
+    }();
+    sections_[0].output = layout.first;
+    sections_[1].output = layout.second;
+    stages_ = layout.stages;
+    parallel_ = layout.parallel;
+    if (p_.type == 4 || p_.type == 5)
         design(sections_[1], filterCutoffHz(p_.hpfCutoff), 1.0f);
     update(0.0f);
 }
 
 void ElementFilter::update(float cents) noexcept
 {
-    const float hz = filterCutoffHz(p_.cutoff, keyCents_ + cents);
-    design(sections_[0], hz, damping_);
-    if (p_.type != 4) {
-        Section& second = sections_[1];
-        second.f = sections_[0].f;
-        second.d = sections_[0].d;
-        second.c1 = sections_[0].c1;
-        second.c2 = sections_[0].c2;
-        second.g = sections_[0].g;
-        second.k = sections_[0].k;
-        second.cs = sections_[0].cs;
-        second.inv = sections_[0].inv;
+    const float shift = keyCents_ + cents;
+    const float hz = filterCutoffHz(p_.cutoff, shift);
+    Section& first = sections_[0];
+    Section& second = sections_[1];
+    switch (p_.type) {
+    case 1: // the second section has damping 1
+        design(first, hz, damping_);
+        design(second, hz, 1.0f);
+        return;
+    case 2:
+        design(first, hz, damping_);
+        designOnePole(second, hz);
+        return;
+    case 3: { // measured: the section sits 4097 cents above the cutoff
+        designOnePole(first, hz);
+        design(second, hz * 10.66f, damping_);
+        return;
+    }
+    case 4:
+        design(first, hz, damping_);
+        return;
+    case 5:
+        designOnePole(first, hz);
+        return;
+    case 10: { // measured: the sections move apart by 38.2 cents per resonance step above 7.5
+        const float spread = std::exp2(std::max(0.0f, 38.2f * (static_cast<float>(p_.resonance) - 7.5f)) / 1200.0f);
+        design(first, hz * spread, 1.0f);
+        design(second, hz / spread, 1.0f);
+        return;
+    }
+    case 14:
+    case 15:
+    case 16:
+    case 17: { // measured: the second section's index moves by 7 per distance step
+        design(first, hz, damping_);
+        design(second, filterCutoffHz(p_.cutoff + 7 * p_.distance, shift), damping_);
+        return;
+    }
+    default:
+        design(first, hz, damping_);
+        // the second section, when used, is the same
+        second.f = first.f;
+        second.d = first.d;
+        second.c1 = first.c1;
+        second.c2 = first.c2;
+        second.g = first.g;
+        second.k = first.k;
+        second.cs = first.cs;
+        second.inv = first.inv;
     }
 }
 
@@ -269,15 +378,18 @@ void ElementFilter::process(absl::Span<float> left, absl::Span<float> right, abs
         return;
     const bool stereo = !right.empty();
     const size_t n = stereo ? std::min(left.size(), right.size()) : left.size();
-    const int stages = (p_.type == 0 || p_.type == 6 || p_.type == 4) ? 2 : 1;
     for (size_t i = 0; i < n; ++i) {
         if (!cents.empty() && i % kControlInterval == 0 && i < cents.size())
             update(cents[i]);
         for (int ch = 0; ch < (stereo ? 2 : 1); ++ch) {
             float& sample = ch == 0 ? left[i] : right[i];
             float x = sample;
-            for (int s = 0; s < stages; ++s)
-                x = run(sections_[s], ch, x);
+            if (parallel_) {
+                x = run(sections_[0], ch, sample) + run(sections_[1], ch, sample);
+            } else {
+                for (int s = 0; s < stages_; ++s)
+                    x = run(sections_[s], ch, x);
+            }
             sample = gain_ * x;
         }
     }

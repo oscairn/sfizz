@@ -21,7 +21,7 @@ const OpcodeSpec<int32_t> curves { 3, Range<int32_t>(0, 4), kEnforceBounds };
 const OpcodeSpec<int32_t> level255 { 128, Range<int32_t>(0, 255), kEnforceBounds };
 const OpcodeSpec<int32_t> index1023 { 0, Range<int32_t>(0, 1023), kEnforceBounds };
 const OpcodeSpec<int32_t> gain255 { 230, Range<int32_t>(0, 255), kEnforceBounds };
-const OpcodeSpec<int32_t> filterTypes { 18, Range<int32_t>(0, 18), kEnforceBounds };
+const OpcodeSpec<int32_t> filterTypes { 18, Range<int32_t>(0, 21), kEnforceBounds };
 const OpcodeSpec<int32_t> fegCurves { 2, Range<int32_t>(0, 4), kEnforceBounds };
 const OpcodeSpec<int32_t> switchSpec { 0, Range<int32_t>(0, 1), kEnforceBounds };
 const OpcodeSpec<int32_t> lfoWaves { 1, Range<int32_t>(0, 2), kEnforceBounds };
@@ -97,6 +97,7 @@ bool parseRegionOpcode(const Opcode& opcode, RegionData& data)
     case hash("oscairn_fil_hpf_cutoff"): data.filter.hpfCutoff = opcode.read(index1023); data.filterEnabled = true; return true;
     case hash("oscairn_fil_keyfollow"): data.filter.keyFollow = opcode.read(index127); data.filterEnabled = true; return true;
     case hash("oscairn_fil_gain"): data.filter.gain = opcode.read(gain255); data.filterEnabled = true; return true;
+    case hash("oscairn_fil_distance"): data.filter.distance = opcode.read(ratioSpec); data.filterEnabled = true; return true;
     case hash("oscairn_fil_velsens"): data.filter.velocitySensitivity = opcode.read(bipolar64); data.filterEnabled = true; return true;
     case hash("oscairn_fileg_hold"): data.feg.holdTime = opcode.read(index127); data.fegEnabled = true; return true;
     case hash("oscairn_fileg_attack"): data.feg.attackTime = opcode.read(index127); data.fegEnabled = true; return true;

@@ -577,6 +577,65 @@ TEST_CASE("[Oscairn] Element filter responses match the reference")
     }
 }
 
+TEST_CASE("[Oscairn] Element filter types against the reference")
+{
+    // Reference renders (white noise, fl1-fl3) relative to the passband, two per type, at up to
+    // four tones (notch centres left out); accepted tolerance 1 dB, at every rate. These are
+    // renders the models were chosen from; the points outside 1 dB are in the plan's register
+    struct Case {
+        int type, cutoff, resonance;
+        std::vector<double> hz, db;
+    };
+    const Case cases[] = {
+        { 1, 512, 32, { 223, 446, 892, 111 }, { 2.49, 5.89, -20.53, 0.48 } },
+        { 1, 768, 64, { 1408, 2817, 5633, 704 }, { 3.30, 18.15, -17.70, 1.41 } },
+        { 2, 512, 64, { 446, 892, 111 }, { 14.46, -16.38, -0.18 } },
+        { 2, 768, 0, { 1408, 2817, 5633, 11266 }, { -3.01, -8.20, -17.13, -28.18 } },
+        { 3, 512, 32, { 223, 446, 892, 1784 }, { -1.52, -3.09, -6.85, -11.30 } },
+        { 3, 512, 64, { 223, 446, 892, 1784 }, { -1.20, -2.99, -6.60, -10.83 } },
+        { 5, 384, 0, { 101, 201, 402, 804 }, { -0.70, -3.45, -6.98, -11.78 } },
+        { 5, 768, 0, { 1408, 2817, 5633, 11266 }, { -0.65, -2.17, -5.44, -9.61 } },
+        { 8, 512, 64, { 223, 446, 892, 1784 }, { -7.41, 35.21, -6.96, -22.90 } },
+        { 8, 640, 0, { 588, 1175, 2351, 4701 }, { -16.25, -12.30, -14.63, -22.26 } },
+        { 10, 512, 32, { 446, 892, 1784 }, { 2.21, -0.76, -12.79 } },
+        { 10, 768, 64, { 1408, 2817, 5633, 11266 }, { 1.32, 0.67, 0.45, 0.36 } },
+        { 11, 512, 64, { 223, 446, 892, 1784 }, { -4.11, 17.34, -3.75, -11.64 } },
+        { 11, 384, 0, { 101, 201, 402, 804 }, { -8.38, -5.97, -8.01, -12.99 } },
+        { 12, 512, 0, { 892, 1784, 111 }, { -8.63, -1.38, -2.80 } },
+        { 12, 640, 0, { 588, 2351, 4701, 294 }, { -9.01, -7.64, 0.42, -2.07 } },
+        { 13, 512, 64, { 223, 892, 1784 }, { -0.41, -0.13, -0.07 } },
+        { 13, 384, 0, { 101, 402, 804 }, { -4.47, -4.51, -1.23 } },
+        { 14, 512, 64, { 446, 892, 1784 }, { 23.27, -3.56, -17.49 } },
+        { 14, 640, 0, { 588, 1175, 2351, 4701 }, { 4.51, -0.02, -7.31, -17.02 } },
+        { 15, 512, 64, { 223, 446, 892, 1784 }, { -3.95, 23.45, 8.38, 6.44 } },
+        { 15, 384, 0, { 101, 201, 402, 804 }, { -8.28, -0.38, 4.14, 6.15 } },
+        { 16, 512, 64, { 223, 446, 892, 1784 }, { 2.24, 23.46, 2.34, -5.62 } },
+        { 16, 640, 0, { 588, 1175, 2351, 4701 }, { -2.18, -0.27, -1.42, -5.20 } },
+        { 17, 512, 64, { 892, 1784 }, { -0.18, -0.10 } },
+        { 17, 384, 0, { 101, 402, 804, 1608 }, { -9.39, -8.65, -1.58, -0.05 } },
+    };
+    for (double rate : { 44100.0, 48000.0, 88200.0, 96000.0, 192000.0 }) {
+        for (const Case& c : cases) {
+            sfz::oscairn::ElementFilterParameters p;
+            p.type = c.type;
+            p.cutoff = c.cutoff;
+            p.resonance = c.resonance;
+            p.keyFollow = 64;
+            for (size_t k = 0; k < c.hz.size(); ++k) {
+                INFO("rate " << rate << " type " << c.type << " cutoff " << c.cutoff << " resonance " << c.resonance << " at " << c.hz[k] << " Hz");
+                REQUIRE(filterGainDb(p, rate, c.hz[k]) == Approx(c.db[k]).margin(1.0));
+            }
+        }
+    }
+    // Type 21 applies the filter gain only; type 9 and 20 pass the signal through untouched
+    sfz::oscairn::ElementFilterParameters p;
+    p.type = 21;
+    REQUIRE(filterGainDb(p, 48000.0, 1000.0) == Approx(0.0).margin(1e-3));
+    REQUIRE(sfz::oscairn::filterTypeSupported(21));
+    REQUIRE_FALSE(sfz::oscairn::filterTypeSupported(9));
+    REQUIRE_FALSE(sfz::oscairn::filterTypeSupported(20));
+}
+
 TEST_CASE("[Oscairn] Element filter near the top of the range, key follow and gain")
 {
     using namespace sfz::oscairn;
@@ -704,14 +763,23 @@ TEST_CASE("[Oscairn] The element filter follows its 44.1 kHz response at every r
         cutoffs.push_back(c);
     for (int c : { 816, 864, 880, 896, 912, 1023 })
         cutoffs.push_back(c);
-    for (int type : { 0, 4, 6, 7 }) {
-        for (int cutoff : cutoffs) {
-            for (int resonance : { 0, 16, 32, 48, 64, 80, 96, 112, 127 }) {
+    std::vector<int> coarse;
+    for (int c = 0; c < 1024; c += 64)
+        coarse.push_back(c);
+    for (int c : { 816, 880, 912, 1023 })
+        coarse.push_back(c);
+    for (int type : { 0, 4, 6, 7, 1, 2, 3, 5, 8, 10, 11, 12, 13, 14, 15, 16, 17, 19, 21 }) {
+        // the first four on the full grid, the others on a coarser one
+        const bool full = type == 0 || type == 4 || type == 6 || type == 7;
+        const std::vector<int> resonances = full ? std::vector<int> { 0, 16, 32, 48, 64, 80, 96, 112, 127 } : std::vector<int> { 0, 32, 64, 96, 127 };
+        for (int cutoff : full ? cutoffs : coarse) {
+            for (int resonance : resonances) {
                 sfz::oscairn::ElementFilterParameters p;
                 p.type = type;
                 p.cutoff = cutoff;
                 p.resonance = resonance;
-                p.hpfCutoff = type == 4 ? cutoff / 2 : 0;
+                p.hpfCutoff = type == 4 || type == 5 ? cutoff / 2 : 0;
+                p.distance = type >= 14 && type <= 17 ? 40 : 0;
                 const auto reference = filterResponseDb(p, 44100.0, hz);
                 const double peak = *std::max_element(reference.begin(), reference.end());
                 for (double rate : { 48000.0, 88200.0, 96000.0, 192000.0 }) {

@@ -35,6 +35,7 @@ struct ElementFilterParameters {
     int32_t keyFollow { 74 }; // 0-127, 64 = none
     int32_t gain { 230 }; // 0-255
     int32_t velocitySensitivity { 0 }; // cutoff velocity sensitivity, -64..+63
+    int32_t distance { 0 }; // -128..+127, the second section of the dual types
 };
 
 /**
@@ -78,8 +79,9 @@ private:
         int pos { 0 };
         float s1 { 0.0f }, s2 { 0.0f };
     };
+    enum class Output { Low, High, Band, Notch, LowMinusBand, OnePole };
     struct Section {
-        bool highPass { false };
+        Output output { Output::Low };
         // 44.1 kHz coefficients and the allpass pinned for them
         float f { 0.0f }, d { 2.0f }, c1 { 0.0f }, c2 { 0.0f };
         // per-sample solve: high = (x - k low' - cs band') * inv; band = k (f high + band');
@@ -88,6 +90,8 @@ private:
         Delay low[2], band[2];
     };
     void design(Section& s, float hz, float damping) const noexcept;
+    void designOnePole(Section& s, float hz) const noexcept;
+    void pin(Section& s, double hz) const noexcept;
     float delayedValue(const Section& s, Delay& line) const noexcept;
     void push(const Section& s, Delay& line, float value) const noexcept;
     float run(Section& s, int channel, float x) const noexcept;
@@ -100,6 +104,8 @@ private:
     bool allpass_ { false };
     float pin2_[3] {}; // the 18 kHz row of the allpass pin equations
     Section sections_[2];
+    int stages_ { 0 }; // sections in use
+    bool parallel_ { false }; // the two sections summed instead of in series
     float damping_ { 2.0f };
     float keyCents_ { 0.0f };
     float gain_ { 1.0f };
