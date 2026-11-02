@@ -111,6 +111,31 @@ TEST_CASE("[Synth] Check that we can change the size of the preload before and a
     synth.renderBlock(buffer);
 }
 
+TEST_CASE("[Synth] Streamed playback far up stays within the frames loaded so far")
+{
+    // Played 127 semitones up with a short preload, a voice reaches the end of what the
+    // loader has read at once; the interpolator's taps must not read frames the loader is
+    // still writing (ThreadSanitizer reports a data race otherwise)
+    for (int quality : { 1, 2, 10 }) {
+        for (int run = 0; run < 4; ++run) {
+            sfz::Synth synth;
+            synth.setPreloadSize(512);
+            sfz::AudioBuffer<float> buffer { 2, static_cast<unsigned>(synth.getSamplesPerBlock()) };
+            synth.loadSfzString(fs::current_path() / "tests/TestFiles/streaming.sfz",
+                "<region> sample=kick.wav pitch_keycenter=60 transpose=127 sample_quality=" + std::to_string(quality));
+            synth.noteOn(0, 60, 100);
+            bool finite = true;
+            for (int b = 0; b < 8; ++b) {
+                synth.renderBlock(buffer);
+                for (int c = 0; c < 2; ++c)
+                    for (float x : buffer.getConstSpan(c))
+                        finite = finite && std::isfinite(x);
+            }
+            REQUIRE(finite);
+        }
+    }
+}
+
 TEST_CASE("[Synth] All notes offs/all sounds off")
 {
     sfz::Synth synth;

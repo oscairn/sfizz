@@ -1242,8 +1242,15 @@ void Voice::Impl::fillWithData(AudioSpan<float> buffer) noexcept
     updateLoopInformation();
     const auto loop = this->loop_;
 
+    // While the file is still streaming in, the interpolator's taps stay within the frames
+    // the loader has published: it reads up to `reach` frames past an index
+    const int quality = getCurrentSampleQuality();
+    const bool streaming = source.getNumFrames() <= static_cast<size_t>(currentPromise_->information.end);
+    static constexpr int reachByQuality[11] = { 1, 1, 2, 4, 6, 8, 12, 18, 24, 30, 36 };
+    const int reach = streaming ? reachByQuality[clamp(quality, 0, 10)] : 0;
+
     // Looping logic
-    const bool hasLoopSamples = static_cast<size_t>(loop.end) < source.getNumFrames();
+    const bool hasLoopSamples = static_cast<size_t>(loop.end + reach) < source.getNumFrames();
     const bool loopCountReached = region_->loopCount && loop_.restarts >= *region_->loopCount;
     const bool loopContinuous = (region_->loopMode == LoopMode::loop_continuous);
     const bool loopSustain = (region_->loopMode == LoopMode::loop_sustain) && !released();
@@ -1287,7 +1294,7 @@ void Voice::Impl::fillWithData(AudioSpan<float> buffer) noexcept
         numPartitions = 1;
     }
 
-    const auto sampleEnd = min( int(sampleEnd_), int(currentPromise_->information.end), int(source.getNumFrames())) - 1;
+    const auto sampleEnd = max(0, min( int(sampleEnd_), int(currentPromise_->information.end), int(source.getNumFrames()) - reach) - 1);
 
     int blockRestarts { 0 };
     int oldIndex {};
@@ -1360,7 +1367,6 @@ void Voice::Impl::fillWithData(AudioSpan<float> buffer) noexcept
     }
 
     // interpolation processing
-    const int quality = getCurrentSampleQuality();
 
     for (unsigned ptNo = 0; ptNo < numPartitions; ++ptNo) {
         // current partition
