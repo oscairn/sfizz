@@ -550,7 +550,7 @@ double filterGainDb(const sfz::oscairn::ElementFilterParameters& p, double rate,
 TEST_CASE("[Oscairn] Element filter responses match the reference")
 {
     // Reference renders (white noise) at 250, 500, 1000 and 2000 Hz, relative to the passband;
-    // proposed tolerance 1 dB (largest residual 0.85 dB), at 44.1, 48, 88.2, 96 and 192 kHz.
+    // accepted tolerance 1 dB (largest residual 0.85 dB), at 44.1, 48, 88.2, 96 and 192 kHz.
     struct Case {
         int type, cutoff, resonance;
         double db[4];
@@ -639,7 +639,7 @@ TEST_CASE("[Oscairn] Element filter types against the reference")
 TEST_CASE("[Oscairn] Element filter near the top of the range, key follow and gain")
 {
     using namespace sfz::oscairn;
-    // Reference renders relative to their passband; proposed tolerance 1 dB, all five rates
+    // Reference renders relative to their passband; accepted tolerance 1 dB, all five rates
     struct Case {
         int cutoff, keyFollow, note;
         double hz[4], db[4];
