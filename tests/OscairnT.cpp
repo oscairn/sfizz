@@ -449,3 +449,68 @@ TEST_CASE("[Oscairn] Pitch envelope hold")
     REQUIRE(c[static_cast<size_t>(0.41 * 48000)] == Approx(2400.0f));
     REQUIRE(c[static_cast<size_t>(0.6 * 48000)] < 2400.0f);
 }
+
+namespace {
+struct ShiftResult {
+    int position { -1 };
+    bool finite { true };
+    int voices { 0 };
+};
+
+// Renders `blocks` blocks of one note on `region` with the pitch wheel at `wheel`
+ShiftResult renderShift(const std::string& region, int wheel, int blocks, int blockSize = 1024)
+{
+    sfz::Synth synth;
+    synth.setSampleRate(44100);
+    synth.setSamplesPerBlock(blockSize);
+    // whole files in memory: at these ratios playback reaches the end of a file at once,
+    // and this test is about pitch range, not streaming
+    synth.setPreloadSize(1 << 20);
+    synth.loadSfzString(fs::current_path() / "tests/TestFiles/oscairn.sfz", region);
+    sfz::AudioBuffer<float> buffer { 2, static_cast<unsigned>(blockSize) };
+    synth.pitchWheel(0, wheel);
+    synth.noteOn(0, 60, 100);
+    ShiftResult r;
+    for (int b = 0; b < blocks; ++b) {
+        synth.renderBlock(buffer);
+        for (int c = 0; c < 2; ++c)
+            for (float s : buffer.getConstSpan(c))
+                r.finite = r.finite && std::isfinite(s);
+    }
+    r.voices = synth.getNumActiveVoices();
+    if (const sfz::Voice* v = synth.getVoiceView(0))
+        r.position = v->getSourcePosition();
+    return r;
+}
+} // namespace
+
+TEST_CASE("[Oscairn] Note shift and bend range are not limited to the reference's ranges")
+{
+    // Decision 17: wider than the reference's +-48 semitone note shift and -48..+24 semitone bend
+    // range; the native opcodes stay permissive and nothing in playback clamps the ratio.
+    const std::string flute = "<region> sample=looped_flute.wav pitch_keycenter=60 loop_mode=no_loop ";
+    // 100 blocks of 1024 frames down 60 semitones and a full -24 semitone bend: 1/128 speed
+    auto low = renderShift(flute + "transpose=-60 bend_down=-2400", -8192, 100);
+    REQUIRE(low.finite);
+    REQUIRE(low.position == Approx(102400.0 / 128.0).margin(1.0));
+    // Down 127 semitones: 102400 * 2^(-127/12) = 66.5 frames
+    auto lowest = renderShift(flute + "transpose=-127", 0, 100);
+    REQUIRE(lowest.position == Approx(102400.0 * std::exp2(-127.0 / 12.0)).margin(1.0));
+    // Down 127 semitones and a -120 semitone bend: still playing, still finite
+    auto floor = renderShift(flute + "transpose=-127 bend_down=-12000", -8192, 20);
+    REQUIRE(floor.finite);
+    REQUIRE(floor.voices == 1);
+    REQUIRE(floor.position <= 1);
+    // Up 127 semitones plus a +120 semitone bend on a loop: wraps many times per frame
+    for (int blockSize : { 64, 1024, 4096 }) {
+        auto high = renderShift("<region> sample=looped_flute.wav pitch_keycenter=60 loop_mode=loop_continuous loop_start=4 loop_end=124 transpose=127 bend_up=12000", 8191, 10, blockSize);
+        REQUIRE(high.finite);
+        REQUIRE(high.voices == 1);
+        REQUIRE(high.position >= 0);
+        REQUIRE(high.position <= 124);
+    }
+    // Up 127 semitones without a loop: the one-shot runs out at once and the voice ends
+    auto shot = renderShift("<region> sample=kick.wav pitch_keycenter=60 transpose=127", 0, 20);
+    REQUIRE(shot.finite);
+    REQUIRE(shot.voices == 0);
+}
