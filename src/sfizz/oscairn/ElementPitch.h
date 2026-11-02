@@ -24,7 +24,16 @@ struct ElementPitchParameters {
     int32_t holdTime { 0 }, attackTime { 40 }, decay1Time { 64 }, decay2Time { 64 }, releaseTime { 64 };
     int32_t holdLevel { 128 }, attackLevel { 128 }, decay1Level { 128 }, decay2Level { 128 }, releaseLevel { 128 };
     int32_t depth { 20 }; // -64..+63
+    // Time shifts for velocity and key, as the amplitude envelope's (0: none)
+    int32_t timeVelocitySegments { 4 }, timeVelocitySensitivity { 0 };
+    int32_t timeKeyFollowSensitivity { 0 }, timeKeyFollowCenter { 24 };
 };
+
+/**
+ * @brief Filter envelope depth factor for a velocity (1-127) at a depth velocity sensitivity
+ * (-64..+63) and curve (0-4).
+ */
+float filterDepthVelocityFactor(int32_t sensitivity, int32_t curve, int velocity) noexcept;
 
 /**
  * @brief Seconds the pitch envelope holds its hold level at a hold-time index.
@@ -38,8 +47,10 @@ float pitchLevelCents(int32_t level, int32_t depth) noexcept;
 
 class ElementPitchEnvelope {
 public:
+    explicit ElementPitchEnvelope(float centsPerStep = 37.5f) noexcept : centsPerStep_(centsPerStep) {}
     void setSampleRate(double sampleRate) noexcept { sampleRate_ = sampleRate; }
-    void start(const ElementPitchParameters& parameters, int delay) noexcept;
+    // `scale` multiplies every level (depth velocity sensitivity)
+    void start(const ElementPitchParameters& parameters, int delay, int key = 60, int velocity = 127, float scale = 1.0f) noexcept;
     void release(int delay) noexcept;
     // Adds the envelope's cents to `cents`
     void processAdd(absl::Span<float> cents) noexcept;
@@ -47,7 +58,10 @@ public:
 private:
     enum class Stage { Delay, Hold, Attack, Decay1, Decay2, Sustain, Release, Done };
     void enter(Stage stage) noexcept;
+    double levelCents(int32_t level) const noexcept;
 
+    float centsPerStep_;
+    float scale_ { 1.0f };
     ElementPitchParameters p_;
     double sampleRate_ { 48000.0 };
     Stage stage_ { Stage::Done };

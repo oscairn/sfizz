@@ -34,7 +34,13 @@ struct ElementFilterParameters {
     int32_t hpfCutoff { 0 }; // 0-1023, the high-pass section of type 4
     int32_t keyFollow { 74 }; // 0-127, 64 = none
     int32_t gain { 230 }; // 0-255
+    int32_t velocitySensitivity { 0 }; // cutoff velocity sensitivity, -64..+63
 };
+
+/**
+ * @brief Cents the cutoff velocity sensitivity moves a cutoff index by at a velocity (1-127).
+ */
+float cutoffVelocityCents(int32_t cutoff, int32_t sensitivity, int velocity) noexcept;
 
 /**
  * @brief Linear gain of a filter gain value (0-255).
@@ -59,7 +65,7 @@ float filterDamping(int32_t resonance) noexcept;
 class ElementFilter {
 public:
     void setSampleRate(double sampleRate) noexcept;
-    void start(const ElementFilterParameters& parameters, int note) noexcept;
+    void start(const ElementFilterParameters& parameters, int note, int velocity = 127) noexcept;
     // Filters `left` and `right` in place; `cents` shifts the cutoff per sample
     // (empty for no shift). `right` may be empty for a mono voice.
     void process(absl::Span<float> left, absl::Span<float> right, absl::Span<const float> cents) noexcept;

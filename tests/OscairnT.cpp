@@ -12,6 +12,7 @@
 #include "sfizz/oscairn/ElementEnvelope.h"
 #include "sfizz/oscairn/ElementFilter.h"
 #include "sfizz/oscairn/ElementLfo.h"
+#include "sfizz/oscairn/ElementPitch.h"
 #include "TestHelpers.h"
 #include "catch2/catch.hpp"
 #include <algorithm>
@@ -991,4 +992,124 @@ TEST_CASE("[Oscairn] Element LFO opcodes and voice")
     };
     REQUIRE(spread(0) < 1.0);
     REQUIRE(spread(127) == Approx(1118.0).margin(40.0));
+}
+
+TEST_CASE("[Oscairn] Filter envelope levels, times and velocity")
+{
+    using namespace sfz::oscairn;
+    // 75 cents per level step at full depth, scaled by depth / 64; the pitch envelope's times
+    // (the decay table's full-scale time), at every rate
+    ElementPitchParameters p;
+    p.holdLevel = 192;
+    p.attackLevel = p.decay1Level = p.decay2Level = 128;
+    p.attackTime = 72;
+    p.holdTime = 0;
+    p.depth = 63;
+    for (double rate : { 44100.0, 48000.0, 88200.0, 96000.0, 192000.0 }) {
+        INFO("rate " << rate);
+        ElementPitchEnvelope eg { 75.0f };
+        eg.setSampleRate(rate);
+        eg.start(p, 0);
+        std::vector<float> c(static_cast<size_t>(3.0 * rate));
+        eg.processAdd(absl::MakeSpan(c));
+        REQUIRE(c[0] == Approx(4800.0f).epsilon(1e-3));
+        const double t = 1.5 * decaySecondsPer60dB(72);
+        REQUIRE(at(c, rate, 0.5 * t) == Approx(2400.0f).margin(5.0f));
+        REQUIRE(at(c, rate, t + 0.01) == Approx(0.0f).margin(0.5f));
+        // velocity 64 at time sensitivity +63 shifts the attack index by 32
+        p.timeVelocitySensitivity = 63;
+        eg.start(p, 0, 60, 64);
+        std::fill(c.begin(), c.end(), 0.0f);
+        eg.processAdd(absl::MakeSpan(c));
+        const double shifted = 1.5 * decaySecondsPer60dB(40);
+        REQUIRE(at(c, rate, 0.5 * shifted) == Approx(2400.0f).margin(60.0f));
+        // key 84 at key follow +63 around 60 shifts it by 24
+        p.timeVelocitySensitivity = 0;
+        p.timeKeyFollowSensitivity = 63;
+        p.timeKeyFollowCenter = 60;
+        eg.start(p, 0, 84, 127);
+        std::fill(c.begin(), c.end(), 0.0f);
+        eg.processAdd(absl::MakeSpan(c));
+        const double keyed = 1.5 * decaySecondsPer60dB(48);
+        REQUIRE(at(c, rate, 0.5 * keyed) == Approx(2400.0f).margin(30.0f));
+        p.timeKeyFollowSensitivity = 0;
+    }
+    // Depth velocity sensitivity (measured at +63 on curve 2, scaled for others, mirrored when
+    // negative)
+    REQUIRE(filterDepthVelocityFactor(0, 2, 1) == 1.0f);
+    REQUIRE(filterDepthVelocityFactor(63, 2, 127) == Approx(1.125f));
+    REQUIRE(filterDepthVelocityFactor(63, 2, 1) == Approx(0.0f));
+    REQUIRE(filterDepthVelocityFactor(63, 2, 64) == Approx(0.538f));
+    REQUIRE(filterDepthVelocityFactor(32, 2, 1) == Approx(0.5f));
+    REQUIRE(filterDepthVelocityFactor(-64, 2, 1) == Approx(1.125f));
+    REQUIRE(filterDepthVelocityFactor(-32, 2, 64) == Approx(filterDepthVelocityFactor(32, 2, 64)));
+    REQUIRE(filterDepthVelocityFactor(63, 4, 80) == Approx(0.816f));
+    // Cutoff velocity sensitivity: 0.115 * sensitivity * (velocity - 115) index steps
+    REQUIRE(cutoffVelocityCents(704, 32, 115) == 0.0f);
+    REQUIRE(cutoffVelocityCents(704, 0, 1) == 0.0f);
+    REQUIRE(cutoffVelocityCents(704, 32, 1) == Approx(1200.0f * std::log2(filterCutoffHz(704 - 420) / filterCutoffHz(704)) + 0.0f).margin(8.0f));
+    REQUIRE(cutoffVelocityCents(704, -32, 127) == Approx(cutoffVelocityCents(704, 32, 1)));
+    REQUIRE(cutoffVelocityCents(704, 63, 127) == Approx(cutoffVelocityCents(704, 64, 127)));
+}
+
+TEST_CASE("[Oscairn] Filter envelope opcodes and voice")
+{
+    sfz::Synth synth;
+    synth.loadSfzString(fs::current_path() / "tests/TestFiles/oscairn.sfz", "<region> sample=*sine oscairn_fileg_depth=10");
+    REQUIRE_FALSE(synth.getRegionView(0)->oscairn.fegEnabled);
+    synth.loadSfzString(fs::current_path() / "tests/TestFiles/oscairn.sfz", R"(<control> oscairn_profile=1
+        <region> sample=*sine oscairn_fil_type=0 oscairn_fil_velsens=-20 oscairn_fileg_hold=1 oscairn_fileg_attack=2
+        oscairn_fileg_decay1=3 oscairn_fileg_decay2=4 oscairn_fileg_release=5 oscairn_fileg_hold_level=6
+        oscairn_fileg_attack_level=7 oscairn_fileg_decay1_level=8 oscairn_fileg_decay2_level=9
+        oscairn_fileg_release_level=10 oscairn_fileg_depth=-11 oscairn_fileg_veltime_segments=2 oscairn_fileg_veltime=12
+        oscairn_fileg_keytime=13 oscairn_fileg_keytime_center=14 oscairn_fileg_veldepth=15 oscairn_fileg_veldepth_curve=4)");
+    const auto& r = synth.getRegionView(0)->oscairn;
+    REQUIRE(r.fegEnabled);
+    REQUIRE(r.filter.velocitySensitivity == -20);
+    const auto& f = r.feg;
+    REQUIRE(f.holdTime == 1);
+    REQUIRE(f.attackTime == 2);
+    REQUIRE(f.decay1Time == 3);
+    REQUIRE(f.decay2Time == 4);
+    REQUIRE(f.releaseTime == 5);
+    REQUIRE(f.holdLevel == 6);
+    REQUIRE(f.attackLevel == 7);
+    REQUIRE(f.decay1Level == 8);
+    REQUIRE(f.decay2Level == 9);
+    REQUIRE(f.releaseLevel == 10);
+    REQUIRE(f.depth == -11);
+    REQUIRE(f.timeVelocitySegments == 2);
+    REQUIRE(f.timeVelocitySensitivity == 12);
+    REQUIRE(f.timeKeyFollowSensitivity == 13);
+    REQUIRE(f.timeKeyFollowCenter == 14);
+    REQUIRE(r.fegDepthVelocitySensitivity == 15);
+    REQUIRE(r.fegDepthVelocityCurve == 4);
+    // Defaults are the published ones
+    synth.loadSfzString(fs::current_path() / "tests/TestFiles/oscairn.sfz", "<control> oscairn_profile=1 <region> sample=*sine oscairn_fileg_depth=0");
+    const auto& d = synth.getRegionView(0)->oscairn.feg;
+    REQUIRE(d.releaseTime == 80);
+    REQUIRE(d.attackLevel == 255);
+    REQUIRE(d.holdLevel == 128);
+
+    // A 2 kHz sine through a low-pass at about 450 Hz, opened by the filter envelope: louder
+    auto level = [](const char* feg) {
+        sfz::Synth s;
+        s.setSampleRate(48000.0f);
+        s.setSamplesPerBlock(256);
+        s.loadSfzString(fs::current_path() / "tests/TestFiles/oscairn.sfz",
+            std::string("<control> oscairn_profile=1 <region> sample=*sine pitch_keycenter=36 oscairn_fil_type=0 oscairn_fil_cutoff=512 oscairn_fil_keyfollow=64 ") + feg);
+        s.noteOn(0, 84, 127);
+        sfz::AudioBuffer<float> buffer { 2, 256 };
+        double sum = 0.0;
+        for (int b = 0; b < 100; ++b) {
+            s.renderBlock(buffer);
+            if (b >= 50)
+                for (float x : buffer.getConstSpan(0))
+                    sum += static_cast<double>(x) * x;
+        }
+        return 10.0 * std::log10(sum);
+    };
+    const double closed = level("");
+    const double open = level("oscairn_fileg_hold_level=160 oscairn_fileg_attack_level=160 oscairn_fileg_decay1_level=160 oscairn_fileg_decay2_level=160 oscairn_fileg_attack=0 oscairn_fileg_decay1=0 oscairn_fileg_decay2=0 oscairn_fileg_depth=63");
+    REQUIRE(open - closed > 20.0);
 }

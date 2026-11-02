@@ -22,6 +22,7 @@ const OpcodeSpec<int32_t> level255 { 128, Range<int32_t>(0, 255), kEnforceBounds
 const OpcodeSpec<int32_t> index1023 { 0, Range<int32_t>(0, 1023), kEnforceBounds };
 const OpcodeSpec<int32_t> gain255 { 230, Range<int32_t>(0, 255), kEnforceBounds };
 const OpcodeSpec<int32_t> filterTypes { 18, Range<int32_t>(0, 18), kEnforceBounds };
+const OpcodeSpec<int32_t> fegCurves { 2, Range<int32_t>(0, 4), kEnforceBounds };
 const OpcodeSpec<int32_t> switchSpec { 0, Range<int32_t>(0, 1), kEnforceBounds };
 const OpcodeSpec<int32_t> lfoWaves { 1, Range<int32_t>(0, 2), kEnforceBounds };
 const OpcodeSpec<int32_t> speed63 { 38, Range<int32_t>(0, 63), kEnforceBounds };
@@ -96,6 +97,31 @@ bool parseRegionOpcode(const Opcode& opcode, RegionData& data)
     case hash("oscairn_fil_hpf_cutoff"): data.filter.hpfCutoff = opcode.read(index1023); data.filterEnabled = true; return true;
     case hash("oscairn_fil_keyfollow"): data.filter.keyFollow = opcode.read(index127); data.filterEnabled = true; return true;
     case hash("oscairn_fil_gain"): data.filter.gain = opcode.read(gain255); data.filterEnabled = true; return true;
+    case hash("oscairn_fil_velsens"): data.filter.velocitySensitivity = opcode.read(bipolar64); data.filterEnabled = true; return true;
+    case hash("oscairn_fileg_hold"): data.feg.holdTime = opcode.read(index127); data.fegEnabled = true; return true;
+    case hash("oscairn_fileg_attack"): data.feg.attackTime = opcode.read(index127); data.fegEnabled = true; return true;
+    case hash("oscairn_fileg_release"): data.feg.releaseTime = opcode.read(index127); data.fegEnabled = true; return true;
+    case hash("oscairn_fileg_hold_level"): data.feg.holdLevel = opcode.read(level255); data.fegEnabled = true; return true;
+    case hash("oscairn_fileg_attack_level"): data.feg.attackLevel = opcode.read(level255); data.fegEnabled = true; return true;
+    case hash("oscairn_fileg_release_level"): data.feg.releaseLevel = opcode.read(level255); data.fegEnabled = true; return true;
+    case hash("oscairn_fileg_decay&"):
+    case hash("oscairn_fileg_decay&_level"): {
+        const unsigned n = opcode.parameters.empty() ? 0 : opcode.parameters.back();
+        if (n < 1 || n > 2)
+            return false;
+        const bool level = opcode.lettersOnlyHash == hash("oscairn_fileg_decay&_level");
+        int32_t& v = level ? (n == 1 ? data.feg.decay1Level : data.feg.decay2Level) : (n == 1 ? data.feg.decay1Time : data.feg.decay2Time);
+        v = opcode.read(level ? level255 : index127);
+        data.fegEnabled = true;
+        return true;
+    }
+    case hash("oscairn_fileg_depth"): data.feg.depth = opcode.read(bipolar64); data.fegEnabled = true; return true;
+    case hash("oscairn_fileg_veltime_segments"): data.feg.timeVelocitySegments = opcode.read(segments); data.fegEnabled = true; return true;
+    case hash("oscairn_fileg_veltime"): data.feg.timeVelocitySensitivity = opcode.read(bipolar64); data.fegEnabled = true; return true;
+    case hash("oscairn_fileg_keytime"): data.feg.timeKeyFollowSensitivity = opcode.read(bipolar64); data.fegEnabled = true; return true;
+    case hash("oscairn_fileg_keytime_center"): data.feg.timeKeyFollowCenter = opcode.read(note); data.fegEnabled = true; return true;
+    case hash("oscairn_fileg_veldepth"): data.fegDepthVelocitySensitivity = opcode.read(bipolar64); data.fegEnabled = true; return true;
+    case hash("oscairn_fileg_veldepth_curve"): data.fegDepthVelocityCurve = opcode.read(fegCurves); data.fegEnabled = true; return true;
     case hash("oscairn_elfo_mode"): data.lfo.mode = opcode.read(switchSpec); data.lfoEnabled = true; return true;
     case hash("oscairn_elfo_wave"): data.lfo.wave = opcode.read(lfoWaves); data.lfoEnabled = true; return true;
     case hash("oscairn_elfo_speed"): data.lfo.speed = opcode.read(speed63); data.lfoEnabled = true; return true;

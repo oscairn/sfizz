@@ -285,6 +285,7 @@ struct Voice::Impl
     oscairn::ElementPitchEnvelope oscairnPitchEG_;
     oscairn::ElementFilter oscairnFilter_;
     oscairn::ElementLfo oscairnLfo_;
+    oscairn::ElementPitchEnvelope oscairnFilterEG_ { 75.0f };
     void oscairnFilterStage(absl::Span<float> left, absl::Span<float> right) noexcept;
     float hostGain_ { 1.0f };
     int fadeDelay_ { -1 }; // a fade-out starts after this many frames; -1 when none
@@ -542,7 +543,14 @@ bool Voice::startVoice(Layer* layer, int delay, const TriggerEvent& event) noexc
     impl.saveModulationTargets(&region);
     if (region.oscairn.filterEnabled) {
         impl.oscairnFilter_.setSampleRate(impl.sampleRate_);
-        impl.oscairnFilter_.start(region.oscairn.filter, impl.triggerEvent_.number);
+        impl.oscairnFilter_.start(region.oscairn.filter, impl.triggerEvent_.number,
+                                  static_cast<int>(std::lround(impl.triggerEvent_.value * 127.0f)));
+    }
+    if (region.oscairn.fegEnabled) {
+        const int velocity = static_cast<int>(std::lround(impl.triggerEvent_.value * 127.0f));
+        impl.oscairnFilterEG_.setSampleRate(impl.sampleRate_);
+        impl.oscairnFilterEG_.start(region.oscairn.feg, impl.initialDelay_, impl.triggerEvent_.number, velocity,
+            oscairn::filterDepthVelocityFactor(region.oscairn.fegDepthVelocitySensitivity, region.oscairn.fegDepthVelocityCurve, velocity));
     }
     if (region.oscairn.lfoEnabled) {
         impl.oscairnLfo_.setSampleRate(impl.sampleRate_);
@@ -619,6 +627,8 @@ void Voice::Impl::release(int delay) noexcept
 
     if (region_->oscairn.pegEnabled)
         oscairnPitchEG_.release(delay);
+    if (region_->oscairn.fegEnabled)
+        oscairnFilterEG_.release(delay);
     if (region_->oscairn.ampegEnabled) {
         if (oscairnAmpEG_.getRemainingDelay() > delay)
             switchState(State::cleanMeUp);
@@ -1121,8 +1131,9 @@ void Voice::Impl::panStageStereo(AudioSpan<float> buffer) noexcept
 
 void Voice::Impl::oscairnFilterStage(absl::Span<float> left, absl::Span<float> right) noexcept
 {
-    // The element filter, its cutoff moved by the element LFO
-    if (!(region_->oscairn.lfoEnabled && oscairnLfo_.hasFilter())) {
+    // The element filter, its cutoff moved by the filter envelope and the element LFO
+    const bool lfo = region_->oscairn.lfoEnabled && oscairnLfo_.hasFilter();
+    if (!lfo && !region_->oscairn.fegEnabled) {
         oscairnFilter_.process(left, right, {});
         return;
     }
@@ -1132,7 +1143,10 @@ void Voice::Impl::oscairnFilterStage(absl::Span<float> left, absl::Span<float> r
         return;
     }
     fill(*cents, 0.0f);
-    oscairnLfo_.addFilter(*cents);
+    if (region_->oscairn.fegEnabled)
+        oscairnFilterEG_.processAdd(*cents);
+    if (lfo)
+        oscairnLfo_.addFilter(*cents);
     oscairnFilter_.process(left, right, *cents);
 }
 

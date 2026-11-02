@@ -47,18 +47,18 @@ constexpr float kBelowSlope = 11.54f;
 // Above index 912 the measured cutoff stays at 7290 Hz (and the frequency coefficient there).
 constexpr double kTopHz = 7290.0;
 
-float cutoffCents(int32_t index) noexcept
+float cutoffCents(float index) noexcept
 {
-    const int32_t i = std::max<int32_t>(0, std::min<int32_t>(1023, index));
+    const float i = std::max(0.0f, std::min(1023.0f, index));
     const Knot* first = std::begin(kCutoffKnots);
     const Knot* last = std::end(kCutoffKnots) - 1;
-    if (i <= first->index)
-        return first->cents - kBelowSlope * static_cast<float>(first->index - i);
-    if (i >= last->index)
+    if (i <= static_cast<float>(first->index))
+        return first->cents - kBelowSlope * (static_cast<float>(first->index) - i);
+    if (i >= static_cast<float>(last->index))
         return 1200.0f * std::log2(static_cast<float>(kTopHz) / 440.0f);
-    const Knot* hi = std::upper_bound(first, last + 1, i, [](int32_t v, const Knot& k) { return v < k.index; });
+    const Knot* hi = std::upper_bound(first, last + 1, i, [](float v, const Knot& k) { return v < static_cast<float>(k.index); });
     const Knot* lo = hi - 1;
-    const float f = static_cast<float>(i - lo->index) / static_cast<float>(hi->index - lo->index);
+    const float f = (i - static_cast<float>(lo->index)) / static_cast<float>(hi->index - lo->index);
     return lo->cents + f * (hi->cents - lo->cents);
 }
 // Damping limit at resonance 0, measured: 2 up to index 816, then falling by 0.0104 per
@@ -99,7 +99,21 @@ bool filterTypeSupported(int32_t type) noexcept
 
 float filterCutoffHz(int32_t index, float cents) noexcept
 {
-    return 440.0f * std::exp2((cutoffCents(index) + cents) / 1200.0f);
+    return 440.0f * std::exp2((cutoffCents(static_cast<float>(index)) + cents) / 1200.0f);
+}
+
+float cutoffVelocityCents(int32_t cutoff, int32_t sensitivity, int velocity) noexcept
+{
+    // Measured (fl3 cv_*): the cutoff index moves by 0.115 * sensitivity * (velocity - 115),
+    // +63 counting as 64, negative sensitivities mirroring the velocity (128 - v); fitted rms
+    // about 4 index steps
+    if (sensitivity == 0)
+        return 0.0f;
+    const int32_t s = sensitivity >= 63 ? 64 : std::max<int32_t>(-64, sensitivity);
+    const float v = static_cast<float>(s > 0 ? velocity : 128 - velocity);
+    const float shift = 0.115f * static_cast<float>(s > 0 ? s : -s) * (v - 115.0f);
+    const float base = static_cast<float>(cutoff);
+    return cutoffCents(base + shift) - cutoffCents(base);
 }
 
 float filterDamping(int32_t resonance) noexcept
@@ -215,10 +229,11 @@ float ElementFilter::run(Section& s, int channel, float x) const noexcept
     return s.highPass ? high : low;
 }
 
-void ElementFilter::start(const ElementFilterParameters& parameters, int note) noexcept
+void ElementFilter::start(const ElementFilterParameters& parameters, int note, int velocity) noexcept
 {
     p_ = parameters;
-    keyCents_ = static_cast<float>(p_.keyFollow - 64) * 3.125f * static_cast<float>(note - 60);
+    keyCents_ = static_cast<float>(p_.keyFollow - 64) * 3.125f * static_cast<float>(note - 60)
+        + cutoffVelocityCents(p_.cutoff, p_.velocitySensitivity, velocity);
     gain_ = filterGain(p_.gain);
     for (auto& s : sections_)
         s = Section {};

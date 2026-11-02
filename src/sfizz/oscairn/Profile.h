@@ -38,6 +38,12 @@ struct RegionData {
     // Element filter, ahead of sfizz's own filters
     bool filterEnabled { false };
     ElementFilterParameters filter;
+    // Filter envelope, added to the element filter's cutoff in cents
+    bool fegEnabled { false };
+    // published defaults: times 0, 0, 64, 64, 80; levels 0, +127, +127, +127, 0 steps; depth +40
+    ElementPitchParameters feg { 0, 0, 64, 64, 80, 128, 255, 255, 255, 128, 40 };
+    int32_t fegDepthVelocitySensitivity { 0 }; // -64..+63
+    int32_t fegDepthVelocityCurve { 2 }; // 0-4
     // Element LFO (reference mode by default)
     bool lfoEnabled { false };
     ElementLfoParameters lfo;
