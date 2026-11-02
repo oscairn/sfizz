@@ -11,7 +11,7 @@
 //   distance below 127 by k, negative ones the distance above 1, with k = s / 32 up to 32 and
 //   31.5 / (63.5 - s) above. The gain is (result / 127)^2, the level law of the envelope.
 // - Pan 1-127 (64 centre) is a balance: the far side falls as sin^2 of the distance from the
-//   edge, the near side keeps its level.
+//   edge (over 64 steps), the near side keeps its level. Levels sit on 0.375 dB steps.
 
 #pragma once
 #include <cstdint>

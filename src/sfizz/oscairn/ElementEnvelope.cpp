@@ -25,8 +25,13 @@ double levelDb(int32_t level) { return toDb(levelGain(level)); }
 
 float levelGain(int32_t level) noexcept
 {
-    const float r = static_cast<float>(clampIndex(level)) / 127.0f;
-    return r * r;
+    // (level / 127)^2 on a grid of 0.375 dB steps, rounded to the nearest step, as the
+    // reference's levels measure (element levels and envelope levels 8-127)
+    const int32_t l = clampIndex(level);
+    if (l == 0)
+        return 0.0f;
+    const double steps = std::round(40.0 * std::log10(127.0 / l) / 0.375);
+    return static_cast<float>(std::pow(10.0, -0.375 * steps / 20.0));
 }
 
 float attackSeconds(int32_t index) noexcept { return tables::attackSeconds[clampIndex(index)]; }

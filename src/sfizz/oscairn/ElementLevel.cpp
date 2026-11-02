@@ -61,22 +61,33 @@ float effectiveVelocity(const ElementVelocity& v, int velocity) noexcept
 
 float velocityGain(const ElementVelocity& v, int velocity) noexcept
 {
-    const float r = effectiveVelocity(v, velocity) / 127.0f;
-    return r * r;
+    // (v / 127)^2 on the same 0.375 dB grid, computed at a finer velocity resolution: the
+    // effective velocity times 16.05 against 2048 (fitted: velocity 80 lands on 22 steps,
+    // 104 on 9)
+    const double scaled = effectiveVelocity(v, velocity) * 16.05;
+    if (scaled < 1.0)
+        return 0.0f;
+    const double steps = std::max(0.0, std::round(40.0 * std::log10(2048.0 / scaled) / 0.375));
+    return static_cast<float>(std::pow(10.0, -0.375 * steps / 20.0));
 }
 
 void balanceGains(int32_t pan, float& left, float& right) noexcept
 {
     const int32_t p = std::max<int32_t>(1, std::min<int32_t>(127, pan));
     constexpr float halfPi = 1.5707963267948966f;
+    // The far side: sin^2 of the distance from the edge over 64, on the 0.375 dB grid
+    auto far = [&](int32_t distance) {
+        const double s = std::sin(halfPi * distance / 64.0);
+        if (s <= 0.0)
+            return 0.0f;
+        const double steps = std::round(-40.0 * std::log10(s) / 0.375);
+        return static_cast<float>(std::pow(10.0, -0.375 * steps / 20.0));
+    };
     left = right = 1.0f;
-    if (p < 64) {
-        const float s = std::sin(halfPi * static_cast<float>(p - 1) / 63.0f);
-        right = s * s;
-    } else if (p > 64) {
-        const float s = std::sin(halfPi * static_cast<float>(127 - p) / 63.0f);
-        left = s * s;
-    }
+    if (p < 64)
+        right = far(p - 1);
+    else if (p > 64)
+        left = far(127 - p);
 }
 
 } // namespace oscairn

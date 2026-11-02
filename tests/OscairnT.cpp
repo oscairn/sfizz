@@ -120,7 +120,10 @@ TEST_CASE("[Oscairn] Element envelope levels")
 {
     REQUIRE(sfz::oscairn::levelGain(127) == 1.0f);
     REQUIRE(sfz::oscairn::levelGain(0) == 0.0f);
-    REQUIRE(20 * std::log10(sfz::oscairn::levelGain(64)) == Approx(40 * std::log10(64.0 / 127.0)).margin(1e-4));
+    // (level / 127)^2 rounded to 0.375 dB steps: 64 is 32 steps, 80 is 21
+    REQUIRE(20 * std::log10(sfz::oscairn::levelGain(64)) == Approx(-12.0).margin(1e-4));
+    REQUIRE(20 * std::log10(sfz::oscairn::levelGain(80)) == Approx(-21 * 0.375).margin(1e-4));
+    REQUIRE(20 * std::log10(sfz::oscairn::levelGain(120)) == Approx(-3 * 0.375).margin(1e-4));
     REQUIRE(sfz::oscairn::levelGain(200) == 1.0f);
 }
 
@@ -139,7 +142,7 @@ TEST_CASE("[Oscairn] Element envelope segments take the table times at every sam
         const double release60 = sfz::oscairn::releaseSecondsPer60dB(72);
         const double hold = attack + 2 * decay60;
         const auto v = renderEnvelope(p, rate, hold + 2 * release60, hold);
-        const double sustainDb = 40 * std::log10(64.0 / 127.0);
+        const double sustainDb = 20 * std::log10(sfz::oscairn::levelGain(64));
         const double tol = 2.0 / rate;
         // the attack is a straight line in amplitude reaching 1 after `attack` seconds
         REQUIRE(crossing(v, rate, 0.5f, true) == Approx(0.5 * attack).margin(tol));
@@ -263,7 +266,10 @@ TEST_CASE("[Oscairn] Element velocity response")
     v.curve = 0; // measured curve: -30.1 dB at 64
     REQUIRE(40 * std::log10(effectiveVelocity(v, 64) / 127.0f) == Approx(-30.10f).margin(0.01f));
     REQUIRE(40 * std::log10(effectiveVelocity(v, 72) / 127.0f) == Approx(-26.34f).margin(0.01f)); // halfway in dB
-    REQUIRE(sfz::oscairn::velocityGain(ElementVelocity { 32, 0, 3 }, 64) == Approx((64.0f / 127) * (64.0f / 127)));
+    // on the 0.375 dB grid at 2048-step resolution: velocity 64 is 32 steps, 80 is 22, 104 is 9
+    REQUIRE(20 * std::log10(sfz::oscairn::velocityGain(ElementVelocity { 32, 0, 3 }, 64)) == Approx(-32 * 0.375).margin(1e-4));
+    REQUIRE(20 * std::log10(sfz::oscairn::velocityGain(ElementVelocity { 32, 0, 3 }, 80)) == Approx(-22 * 0.375).margin(1e-4));
+    REQUIRE(20 * std::log10(sfz::oscairn::velocityGain(ElementVelocity { 32, 0, 3 }, 104)) == Approx(-9 * 0.375).margin(1e-4));
 }
 
 TEST_CASE("[Oscairn] Element pan is a balance")
@@ -277,10 +283,12 @@ TEST_CASE("[Oscairn] Element pan is a balance")
     REQUIRE((l == 0.0f && r == 1.0f));
     sfz::oscairn::balanceGains(32, l, r);
     REQUIRE(l == 1.0f);
-    REQUIRE(20 * std::log10(r) == Approx(20 * std::log10(std::pow(std::sin(1.5707963f * 31 / 63), 2.0f))).margin(1e-4));
+    REQUIRE(20 * std::log10(r) == Approx(-17 * 0.375).margin(1e-4)); // measured -6.40 dB
+    sfz::oscairn::balanceGains(8, l, r);
+    REQUIRE(20 * std::log10(r) == Approx(-82 * 0.375).margin(1e-4)); // measured -30.86 dB
     sfz::oscairn::balanceGains(96, l, r);
     REQUIRE(r == 1.0f);
-    REQUIRE(l == Approx(std::pow(std::sin(1.5707963f * 31 / 63), 2.0f)));
+    REQUIRE(20 * std::log10(l) == Approx(-17 * 0.375).margin(1e-4));
 }
 
 TEST_CASE("[Oscairn] Velocity and pan opcodes reach the voice")
@@ -303,7 +311,7 @@ TEST_CASE("[Oscairn] Velocity and pan opcodes reach the voice")
     };
     const auto full = peaks("<region> sample=*sine amp_veltrack=0", 64);
     const auto vel = peaks("<control> oscairn_profile=1 <region> sample=*sine amp_veltrack=0 oscairn_amp_velsens=32", 64);
-    REQUIRE(vel.first / full.first == Approx((64.0f / 127) * (64.0f / 127)).epsilon(0.01));
+    REQUIRE(vel.first / full.first == Approx(std::pow(10.0f, -12.0f / 20.0f)).epsilon(0.01));
     const auto off = peaks("<region> sample=*sine amp_veltrack=0 oscairn_amp_velsens=32 oscairn_pan=1", 64);
     REQUIRE(off.first == Approx(full.first).epsilon(0.001)); // no profile: unknown, no effect
     REQUIRE(off.second == Approx(full.second).epsilon(0.001));
