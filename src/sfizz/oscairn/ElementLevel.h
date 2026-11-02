@@ -40,5 +40,12 @@ float velocityGain(const ElementVelocity& v, int velocity) noexcept;
  */
 void balanceGains(int32_t pan, float& left, float& right) noexcept;
 
+/**
+ * @brief Gain of the reference's output staging relative to sfizz's (-1.84 dB, measured: a
+ * full-scale sample at Part Volume 127, pan centre, plays at -9.19 dB per channel on the
+ * reference and -7.35 dB in sfizz at CC 7 127).
+ */
+constexpr float referenceLevelGain = 0.80910f; // 10^(-1.84 / 20)
+
 } // namespace oscairn
 } // namespace sfz

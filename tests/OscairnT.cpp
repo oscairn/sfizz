@@ -1181,3 +1181,33 @@ TEST_CASE("[Oscairn] Filter envelope opcodes and voice")
     const double open = level("oscairn_fileg_hold_level=160 oscairn_fileg_attack_level=160 oscairn_fileg_decay1_level=160 oscairn_fileg_decay2_level=160 oscairn_fileg_attack=0 oscairn_fileg_decay1=0 oscairn_fileg_decay2=0 oscairn_fileg_depth=63");
     REQUIRE(open - closed > 20.0);
 }
+
+TEST_CASE("[Oscairn] Reference output level is an option")
+{
+    // Off by default (sfizz's own level); oscairn_ref_level=1 plays 1.84 dB lower, as the
+    // reference does (decision 25)
+    auto level = [](const std::string& opcodes) {
+        sfz::Synth s;
+        s.setSampleRate(48000.0f);
+        s.setSamplesPerBlock(256);
+        s.loadSfzString(fs::current_path() / "tests/TestFiles/oscairn.sfz", "<control> oscairn_profile=1 <region> sample=*sine amp_veltrack=0 " + opcodes);
+        s.noteOn(0, 69, 127);
+        sfz::AudioBuffer<float> buffer { 2, 256 };
+        double sum = 0.0;
+        for (int b = 0; b < 40; ++b) {
+            s.renderBlock(buffer);
+            if (b >= 20)
+                for (float x : buffer.getConstSpan(0))
+                    sum += static_cast<double>(x) * x;
+        }
+        return 10.0 * std::log10(sum);
+    };
+    const double plain = level("");
+    REQUIRE(level("oscairn_ref_level=0") == Approx(plain).margin(1e-6));
+    REQUIRE(level("oscairn_ref_level=1") - plain == Approx(-1.84).margin(0.01));
+    // Without the profile the opcode is unknown and changes nothing
+    sfz::Synth synth;
+    synth.loadSfzString(fs::current_path() / "tests/TestFiles/oscairn.sfz", "<region> sample=*sine oscairn_ref_level=1");
+    REQUIRE_FALSE(synth.getRegionView(0)->oscairn.referenceLevel);
+    REQUIRE(isUnknown(synth, "oscairn_ref_level"));
+}
