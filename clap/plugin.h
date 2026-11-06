@@ -14,3 +14,7 @@
 #endif
 
 extern "C" OSCAIRN_SFIZZ_EXPORT const clap_plugin_entry_t clap_entry;
+
+// For tests: how many times the instance's contexts opened a sample file
+#include <cstddef>
+size_t oscairnSfizzFileOpens(const clap_plugin_t* plugin);

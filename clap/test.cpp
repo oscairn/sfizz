@@ -436,6 +436,78 @@ int main(int argc, char** argv)
         plugin->deactivate(plugin);
         plugin->destroy(plugin);
     }
+    { // snapshots prepared beside: every sound a new context, nothing selected, all or nothing,
+      // samples another context holds not read again
+        auto* plugin = create();
+        auto* ctx = static_cast<const oscairn_plugin_sound_contexts_t*>(plugin->get_extension(plugin, OSCAIRN_EXT_SOUND_CONTEXTS));
+        auto* snaps = static_cast<const oscairn_plugin_sound_snapshots_t*>(plugin->get_extension(plugin, OSCAIRN_EXT_SOUND_SNAPSHOTS));
+        CHECK(snaps && snaps->prepare);
+        const std::string kick = "<region> sample=kick.wav loop_mode=one_shot";
+        CHECK(load(plugin, stateFor(kick, "", "", OSCAIRN_TEST_FILES)));
+        const size_t opened = oscairnSfizzFileOpens(plugin);
+        CHECK(opened > 0);
+        Buffer saved;
+        CHECK(ctx->state->save(plugin, &saved.out));
+        Buffer in; in.data = saved.data;
+        uint32_t selected[16] {};
+        char message[256] {};
+        CHECK(snaps->prepare(plugin, &in.in, selected, message, sizeof(message)));
+        CHECK(oscairnSfizzFileOpens(plugin) == opened); // nothing read from disk
+        oscairn_sound_context_info_t info {};
+        CHECK(ctx->get(plugin, 1, &info) && info.id != 0 && !std::strcmp(info.name, "Default") && info.selected_channels == 0);
+        for (uint32_t id : selected)
+            CHECK(id == info.id);
+        CHECK(ctx->get(plugin, 0, &info) && info.selected_channels == 0xffffu); // still playing the old one
+        // it plays as the old one did
+        auto play = [&](uint32_t id) {
+            CHECK(ctx->select(plugin, id, 0));
+            Run run { plugin };
+            Events events;
+            events.note(CLAP_EVENT_NOTE_ON, 0, 1, 60, 1.0);
+            std::vector<float> out;
+            for (int i = 0; i < 8; ++i) {
+                run.block(events, 256);
+                out.insert(out.end(), run.left.begin(), run.left.end());
+            }
+            events.note(CLAP_EVENT_NOTE_OFF, 0, 1, 60, 0.0);
+            for (int i = 0; i < 100; ++i)
+                run.block(events, 256); // the one-shot kick ends
+            return out;
+        };
+        // the reference: a fresh instance with the same state, first note
+        auto* fresh = create();
+        CHECK(load(fresh, stateFor(kick, "", "", OSCAIRN_TEST_FILES)));
+        CHECK(fresh->activate(fresh, 48000, 1, 256));
+        std::vector<float> before;
+        {
+            Run run { fresh };
+            Events events;
+            events.note(CLAP_EVENT_NOTE_ON, 0, 1, 60, 1.0);
+            for (int i = 0; i < 8; ++i) {
+                run.block(events, 256);
+                before.insert(before.end(), run.left.begin(), run.left.end());
+            }
+        }
+        fresh->deactivate(fresh);
+        fresh->destroy(fresh);
+        CHECK(plugin->activate(plugin, 48000, 1, 256));
+        CHECK(ctx->get(plugin, 1, &info));
+        const auto after = play(info.id);
+        CHECK(before == after);
+        CHECK(*std::max_element(after.begin(), after.end()) > 0.01f);
+        plugin->deactivate(plugin);
+        // all or nothing: six more fit (slots 2-7), a seventh does not, and changes nothing
+        for (int i = 0; i < 6; ++i) {
+            Buffer again; again.data = saved.data;
+            CHECK(snaps->prepare(plugin, &again.in, selected, message, sizeof(message)));
+        }
+        Buffer full; full.data = saved.data;
+        CHECK(!snaps->prepare(plugin, &full.in, selected, message, sizeof(message)));
+        CHECK(std::strstr(message, "free") != nullptr);
+        Buffer bad; bad.data = "oscairn-sfizz-contexts-1\nnonsense";
+        CHECK(!snaps->prepare(plugin, &bad.in, selected, message, sizeof(message)));
+        plugin->destroy(plugin);
+    }
     { // a fresh instance plays a sine
         auto* plugin = create();
         CHECK(plugin->activate(plugin, 48000, 1, 256));

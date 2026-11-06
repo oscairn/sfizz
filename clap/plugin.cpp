@@ -38,6 +38,8 @@
 #include "sfizz/Synth.h"
 #include "sfizz/Region.h"
 #include "sfizz/AudioSpan.h"
+#include "sfizz/FilePool.h"
+#include "sfizz/Resources.h"
 #include "sfizz/parser/Parser.h"
 #include "sfizz/parser/ParserListener.h"
 #include <oscairn-clap/assets.h>
@@ -110,6 +112,9 @@ struct Plugin {
     bool active { false };
     uint32_t chokeFrames { 144 };
 
+    // main thread: preloaded samples the contexts share, so a sound prepared beside another
+    // that uses the same files does not read them again
+    std::shared_ptr<sfz::SharedPreloads> sharedPreloads { std::make_shared<sfz::SharedPreloads>() };
     Patch patch; // main thread: context 0's patch, as saved
     Context contexts[contextCount];
     uint32_t nextId { 1 };
@@ -155,6 +160,7 @@ struct SampleCollector : sfz::Parser::Listener {
 bool loadPatch(const Plugin& s, Engine& e, const oscairn_asset_ref_t* base, std::string& message)
 {
     configure(s, e.synth);
+    e.synth.getResources().getFilePool().setSharedPreloads(s.sharedPreloads);
     if (e.patch.text.empty())
         return true;
     // sfizz resolves relative paths from the directory of the virtual file name
@@ -801,40 +807,53 @@ bool snapshotSave(const clap_plugin_t* p, const clap_ostream_t* stream)
     return writeAll(stream, data);
 }
 
-bool snapshotLoad(const clap_plugin_t* p, const clap_istream_t* stream)
-{
-    auto& s = self(p);
-    std::string data, message;
-    if (!readAll(stream, data))
-        return false;
+struct ParsedSnapshot {
     bool used[contextCount] {};
     std::string names[contextCount];
     Patch patches[contextCount];
     uint32_t channels[16] {};
-    used[0] = true;
-    names[0] = "Default";
+};
+
+// A snapshot, or a version 1 or 2 state as the default context alone
+bool parseSnapshot(const std::string& data, ParsedSnapshot& out)
+{
+    out.used[0] = true;
+    out.names[0] = "Default";
     const std::string header = std::string(snapshotVersion) + "\n";
-    if (data.compare(0, header.size(), header) == 0) {
-        size_t at = header.size();
-        std::string flag, digits;
-        for (uint32_t i = 0; i < contextCount; ++i) {
-            Patch& patch = patches[i];
-            if (!readField(data, at, flag) || !readField(data, at, names[i]) || !readField(data, at, patch.directory)
-                || !readField(data, at, patch.library) || !readField(data, at, patch.basePath) || !readField(data, at, patch.text))
-                return false;
-            if ((flag != "1" && !flag.empty()) || (i == 0 && flag.empty()) || names[i].size() >= sizeof(Context::name))
-                return false;
-            used[i] = flag == "1";
-        }
-        if (!readField(data, at, digits) || at != data.size() || digits.size() != 16)
+    if (data.compare(0, header.size(), header) != 0)
+        return parsePatchState(data, out.patches[0]);
+    size_t at = header.size();
+    std::string flag, digits;
+    for (uint32_t i = 0; i < contextCount; ++i) {
+        Patch& patch = out.patches[i];
+        if (!readField(data, at, flag) || !readField(data, at, out.names[i]) || !readField(data, at, patch.directory)
+            || !readField(data, at, patch.library) || !readField(data, at, patch.basePath) || !readField(data, at, patch.text))
             return false;
-        for (int ch = 0; ch < 16; ++ch) {
-            channels[ch] = static_cast<uint32_t>(digits[ch] - '0');
-            if (channels[ch] >= contextCount || !used[channels[ch]])
-                return false;
-        }
-    } else if (!parsePatchState(data, patches[0]))
+        if ((flag != "1" && !flag.empty()) || (i == 0 && flag.empty()) || out.names[i].size() >= sizeof(Context::name))
+            return false;
+        out.used[i] = flag == "1";
+    }
+    if (!readField(data, at, digits) || at != data.size() || digits.size() != 16)
         return false;
+    for (int ch = 0; ch < 16; ++ch) {
+        out.channels[ch] = static_cast<uint32_t>(digits[ch] - '0');
+        if (out.channels[ch] >= contextCount || !out.used[out.channels[ch]])
+            return false;
+    }
+    return true;
+}
+
+bool snapshotLoad(const clap_plugin_t* p, const clap_istream_t* stream)
+{
+    auto& s = self(p);
+    std::string data, message;
+    ParsedSnapshot parsed;
+    if (!readAll(stream, data) || !parseSnapshot(data, parsed))
+        return false;
+    const bool* used = parsed.used;
+    const std::string* names = parsed.names;
+    const Patch* patches = parsed.patches;
+    const uint32_t* channels = parsed.channels;
     if (s.nextId > CLAP_INVALID_ID - contextCount)
         return false;
     std::unique_ptr<Engine> engines[contextCount];
@@ -865,6 +884,55 @@ bool snapshotLoad(const clap_plugin_t* p, const clap_istream_t* stream)
 }
 
 const clap_plugin_state_t snapshot { snapshotSave, snapshotLoad };
+
+// Snapshots prepared beside (oscairn.sound-snapshots): every sound of a snapshot, its default
+// included, becomes a new context in a free slot, all or nothing, nothing selected. Samples
+// that another context already holds are taken from it (SharedPreloads), not read again.
+bool snapshotPrepare(const clap_plugin_t* p, const clap_istream_t* stream, uint32_t* selected, char* message, uint32_t capacity)
+{
+    auto& s = self(p);
+    auto fail = [&](const std::string& why) {
+        if (message && capacity)
+            std::snprintf(message, capacity, "%s", why.c_str());
+        return false;
+    };
+    std::string data, why;
+    ParsedSnapshot parsed;
+    if (!stream || !readAll(stream, data) || !parseSnapshot(data, parsed))
+        return fail("not a snapshot of this plugin");
+    uint32_t slotFor[contextCount] {};
+    uint32_t next = 1;
+    for (uint32_t i = 0; i < contextCount; ++i) {
+        if (!parsed.used[i])
+            continue;
+        while (next < contextCount && s.contexts[next].prepared)
+            ++next;
+        if (next == contextCount)
+            return fail("not enough free sound contexts");
+        slotFor[i] = next++;
+    }
+    if (s.nextId > CLAP_INVALID_ID - contextCount)
+        return fail("no free sound context IDs");
+    std::unique_ptr<Engine> engines[contextCount];
+    for (uint32_t i = 0; i < contextCount; ++i)
+        if (parsed.used[i] && !(engines[i] = engineFor(s, parsed.patches[i], why)))
+            return fail(why.empty() ? "a patch could not be loaded" : why);
+    for (uint32_t i = 0; i < contextCount; ++i) {
+        if (!parsed.used[i])
+            continue;
+        Context& c = s.contexts[slotFor[i]];
+        c.engine = std::move(engines[i]);
+        c.id = s.nextId++;
+        std::snprintf(c.name, sizeof(c.name), "%s", parsed.names[i].c_str());
+        c.prepared = true;
+    }
+    if (selected)
+        for (int ch = 0; ch < 16; ++ch)
+            selected[ch] = s.contexts[slotFor[parsed.channels[ch]]].id;
+    return true;
+}
+
+const oscairn_plugin_sound_snapshots_t soundSnapshots { snapshotPrepare };
 
 const oscairn_plugin_sound_contexts_t soundContexts { contextCapacity, contextGet, contextPrepare, contextSelect, contextDiscard, &snapshot, nullptr };
 
@@ -907,8 +975,23 @@ const void* getExtension(const clap_plugin_t*, const char* id)
         return &soundContexts;
     if (!std::strcmp(id, OSCAIRN_EXT_ASSET_DEPENDENCIES))
         return &dependencies;
+    if (!std::strcmp(id, OSCAIRN_EXT_SOUND_SNAPSHOTS))
+        return &soundSnapshots;
     return nullptr;
 }
+
+} // namespace
+
+size_t oscairnSfizzFileOpens(const clap_plugin_t* p)
+{
+    size_t n = 0;
+    for (auto& c : self(p).contexts)
+        if (c.engine)
+            n += c.engine->synth.getResources().getFilePool().getNumFileOpens();
+    return n;
+}
+
+namespace {
 
 const char* features[] = { CLAP_PLUGIN_FEATURE_INSTRUMENT, CLAP_PLUGIN_FEATURE_SAMPLER, CLAP_PLUGIN_FEATURE_STEREO, nullptr };
 
