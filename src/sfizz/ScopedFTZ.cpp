@@ -35,8 +35,8 @@ ScopedFTZ::~ScopedFTZ()
 #if SFIZZ_HAVE_SSE
     _mm_setcsr(static_cast<unsigned>(registerState));
 #elif SFIZZ_HAVE_NEON && SFIZZ_CPU_FAMILY_ARM
-    asm volatile("vmrs %0, fpscr" : : "r"(registerState));
+    asm volatile("vmsr fpscr, %0" : : "r"(registerState));
 #elif SFIZZ_HAVE_NEON && SFIZZ_CPU_FAMILY_AARCH64
-    asm volatile("mrs %0, fpcr" : : "r"(registerState));
+    asm volatile("msr fpcr, %0" : : "r"(registerState));
 #endif
 }

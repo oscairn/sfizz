@@ -19,6 +19,11 @@ using namespace sfz::literals;
 
 // Need these for the introspection of Synth
 #include "sfizz/Effects.h"
+#include "sfizz/ScopedFTZ.h"
+#include "sfizz/SIMDConfig.h"
+#if SFIZZ_HAVE_SSE
+#include <pmmintrin.h>
+#endif
 
 TEST_CASE("[Synth] Play and check active voices")
 {
@@ -2227,4 +2232,39 @@ TEST_CASE("[Synth] Note on and off with delay")
     for (int i = 0; i < 100; ++i)
         synth.renderBlock(buffer);
     CHECK(synth.getNumActiveVoices() == 0);
+}
+namespace {
+// The floating-point control register that holds flush-to-zero, or 0 where there is none
+uintptr_t fpControl()
+{
+    uintptr_t r = 0;
+#if SFIZZ_HAVE_SSE
+    r = _mm_getcsr();
+#elif SFIZZ_HAVE_NEON && SFIZZ_CPU_FAMILY_ARM
+    asm volatile("vmrs %0, fpscr" : "=r"(r));
+#elif SFIZZ_HAVE_NEON && SFIZZ_CPU_FAMILY_AARCH64
+    asm volatile("mrs %0, fpcr" : "=r"(r));
+#endif
+    return r;
+}
+}
+
+TEST_CASE("[Synth] Rendering restores the thread's floating-point control register")
+{
+    // ScopedFTZ sets flush-to-zero for a render; a host thread running other code after it must
+    // get its own setting back
+    const uintptr_t before = fpControl();
+    {
+        ScopedFTZ ftz;
+#if SFIZZ_HAVE_SSE || SFIZZ_HAVE_NEON
+        REQUIRE(fpControl() != before); // the test thread starts without flush-to-zero
+#endif
+    }
+    REQUIRE(fpControl() == before);
+    sfz::Synth synth;
+    synth.loadSfzString(fs::current_path() / "tests/TestFiles/ftz.sfz", "<region> sample=*sine");
+    synth.noteOn(0, 60, 100);
+    sfz::AudioBuffer<float> buffer { 2, 256 };
+    synth.renderBlock(buffer);
+    REQUIRE(fpControl() == before);
 }
