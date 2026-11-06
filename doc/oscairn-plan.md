@@ -409,7 +409,8 @@ with `OSCAIRN_PLUGIN_WORKER`: PASSED both ways (plays, saves, reopens identicall
 installs and plays from the store).
 
 Snapshots prepared beside (`oscairn.sound-snapshots`, draft 1 at Oscairn `eecdee4` in
-`84a07d4c`, draft 2 at `2d1424a` with ring-out into the host's buffer for retiring contexts):
+`84a07d4c`, draft 2 at `2d1424a` with ring-out into the host's buffer for retiring contexts,
+draft 3 at `b9e90c7` with `choke_retiring`, which fades the older tail into channels 2 and 3):
 `prepare` builds every sound of a snapshot, its default included, as new contexts in free slots
 (all or nothing, nothing selected). The instance's synths share preloaded sample data through
 the file pool (`f0604e59`, `FilePool::setSharedPreloads`; the data is held weakly, so it lives
