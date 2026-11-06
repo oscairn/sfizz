@@ -1229,8 +1229,15 @@ void Voice::Impl::fillWithData(AudioSpan<float> buffer) noexcept
         pitchEnvelope(pitch);
 
         float baseRatio = pitchRatio_ * speedRatio_;
-        for (size_t i = 0; i < numSamples; ++i)
-            (*jumps)[i] = baseRatio * centsFactor(pitch[i]);
+        // element voices: one pow for a block of constant pitch (stock voices keep the loop,
+        // which a compiler may vectorize with results that differ in the last bit)
+        if ((region_->oscairn.ampegEnabled || region_->oscairn.pegEnabled)
+            && std::all_of(pitch.begin(), pitch.end(), [&](float c) { return c == pitch[0]; }))
+            fill<float>(*jumps, baseRatio * centsFactor(pitch[0]));
+        else {
+            for (size_t i = 0; i < numSamples; ++i)
+                (*jumps)[i] = baseRatio * centsFactor(pitch[i]);
+        }
 
         // Take the first sample if the voice just started
         if (age_ == 0)
