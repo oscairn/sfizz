@@ -27,6 +27,8 @@
 // a channel sets the bus of the sound that channel selects, one without a channel every selected
 // sound's, from the start of the block it arrives in. A voice keeps the bus it started on. While a
 // sound rings out (oscairn.sound-snapshots), only what it plays on Main goes to the host's buffer.
+// Draft 4 saves one sound alone (on Main) and reads an unselected sound's bus, which Oscairn needs
+// to form shared instances on its own.
 //
 // Files: with the host's oscairn.assets, every sample a patch uses is resolved through the
 // host, and oscairn.asset-dependencies lists them; without it, paths resolve from the
@@ -1027,36 +1029,42 @@ bool contextDiscard(const clap_plugin_t* p, uint32_t id)
 // other than 0 get fresh IDs. A version 1, 2 or 3 state loads too, as context 0 alone.
 constexpr const char* snapshotVersion = "oscairn-sfizz-contexts-2";
 
-bool snapshotSave(const clap_plugin_t* p, const clap_ostream_t* stream)
+// The snapshot of every context, or (alone < contextCount) of that slot alone as the default on
+// every channel and on Main (save_sound)
+std::string snapshotText(const Plugin& s, uint32_t alone)
 {
-    auto& s = self(p);
-    uint32_t channels[16];
-    std::copy(std::begin(s.channelContext), std::end(s.channelContext), channels);
-    const uint32_t head = s.selectionHead.load(std::memory_order_acquire);
-    for (uint32_t tail = s.selectionTail.load(std::memory_order_acquire); tail != head; ++tail) {
-        const Selection sel = s.selections[tail % selectionCapacity];
-        for (int ch = 0; ch < 16; ++ch)
-            if (sel.channel < 0 || sel.channel == ch)
-                channels[ch] = sel.context;
+    uint32_t channels[16] {};
+    if (alone == contextCount) {
+        std::copy(std::begin(s.channelContext), std::end(s.channelContext), channels);
+        const uint32_t head = s.selectionHead.load(std::memory_order_acquire);
+        for (uint32_t tail = s.selectionTail.load(std::memory_order_acquire); tail != head; ++tail) {
+            const Selection sel = s.selections[tail % selectionCapacity];
+            for (int ch = 0; ch < 16; ++ch)
+                if (sel.channel < 0 || sel.channel == ch)
+                    channels[ch] = sel.context;
+        }
     }
     std::string data = std::string(snapshotVersion) + "\n";
     auto field = [&](const std::string& f) { data += std::to_string(f.size()) + "\n" + f + "\n"; };
     for (uint32_t i = 0; i < contextCount; ++i) {
-        const Context& c = s.contexts[i];
-        const bool used = c.prepared && c.engine;
-        const Patch none {}, &patch = i == 0 ? s.patch : used ? c.engine->patch : none;
+        const uint32_t from = alone == contextCount ? i : i == 0 ? alone : contextCount;
+        const Context* c = from < contextCount ? &s.contexts[from] : nullptr;
+        const bool used = c && c->prepared && c->engine;
+        const Patch none {}, &patch = from == 0 ? s.patch : used ? c->engine->patch : none;
         field(used ? "1" : "");
-        field(used ? std::string(c.name, strnlen(c.name, sizeof(c.name))) : "");
+        field(used ? std::string(c->name, strnlen(c->name, sizeof(c->name))) : "");
         for (const std::string* f : { &patch.directory, &patch.library, &patch.basePath, &patch.text })
             field(*f);
-        field(busField(used ? c.bus.load(std::memory_order_relaxed) : 0));
+        field(busField(used && alone == contextCount ? c->bus.load(std::memory_order_relaxed) : 0));
     }
     std::string digits;
     for (uint32_t ch : channels)
         digits += static_cast<char>('0' + ch);
     field(digits);
-    return writeAll(stream, data);
+    return data;
 }
+
+bool snapshotSave(const clap_plugin_t* p, const clap_ostream_t* stream) { return writeAll(stream, snapshotText(self(p), contextCount)); }
 
 struct ParsedSnapshot {
     bool used[contextCount] {};
@@ -1205,7 +1213,34 @@ bool snapshotChokeRetiring(const clap_plugin_t* p)
     return true;
 }
 
-const oscairn_plugin_sound_snapshots_t soundSnapshots { snapshotPrepare, snapshotRingOut, snapshotChokeRetiring, nullptr, nullptr };
+// Draft 4 (main thread): one sound as a whole snapshot of its own, its default on every channel and
+// on Main; rendering excluded, as for snapshotSave
+bool snapshotSaveSound(const clap_plugin_t* p, uint32_t id, const clap_ostream_t* stream)
+{
+    auto& s = self(p);
+    for (uint32_t i = 0; i < contextCount; ++i)
+        if (s.contexts[i].prepared && s.contexts[i].engine && s.contexts[i].id == id)
+            return writeAll(stream, snapshotText(s, i));
+    return false;
+}
+
+// Draft 4 (main thread, beside process()): a sound's values while no channel selects it, so the
+// audio thread does not change them
+uint32_t snapshotSoundValues(const clap_plugin_t* p, uint32_t id, oscairn_sound_parameter_t* values, uint32_t capacity)
+{
+    auto& s = self(p);
+    for (const Context& c : s.contexts)
+        if (c.prepared && c.id == id) {
+            if (c.selectedChannels.load(std::memory_order_acquire))
+                return 0;
+            if (values && capacity)
+                values[0] = { busParam, double(c.bus.load(std::memory_order_relaxed)) };
+            return 1;
+        }
+    return 0;
+}
+
+const oscairn_plugin_sound_snapshots_t soundSnapshots { snapshotPrepare, snapshotRingOut, snapshotChokeRetiring, snapshotSaveSound, snapshotSoundValues };
 
 const oscairn_plugin_sound_contexts_t soundContexts { contextCapacity, contextGet, contextPrepare, contextSelect, contextDiscard, &snapshot, nullptr };
 

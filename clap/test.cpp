@@ -1106,6 +1106,42 @@ int main(int argc, char** argv)
         }
         restored->deactivate(restored);
         restored->destroy(restored);
+        // draft 4: a sound's values while no channel selects it, and one sound saved on its own
+        auto* own = static_cast<const oscairn_plugin_sound_snapshots_t*>(plugin->get_extension(plugin, OSCAIRN_EXT_SOUND_SNAPSHOTS));
+        CHECK(own->save_sound && own->sound_values);
+        const oscairn_sound_parameter_t bus3 { 1, 3 };
+        const uint32_t idc = ctx->prepare(plugin, "C", &bus3, 1, a.c_str(), nullptr, message, sizeof(message));
+        oscairn_sound_parameter_t values[4] {};
+        CHECK(own->sound_values(plugin, idc, values, 4) == 1 && values[0].id == 1 && values[0].value == 3);
+        CHECK(own->sound_values(plugin, idb, values, 4) == 0); // selected on channel 1
+        CHECK(own->sound_values(plugin, 999, values, 4) == 0);
+        Buffer alone;
+        CHECK(own->save_sound(plugin, idb, &alone.out) && !own->save_sound(plugin, 999, &alone.out));
+        auto* single = create();
+        auto* sctx = static_cast<const oscairn_plugin_sound_contexts_t*>(single->get_extension(single, OSCAIRN_EXT_SOUND_CONTEXTS));
+        CHECK(sctx->state->load(single, &alone.in));
+        oscairn_sound_context_info_t sinfo {};
+        CHECK(sctx->get(single, 0, &sinfo) && sinfo.selected_channels == 0xffffu && !std::strcmp(sinfo.name, "B"));
+        for (uint32_t slot = 1; slot < 8; ++slot)
+            CHECK(!sctx->get(single, slot, &sinfo));
+        auto* reference = create();
+        CHECK(load(reference, stateFor(b)));
+        std::vector<float> outs[2];
+        for (auto* q : { single, reference }) {
+            CHECK(q->activate(q, 48000, 1, 256));
+            BusRun r { q };
+            Events qe;
+            for (int i = 0; i < blocks; ++i) {
+                events(i, qe, 1);
+                r.block(qe, 256);
+            }
+            for (int bus = 1; bus < 9; ++bus)
+                CHECK(r.peak(bus) == 0.0f); // on Main
+            outs[q == reference] = r.kept[0];
+            q->deactivate(q);
+            q->destroy(q);
+        }
+        CHECK(largestDifference(outs[0], outs[1]) == 0.0f && *std::max_element(outs[0].begin(), outs[0].end()) > 0.1f);
         plugin->destroy(plugin);
         // and prepared beside, in another instance: the snapshot's sounds keep their buses
         auto* beside = create();
