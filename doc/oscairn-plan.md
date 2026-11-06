@@ -381,17 +381,17 @@ Checked against `oscairn/docs/plugin-porting.md` at Oscairn `9de5aad`.
 sfizz has no CLAP build in either repository. The fork adds one in `clap/`
 (`oscairn-sfizz.clap`, target `sfizz_clap`, option `SFIZZ_CLAP`, off by default so upstream
 builds are unchanged). It vendors the CLAP headers (MIT) and Oscairn's plugin SDK headers
-(MIT: `sound-contexts.h`, `assets.h`, and from 0.3.0 `voice-budget.h` and the helper
-`voice-budget-plugin.hpp`) with their commits. The SDK's
+(MIT: `sound-contexts.h`, `assets.h`, from 0.3.0 `voice-budget.h` and the helper
+`voice-budget-plugin.hpp`, and from 0.4.0 `ui.h`) with their commits. The SDK's
 `sound-contexts-plugin.hpp` owns voices itself, which does not fit sfizz's voice manager, so
 the wrapper implements the extension directly.
 
 | Requirement | Plan |
 | --- | --- |
 | Factory, complete plugin interface | Written in `clap/`; a test loads the bundle through `clap_entry` and checks every function pointer |
-| Audio/note ports | One stereo output (two more for element outputs A/B later), no input; one note port, CLAP preferred, MIDI accepted |
-| Parameters | None in milestone 0; later the Part-level offsets and switches, with real units and module paths |
-| State | Version 2 (`69fe1f5f`): text `oscairn-sfizz-2\n`, then four length-prefixed fields (decimal byte length, `\n`, bytes, `\n`): local directory, base asset library, base asset path, SFZ text. With a base, every `sample=` path (relative, no `..`) resolves through `oscairn.assets` as `<library>/<path>/<sample>` and is listed in `oscairn.asset-dependencies`; an unresolvable sample fails the load; without the host extension a base falls back to the directory and fails if it is empty. Version 1 (directory and text only) still loads. Documented at the top of `clap/plugin.cpp` |
+| Audio/note ports | Stereo outputs: Main and, from 0.4.0, eight sound buses (one per sound, for parts sharing the instance; element outputs A/B are not built, K48), no input; one note port, CLAP preferred, MIDI accepted |
+| Parameters | From 0.4.0 one, Output bus, each sound's own (parts sharing one instance, below); later the Part-level offsets and switches, with real units and module paths |
+| State | Version 3 (0.4.0): text `oscairn-sfizz-3\n`, then five length-prefixed fields (decimal byte length, `\n`, bytes, `\n`): local directory, base asset library, base asset path, SFZ text, output bus (one digit). Version 2 (`69fe1f5f`) is the same without the bus. With a base, every `sample=` path (relative, no `..`) resolves through `oscairn.assets` as `<library>/<path>/<sample>` and is listed in `oscairn.asset-dependencies`; an unresolvable sample fails the load; without the host extension a base falls back to the directory and fails if it is empty. Versions 1 (directory and text only) and 2 still load, on Main. Documented at the top of `clap/plugin.cpp` |
 | Activation | Any rate and maximum block; `sfz::Synth::setSampleRate`/`setSamplesPerBlock` on activate |
 | Linux ARM64 | CI job on `ubuntu-24.04-arm` |
 
@@ -437,7 +437,8 @@ installs and plays from the store).
 
 Snapshots prepared beside (`oscairn.sound-snapshots`, draft 1 at Oscairn `eecdee4` in
 `84a07d4c`, draft 2 at `2d1424a` with ring-out into the host's buffer for retiring contexts,
-draft 3 at `b9e90c7` with `choke_retiring`, which fades the older tail into channels 2 and 3):
+draft 3 at `b9e90c7` with `choke_retiring`, which fades the older tail into channels 2 and 3,
+draft 4 at `33206e5` in 0.4.0 with `save_sound` and `sound_values`, below):
 `prepare` builds every sound of a snapshot, its default included, as new contexts in free slots
 (all or nothing, nothing selected). The instance's synths share preloaded sample data through
 the file pool (`f0604e59`, `FilePool::setSharedPreloads`; the data is held weakly, so it lives
@@ -479,6 +480,42 @@ in `clap/budget.cpp` behind `clap/budget.h`.
   the largest of their gains (notes sharing a key in one context share them, as for K14).
   `honors_volume`: true (per-note volume scales the key's voices). `NOTE_END` comes once a note's
   last voice has ended, as before.
+
+### Parts sharing one instance (RFC 0021 slice 3)
+
+From 0.4.0. Oscairn puts several parts on one instance when the plugin has native contexts and
+their snapshot, `oscairn.sound-snapshots` draft 4 with `save_sound` and `sound_values`, more than
+one output port, and a stepped parameter from 0 tagged with oscairn.ui's `OSCAIRN_ROLE_OUTPUT_BUS`,
+which it sets on each part's sound with an event on the part's channel (`docs/plugin-porting.md`,
+"Parts sharing one instance"; RFC 0005, "One sound on its own"). From Oscairn `0a5c14f` it does so
+on its own when it reads a Performance or adds the plugin.
+
+- **Ports.** Main and eight sound buses, as the Basic Synth has: one bus for each of the eight
+  sounds (Default included), so every sound of a full instance can have its own. Buses nothing
+  plays on are written with zeros, and nothing is mixed for them.
+- **Parameter.** Output bus (ID 1, 0 to 8, stepped and an enum: "Main", "Sound bus 1" to "8";
+  hint: a list, role output bus). An event on a channel sets the bus of the sound that channel
+  selects; one with channel -1, every selected sound's. Events take effect from the start of the
+  block they arrive in (all of a block's bus events are applied before its notes), and through
+  `params.flush`. `get_value` shows the default sound's bus. `prepare` takes the bus as its one
+  parameter (anything else is refused), and a sound prepared with no patch gets the fresh
+  instance's sine: that is how Oscairn's `instruments.share` makes a new part's sound.
+- **Voices keep their bus.** A sound's synth renders its voices and its own effects to the
+  sound's bus. A voice started before a change stays on its old bus until it ends: its main send
+  goes there at the master volume (`Synth::renderBlock` with bus channels). So a change never moves
+  a sounding note, and the next notes play on the new bus (K46 for sfizz's `<effect>` buses).
+- **Saved.** Plugin state version 3 (the default sound's bus), and the contexts' snapshot version
+  2 (each slot's bus, after its patch; version 1 snapshots are no longer read); prepared beside,
+  a snapshot's sounds keep their buses.
+- **One sound on its own** (draft 4, which replaced draft 3 outright): `save_sound` writes the
+  contexts' snapshot holding only that sound, as slot 0, selected on every channel, on Main;
+  `sound_values` gives an unselected sound's one value, its bus, and none for a selected one.
+- **Ring-out** (`oscairn.sound-snapshots` draft 3 and 4): only what a retiring sound plays on Main goes
+  to the host's buffer; on a sound bus it keeps playing on that port, which follows the incoming
+  Performance's chain (K47).
+- **Voice budget.** On a shared instance the host sends one entry per part: its sound's context,
+  the part's reserve and priority, limit 0. The plugin finds a context's settings by its ID, as
+  before, so no change was needed; a test checks the reserve and the priority per part.
 
 ### Sound assets (RFC 0009)
 
@@ -570,7 +607,11 @@ passes its cross-rate check at 44.1, 48 and 96 kHz (section 6).
   - For the CLAP plugin (not the profile): `Synth::getNumActiveVoicesForNote`, `setNoteGain`,
     `fadeOutNote`, and for the voice budget `getNumVoiceSlots` and `getVoiceSlot`; in `Voice`,
     `setHostGain`, `fadeOut`, `isFadingOut` and `getLastGain` (the gain stored after the
-    amplitude stage, and the level and velocity gain at `startVoice`).
+    amplitude stage, and the level and velocity gain at `startVoice`). For sound buses (0.4.0):
+    `Voice::setHostBus`/`getHostBus`, `Synth::setHostBus` (stored in `SynthPrivate.h`, given to
+    each voice in `Impl::startVoice`), and a `Synth::renderBlock` overload with bus channels, which
+    the plain `renderBlock` calls with none; the one branch in its voice loop is taken only for a
+    voice on another bus than the synth's.
   Upstream-style fixes that are not Oscairn-specific are separate commits (section 11).
 - **Candidates for upstream as they are:** the streaming fix `ab0e878c` (interpolator taps
   kept within the frames streamed in so far; `Voice.cpp`, `tests/SynthT.cpp`), the toolchain
@@ -687,6 +728,14 @@ Taken in the voice budget session (2026-11-06), for Jacob to confirm:
     events, with sfizz's own polyphony limits acting first and unchanged; a voice offed by those
     counts as ending; loudness is the last rendered gain (the level and velocity gain before the
     first block); no cost estimate; `honors_volume` true.
+
+Taken in the sharing session (2026-11-06), for Jacob to confirm:
+
+28. **Sound buses** (section 5): eight beside Main, one per sound, as the Basic Synth; a bus change
+    applies from the start of the block its event arrives in; a voice keeps the bus it started
+    on, while a sound's `<effect>` buses follow the sound (K46); `get_value` shows the default
+    sound's bus; the snapshot's version 1 is no longer read (pre-release), plugin states 1 and 2
+    still are (converted libraries hold version 2).
 
 Risks and open questions:
 
@@ -1183,6 +1232,87 @@ stock vs fork, each on the committed tree): `762ae0e2`, `a5bee48e` and `126deb6e
 (519 test cases, the CLAP tests; stock vs fork with each commit's own gate: 162, 159, and 159 plus
 106 streaming renders bit-identical; on `126deb6e` stock's own streaming renders differed from its
 preloaded output in 34 and between runs in 2).
+### Sharing session (2026-11-06): parts sharing one instance, plugin 0.4.0
+
+Oscairn read at `b22173f` (local main): RFC 0021 "Parts sharing one engine", the porting guide's
+sharing, voice budget and ring-out sections, `ui.h` with `OSCAIRN_ROLE_OUTPUT_BUS`, the Basic
+Synth's Output bus and buses (`7a6da47`, `2e8cb59`, `173fc35`, `47f33f1`), the `shared-engine` and
+`control-shared-parts` tests and the host's `SoundContext`; then, once it landed, Oscairn `33206e5`
+and `0a5c14f` (`oscairn.sound-snapshots` draft 4 and parts sharing an instance on their own). `ui.h`
+vendored unchanged (`adda6f5a`); the sound buses and the parameter (`b7498dc5`; section 5, decision
+28, K46-K48); a test of the per-part budget entries (`7ce6d54a`); draft 4 in place of draft 3, with
+its two new calls null (`1721ef72`, `sound-contexts.h` vendored from `0a5c14f`); `save_sound` and
+`sound_values` (`e6a4d55e`); then the version and this entry.
+
+**Tests** (`clap/test.cpp`, 48 kHz, 256- or 64-frame blocks; every bus filled with 1 before each
+process, so an unwritten bus fails):
+
+- Two parts on one instance, a sine on channel 0 and bus 1 (its bus set with an event on its
+  channel, as Oscairn does), a saw on channel 1 and bus 2 (its bus as its `prepare` parameter),
+  notes on both and a pitch bend on channel 1 only, against two instances each playing one part:
+  equal sample for sample (largest difference 0 on both buses); Main and buses 3-8 silent.
+- Saved and restored: the contexts' snapshot into a fresh instance renders the same again, its
+  snapshot saved again is the same text; prepared beside in another instance, the sounds play on
+  their buses. The plugin state carries the default sound's bus (set through `params.flush`),
+  `get_value` shows it, and a state loaded elsewhere plays there; states 1 and 2 load, on Main.
+- A bus change while a note is held: no step on either bus larger than the unchanged render's
+  largest (0.0153 and 0.0229 against 0.0378), the new bus silent until the next note starts, and
+  the two buses' sum the unchanged render within 1e-6.
+- Ring-out: a retiring sound on bus 3 keeps playing on port 3, nothing in the host's buffer.
+- The parameter's info (stepped, 0-8), hint (list, output bus role) and texts; a sound prepared
+  with no patch and the bus as its parameter plays the sine on that bus; other parameters and
+  bus 9 are refused.
+- Per-part voice budget entries: two sounds, entries with their contexts, reserves and
+  priorities and limit 0, a total limit of 3. A part within its reserve keeps its notes while the
+  other, over its reserve, gives up its older note although its priority is the higher; with no
+  reserves the lower-priority part's note goes, not the oldest.
+- Draft 4: the extension is found as draft 4 and not as draft 3; a sound saved alone loads into a
+  fresh instance as its only sound, on every channel, and renders on Main what an instance with
+  its patch renders, sample for sample; `sound_values` gives an unselected sound's bus and nothing
+  for a selected or unknown one.
+- `OscairnT.cpp` "A voice keeps the host bus it started on": a note, the synth moved to bus 2, a
+  second note: the first plays into the bus channels from then on, the second in the buffer, and
+  their sum is the plain render within 1e-6.
+- The allocation guard covers every new process call.
+
+Each was checked to fail with its part undone (one at a time in a scratch build): the hook's branch
+off (the bus change test: the held note moves, steps on both buses; and the sfizz test), voices
+taking the synth's bus instead of their own (the same), the sound's output not routed to its bus
+(the sharing, saving, prepare and parameter checks), the snapshot's bus not saved (restored and
+prepared beside), the state's bus not saved (state and `get_value`), ring-out taking the sound's
+own bus instead of Main (the ring-out test), `prepare` refusing parameters and a missing patch (the
+sharing checks), bus events not applied (the sharing and change checks), unused buses not zeroed
+(the silent-bus checks), the draft 3 ID (the draft checks), `save_sound` keeping the sound's bus or
+writing every sound (the saved-alone checks), `sound_values` answering for a selected sound. The
+per-part budget test needed no plugin change: it fails with the
+candidates' context IDs replaced by 0 (the oldest notes go instead).
+
+**Oscairn host side** (Oscairn `b22173f`, built from an export outside the repository):
+`oscairn-plugin-check` (Oscairn `0a5c14f`) PASSED on `e6a4d55e`'s Release plugin in the
+engine and with `OSCAIRN_PLUGIN_WORKER`. Oscairn's own `shared-engine` and `control-shared-parts`
+are written for the Basic Synth's parameters, so two scratch adaptations (outside both
+repositories) ran instead: `shared-engine` for sfizz (graph, Oscairn `b22173f`: a sine part and a
+saw part on one instance through `SoundContext`, a bend on the keyboard's channel, against two
+instances: largest difference 0; each node meters its bus and hears its notes; an entry per part
+with its reserve and priority), and `control-shared-parts` for sfizz (Session, Oscairn `0a5c14f`:
+two sfizz parts saved with an instance each open on one instance through Oscairn's own sharing,
+no `instruments.share`, and render what the two instances rendered, largest difference 0; saved
+and reopened, one instance, difference 0). With the plugin as at `7ce6d54a` (draft 3; a build of the same plugin code) the
+second opens on two instances and fails.
+
+**Gates** (`gate.sh`: Release, ASan/UBSan and TSan builds of `sfizz_tests` and the CLAP tests, and
+stock vs fork, each on the committed tree): `adda6f5a`, `b7498dc5`, `7ce6d54a`, `1721ef72` and
+`e6a4d55e` passed all four (519 test cases on the first, 520 from the second; the stock gate
+on each: 159 renders bit-identical, 106 streaming renders bit-identical to stock's preloaded ones,
+0 unstable, 0 failed).
+
+**Converter.** Oscairn does not yet group a Performance's parts onto one instance when it opens
+one, so the converter still writes an instance per part. To write shared nodes later it would
+need: the parts that play AWM2 sounds on one instance, up to eight sounds each (the Default one of
+them) and spilling to more instances past that; per part, its channel and bus (Performance
+format 12: each node's `sound` with channel and bus, the engine's snapshot in its first node's
+folder, `engine/`); the snapshot in this plugin's version 2 format, each slot's patch and bus,
+channels to slots; and no part saved as a Sound when it shares its instance (RFC 0021).
 
 ### Upstream merge test (2026-11-01)
 
@@ -1246,3 +1376,6 @@ repository, or the local scripts beside the renders).
 | K43 | Voice stealing under a voice budget | While Oscairn sets voice limits (`oscairn.voice-budget`), voices past them go in the SDK's order (released before held, the new voice's own sound, lower priority, quieter, older; never a held voice within its sound's reserve or of a part marked mono or legato), a region at a time, at a block's start and after note events, faded over 3 ms. sfizz's own limits (the engine's voices, 64 a context by default; `polyphony`; `note_polyphony`; `off_by`) still steal first, in sfizz's order, and a voice they off counts as ending though it still renders its off-time release (a converted 13-element sound, eight notes: up to 39 such voices for about 100 ms). A voice in its attack counts as quiet as it is then. The reference's own stealing order is not measured | Oscairn RFC 0018's order, so the host and the plugin agree on what is least audible | Deliberate (decision 27, proposed) | `clap/test.cpp` voice budget cases | `clap/plugin.cpp` `keepWithinLimits`; `clap/budget.cpp` |
 | K44 | Level held after a decay to level 0 | After a decay segment reaches level 0 (a straight line in dB to -90 dB), the reference keeps sounding the tone at about -95 dB below level 127 (`eg7` `dn_*`, held 1 s and more, the same in every probe); the engine is silent from -90 dB on, and a voice whose envelope holds level 0 ends there (test "Element envelope ends once it holds level 0") | Inaudible floor | Not modelled (not decided by Jacob) | `eg7` (`dn_*`); `scripts/eg7/rl.py` | `ElementEnvelope.cpp` `floorDb` |
 | K45 | Release from a low level | One probe: a release (index 64) from a decay still rising from level 0, at -47 dB below level 127, falls at 60.5 dB/s on the reference and 57.2 dB/s in the engine (5.5 %), which takes the full-scale release time whatever the distance. Releases from other levels below 127 were not compared | Not known: the reference's segments are neither a fixed time nor a fixed rate here | Unresolved, one measurement | `eg7` (`uprel`); `scripts/eg7/rl.py` | `ElementEnvelope.cpp` `enter` |
+| K46 | A sound's output bus changed while it sounds | The change applies at a block's start, not at its event's frame. Voices sounding then stay on their old bus until they end; a patch's own `<effect>` buses (none in converted sounds) move with the sound at once, so a held voice's effect tail moves to the new bus and that voice reaches its old bus dry, bypassing a `<effect>` on the main bus | Effects are per synth, voices per bus | Deliberate (decision 28) | `clap/test.cpp` "a change of bus"; `OscairnT.cpp` "A voice keeps the host bus" | `Synth.cpp` `renderBlock`; `clap/plugin.cpp` `process` |
+| K47 | Ring-out of a sound on a sound bus | Across a Performance change only Main rings out through the outgoing chain; a retiring sound on a sound bus keeps playing on that port, through the incoming Performance's chain there | The host contract (`oscairn.sound-snapshots` drafts 3 and 4, "Main output only") | Deliberate | `clap/test.cpp` "ring-out carries only Main" | `clap/plugin.cpp` `process` |
+| K48 | Element connection (Thru, InsA, InsB) and drum-key outputs | Not routed: every region plays on its sound's bus (sfizz's `output` opcode folds onto that pair). The plan's element outputs A/B were to be ports 1 and 2; from 0.4.0 the ports beside Main are the sound buses, so element outputs would need further ports per sound | Not built | Open | none | `clap/plugin.cpp` `audioPortGet` |
