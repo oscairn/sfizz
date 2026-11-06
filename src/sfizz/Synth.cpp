@@ -180,8 +180,9 @@ void Synth::Impl::buildRegion(const std::vector<Opcode>& regionOpcodes)
     parseOpcodes(groupOpcodes_);
     parseOpcodes(regionOpcodes);
 
-    // Create the amplitude envelope
-    if (!lastRegion->flexAmpEG)
+    // Create the amplitude envelope (none when the element envelope replaces it)
+    if (lastRegion->oscairn.ampegEnabled) {
+    } else if (!lastRegion->flexAmpEG)
         lastRegion->getOrCreateConnection(
             ModKey::createNXYZ(ModId::AmpEG, lastRegion->id),
             ModKey::createNXYZ(ModId::MasterAmplitude, lastRegion->id)).sourceDepth = 1.0f;

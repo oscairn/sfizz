@@ -985,12 +985,14 @@ void Voice::Impl::amplitudeEnvelope(absl::Span<float> modulationSpan) noexcept
 
     ModMatrix& mm = resources_.getModMatrix();
 
-    // Amplitude EG
-    absl::Span<const float> ampegOut(mm.getModulation(masterAmplitudeTarget_), numSamples);
-    ASSERT(ampegOut.data());
-    copy(ampegOut, modulationSpan);
+    // Amplitude EG; the element envelope replaces it, so the stock one is not computed then
     if (region_->oscairn.ampegEnabled)
         oscairnAmpEG_.process(modulationSpan);
+    else {
+        absl::Span<const float> ampegOut(mm.getModulation(masterAmplitudeTarget_), numSamples);
+        ASSERT(ampegOut.data());
+        copy(ampegOut, modulationSpan);
+    }
     if (region_->oscairn.lfoEnabled)
         oscairnLfo_.applyGain(modulationSpan);
 
