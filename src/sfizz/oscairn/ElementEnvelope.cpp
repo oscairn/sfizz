@@ -147,6 +147,9 @@ void ElementEnvelope::enter(Stage stage) noexcept
         const double samples = std::max(1.0, per60 * (-floorDb / 60.0) * sampleRate_);
         target_ = release ? floorDb : levelDb(stage == Stage::Decay1 ? p_.decay1Level : p_.decay2Level);
         db_ = toDb(gain_);
+        // from level 0 a rising segment starts at the floor (measured: eg7), not at silence
+        if (gain_ <= 0.0 && target_ > db_)
+            gain_ = std::pow(10.0, db_ / 20.0);
         step_ = (target_ - db_) / samples;
         ratio_ = std::pow(10.0, step_ / 20.0);
         break;

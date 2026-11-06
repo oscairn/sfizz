@@ -173,6 +173,7 @@ TEST_CASE("[Oscairn] Element envelope: initial level, release before the end of 
     p.initialLevel = 127;
     p.attackLevel = 0;
     p.attackTime = 64;
+    p.decay1Level = p.decay2Level = 0; // held at 0 after the attack
     auto v = renderEnvelope(p, rate, 1.0, 10.0);
     REQUIRE(v[0] == Approx(1.0f).margin(1e-3));
     REQUIRE(crossing(v, rate, 0.0f, false) == Approx(sfz::oscairn::attackSeconds(64)).margin(2 / rate));
@@ -1343,6 +1344,42 @@ TEST_CASE("[Oscairn] Element envelope ends once it holds level 0")
     eg.process(absl::MakeSpan(out));
     REQUIRE_FALSE(eg.isFinished());
     REQUIRE(out.back() > 0.0f);
+}
+
+TEST_CASE("[Oscairn] A decay from level 0 rises from the floor")
+{
+    // Measured on the reference (eg7): a decay that starts at level 0 rises as a straight line
+    // in dB from -90 dB, over a full-scale decay's time, like a fall to level 0 in reverse;
+    // after a decay to level 0 the next one rises from there
+    auto db = [](float g) { return 20.0 * std::log10(static_cast<double>(g)); };
+    for (double rate : { 44100.0, 48000.0, 88200.0, 96000.0, 192000.0 }) {
+        INFO("rate " << rate);
+        const double tol = 2.0 / rate;
+        ElementEnvelopeParameters p;
+        p.attackLevel = 0;
+        p.decay1Time = 72;
+        const double full72 = 1.5 * sfz::oscairn::decaySecondsPer60dB(72);
+        auto v = renderEnvelope(p, rate, full72 + 0.5, 10.0);
+        REQUIRE(db(v[1]) == Approx(-90.0).margin(0.1));
+        REQUIRE(crossing(v, rate, std::pow(10.0f, -45.0f / 20.0f), true) == Approx(0.5 * full72).margin(tol));
+        REQUIRE(crossing(v, rate, 0.999f, true) == Approx(full72).margin(0.01 * full72));
+        REQUIRE(v.back() == 1.0f);
+
+        p = ElementEnvelopeParameters {};
+        p.decay1Time = 64;
+        p.decay1Level = 0;
+        p.decay2Time = 72;
+        const double full64 = 1.5 * sfz::oscairn::decaySecondsPer60dB(64);
+        v = renderEnvelope(p, rate, full64 + full72 + 0.5, 10.0);
+        const double top = crossing(v, rate, 1.0f, true); // the end of the attack (index 0)
+        REQUIRE(crossing(v, rate, std::pow(10.0f, -45.0f / 20.0f), false, top) - top == Approx(0.5 * full64).margin(tol));
+        const auto low = std::min_element(v.begin(), v.end());
+        const double bottom = static_cast<double>(low - v.begin()) / rate;
+        REQUIRE(bottom - top == Approx(full64).margin(tol));
+        REQUIRE(db(*low) == Approx(-90.0).margin(0.1)); // no step down to silence between the two
+        REQUIRE(crossing(v, rate, std::pow(10.0f, -45.0f / 20.0f), true, bottom) - bottom == Approx(0.5 * full72).margin(tol));
+        REQUIRE(v.back() == 1.0f);
+    }
 }
 
 TEST_CASE("[Oscairn] Key-off elements release 2 s after they start")
