@@ -6,13 +6,14 @@
 
 // Renders an SFZ file through a fixed event script to raw 32-bit float stereo, using only
 // the public C++ API, so the same source builds against stock sfizz and against this fork
-// (scripts/oscairn/compare-stock.sh).
+// (scripts/oscairn/compare-stock.sh). Prints what the patch loaded, for the load check.
 //
 // usage: oscairn-render <patch.sfz> <out.f32> [block size] [sample rate] [quality]
 
 #include <sfizz.hpp>
 #include <cstdio>
 #include <cstdlib>
+#include <string>
 #include <vector>
 
 namespace {
@@ -48,6 +49,9 @@ const Event script[] = {
     // key switches in a common range
     { 4700, On, 24, 100 }, { 4710, Off, 24, 0 }, { 4720, On, 60, 100 }, { 4900, Off, 60, 0 },
     { 4950, On, 25, 100 }, { 4960, Off, 25, 0 }, { 4970, On, 60, 100 }, { 5200, Off, 60, 0 },
+    // keys and velocities the notes above miss, which some test patches map
+    { 5300, On, 2, 100 }, { 5300, On, 17, 110 }, { 5300, On, 61, 100 },
+    { 5800, Off, 2, 0 }, { 5800, Off, 17, 0 }, { 5800, Off, 61, 0 },
 };
 const int lengthMs = 7000;
 
@@ -77,6 +81,12 @@ int main(int argc, char** argv)
         std::fprintf(stderr, "cannot load %s\n", argv[1]);
         return 1;
     }
+    std::string unknown;
+    for (const std::string& u : synth.getUnknownOpcodes())
+        unknown += " " + u;
+    std::printf("regions %d groups %d masters %d curves %d preloaded %zu unknown%s\n", synth.getNumRegions(),
+        synth.getNumGroups(), synth.getNumMasters(), synth.getNumCurves(), synth.getNumPreloadedSamples(),
+        unknown.c_str());
 
     std::FILE* out = std::fopen(argv[2], "wb");
     if (!out)

@@ -13,6 +13,10 @@
 # process (sfizz's random generators restart with the process). Every render runs twice: a
 # patch whose stock renders differ between runs has no reference and is reported, not
 # compared; a fork that differs between runs where stock does not fails.
+#
+# Every patch must load in both, with the same regions, groups, masters, curves, preloaded
+# files and unknown opcodes, and must sound: a silent render fails, unless the patch is
+# listed below as silent on purpose.
 set -euo pipefail
 
 STOCK_COMMIT=f5c6e29f23b8057867c08e88f5f6ac6738baa30b
@@ -61,24 +65,35 @@ fi
 # The fork's copies of the patches are the inputs for both builds. Left out because stock
 # itself does not render them reproducibly, even with ASLR off: the include-loop parser
 # fixtures (crashes, or different output on every run) and newdrums_flat.sfz (2 of 12 runs
-# differed from the rest on 2026-11-01, starting at its fifth note).
+# differed from the rest on 2026-11-01, starting at its fifth note). Left out because they
+# load no region on their own: Includes/subdir/included_subdir.sfz (a fragment that
+# root_subdir.sfz includes and the gate renders) and table_embedded.sfz (base64 data split
+# over lines, which sfizz does not parse).
 patches=()
 while IFS= read -r p; do patches+=("$p"); done < <(
     find "$fork/tests/TestFiles" "$here/patches" -name '*.sfz' \
-        ! -name 'included_loop*.sfz' ! -name 'root_loop.sfz' ! -name 'newdrums_flat.sfz' | LC_ALL=C sort)
+        ! -name 'included_loop*.sfz' ! -name 'root_loop.sfz' ! -name 'newdrums_flat.sfz' \
+        ! -name 'included_subdir.sfz' ! -name 'table_embedded.sfz' | LC_ALL=C sort)
+
+# Silent on purpose, so only loaded and compared: the hierarchy fixtures' group delays (36 to
+# 67 s) outlast the render; scripts/oscairn/patches/hierarchy.sfz plays the same hierarchy.
+silent_ok=(tests/TestFiles/basic_hierarchy.sfz tests/TestFiles/basic_hierarchy_antislash.sfz)
 
 configs=("256 48000 2" "37 44100 1" "512 96000 10")
-compared=0 skipped=0 unstable=0 failed=0
+compared=0 unstable=0 failed=0
 mkdir -p "$work/out"
 render() { # <binary> <patch> <out> <config>: prints the exit code, or the output's hash
     local r=0
     read -r block rate quality <<< "$4"
-    "${run[@]}" "$1" "$2" "$3" "$block" "$rate" "$quality" > /dev/null 2>&1 || r=$?
+    "${run[@]}" "$1" "$2" "$3" "$block" "$rate" "$quality" > "$3.load" 2> /dev/null || r=$?
     if [[ $r -ne 0 ]]; then echo "exit $r"; else cksum < "$3" | cut -d' ' -f1-2; fi
 }
+silent() { cmp -s -n "$(($(wc -c < "$1")))" "$1" /dev/zero; }
+fail() { echo "FAIL $name: $1"; failed=$((failed + 1)); }
 for p in "${patches[@]}"; do
+    rel="${p#"$fork"/}"
     for c in "${configs[@]}"; do
-        name="${p#"$fork"/} [$c]"
+        name="$rel [$c]"
         s1=$(render "$work/render-stock" "$p" "$work/out/s1.f32" "$c")
         s2=$(render "$work/render-stock" "$p" "$work/out/s2.f32" "$c")
         f1=$(render "$work/render-fork" "$p" "$work/out/f1.f32" "$c")
@@ -87,21 +102,17 @@ for p in "${patches[@]}"; do
             # Stock gives different results from run to run: no reference to compare with
             echo "UNSTABLE IN STOCK $name"; unstable=$((unstable + 1)); continue
         fi
-        if [[ "$f1" != "$f2" ]]; then
-            echo "FAIL $name: fork differs between runs, stock does not"; failed=$((failed + 1)); continue
+        if [[ "$f1" != "$f2" ]]; then fail "fork differs between runs, stock does not"; continue; fi
+        if [[ "$s1" == exit* || "$f1" == exit* ]]; then fail "does not load: stock $s1, fork $f1"; continue; fi
+        if grep -q '^regions 0 ' "$work/out/s1.f32.load"; then fail "loads no region"; continue; fi
+        if ! cmp -s "$work/out/s1.f32.load" "$work/out/f1.f32.load"; then
+            fail "loads differently: stock '$(cat "$work/out/s1.f32.load")', fork '$(cat "$work/out/f1.f32.load")'"; continue
         fi
-        if [[ "$s1" == exit* || "$f1" == exit* ]]; then
-            if [[ "$s1" == "$f1" ]]; then skipped=$((skipped + 1)); else
-                echo "FAIL $name: stock $s1, fork $f1"; failed=$((failed + 1)); fi
-            continue
-        fi
-        if cmp -s "$work/out/s1.f32" "$work/out/f1.f32"; then
-            compared=$((compared + 1))
-        else
-            echo "FAIL $name: output differs"; failed=$((failed + 1))
-        fi
+        if ! cmp -s "$work/out/s1.f32" "$work/out/f1.f32"; then fail "output differs"; continue; fi
+        if silent "$work/out/s1.f32" && [[ " ${silent_ok[*]-} " != *" $rel "* ]]; then fail "silent"; continue; fi
+        compared=$((compared + 1))
     done
 done
 echo "stock $STOCK_COMMIT vs fork $(git -C "$fork" rev-parse --short HEAD)$( [[ -n $(git -C "$fork" status --porcelain --untracked-files=no) ]] && echo ' (modified)'):" \
-     "$compared renders bit-identical, $skipped not loadable by either, $unstable unstable in stock, $failed failed"
+     "$compared renders bit-identical, $unstable unstable in stock, $failed failed"
 [[ $failed -eq 0 && $compared -gt 0 ]]
