@@ -86,6 +86,34 @@ float velocityGain(const ElementVelocity& v, int velocity) noexcept
     return static_cast<float>(std::pow(10.0, -0.375 * steps / 20.0));
 }
 
+float levelScalingGain(const ElementLevelScaling& s, int key) noexcept
+{
+    double offset = s.offsets[0];
+    if (key >= s.keys[3])
+        offset = s.offsets[3];
+    else {
+        for (int i = 0; i < 3; ++i) {
+            if (key >= s.keys[i] && key < s.keys[i + 1]) {
+                const double f = static_cast<double>(key - s.keys[i]) / (s.keys[i + 1] - s.keys[i]);
+                offset = s.offsets[i] + f * (s.offsets[i + 1] - s.offsets[i]);
+            }
+        }
+    }
+    // fitted (renders ks1): offsets interpolated between break points round to whole steps
+    // (note 85 between 0 at 84 and -90 at 105 reads -4, note 94 -43); +63 counts as 64
+    const int32_t follow = s.keyFollow >= 63 ? 64 : s.keyFollow;
+    offset = std::round(offset) + follow * (key - 60) / 32.0;
+    if (s.level <= 0)
+        return 1.0f;
+    auto gridDb = [](double level) {
+        return -0.375 * std::round(40.0 * std::log10(127.0 / level) / 0.375);
+    };
+    const double scaled = std::min(127.0, s.level * (128.0 + offset) / 128.0);
+    if (scaled <= 0.0)
+        return 0.0f;
+    return static_cast<float>(std::pow(10.0, (gridDb(scaled) - gridDb(s.level)) / 20.0));
+}
+
 void balanceGains(int32_t pan, float& left, float& right) noexcept
 {
     const int32_t p = std::max<int32_t>(1, std::min<int32_t>(127, pan));

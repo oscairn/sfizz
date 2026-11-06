@@ -29,6 +29,9 @@ struct RegionData {
     // amp_veltrack=0 so that only this one acts)
     bool velocityEnabled { false };
     ElementVelocity velocity;
+    // Level scaling by key
+    bool levelScalingEnabled { false };
+    ElementLevelScaling levelScaling;
     // Balance-law pan, after sfizz's pan stage
     bool panEnabled { false };
     int32_t pan { 64 };

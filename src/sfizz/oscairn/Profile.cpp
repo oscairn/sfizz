@@ -14,6 +14,7 @@ namespace oscairn {
 
 namespace {
 const OpcodeSpec<int32_t> index127 { 0, Range<int32_t>(0, 127), kEnforceBounds };
+const OpcodeSpec<int32_t> level127 { 127, Range<int32_t>(0, 127), kEnforceBounds };
 const OpcodeSpec<int32_t> profileSpec { 0, Range<int32_t>(0, 1), kEnforceBounds };
 const OpcodeSpec<int32_t> bipolar64 { 0, Range<int32_t>(-64, 63), kEnforceBounds };
 const OpcodeSpec<int32_t> segments { 4, Range<int32_t>(0, 4), kEnforceBounds };
@@ -70,6 +71,20 @@ bool parseRegionOpcode(const Opcode& opcode, RegionData& data)
     case hash("oscairn_ampeg_keytime_release"): target = &eg.timeKeyFollowReleaseAdjustment; break;
     case hash("oscairn_amp_velsens"): data.velocity.sensitivity = opcode.read(bipolar64); data.velocityEnabled = true; return true;
     case hash("oscairn_amp_veloffset"): data.velocity.offset = opcode.read(index127); data.velocityEnabled = true; return true;
+    case hash("oscairn_amp_scaling_key&"):
+    case hash("oscairn_amp_scaling_offset&"): {
+        const unsigned n = opcode.parameters.empty() ? 0 : opcode.parameters.back();
+        if (n < 1 || n > 4)
+            return false;
+        if (opcode.lettersOnlyHash == hash("oscairn_amp_scaling_key&"))
+            data.levelScaling.keys[n - 1] = opcode.read(note);
+        else
+            data.levelScaling.offsets[n - 1] = opcode.read(ratioSpec);
+        data.levelScalingEnabled = true;
+        return true;
+    }
+    case hash("oscairn_amp_keyfollow"): data.levelScaling.keyFollow = opcode.read(bipolar64); data.levelScalingEnabled = true; return true;
+    case hash("oscairn_amp_level"): data.levelScaling.level = opcode.read(level127); data.levelScalingEnabled = true; return true;
     case hash("oscairn_amp_velcurve"): data.velocity.curve = opcode.read(curves); data.velocityEnabled = true; return true;
     case hash("oscairn_pan"): data.pan = opcode.read(index127); data.panEnabled = true; return true;
     case hash("oscairn_pitcheg_hold"): data.peg.holdTime = opcode.read(index127); data.pegEnabled = true; return true;

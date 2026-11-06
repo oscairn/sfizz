@@ -11,6 +11,7 @@
 #include "sfizz/Region.h"
 #include "sfizz/oscairn/ElementEnvelope.h"
 #include "sfizz/oscairn/ElementFilter.h"
+#include "sfizz/oscairn/ElementLevel.h"
 #include "sfizz/oscairn/ElementLfo.h"
 #include "sfizz/oscairn/ElementPitch.h"
 #include "TestHelpers.h"
@@ -1210,4 +1211,67 @@ TEST_CASE("[Oscairn] Reference output level is an option")
     synth.loadSfzString(fs::current_path() / "tests/TestFiles/oscairn.sfz", "<region> sample=*sine oscairn_ref_level=1");
     REQUIRE_FALSE(synth.getRegionView(0)->oscairn.referenceLevel);
     REQUIRE(isUnknown(synth, "oscairn_ref_level"));
+}
+
+TEST_CASE("[Oscairn] Element level scaling by key")
+{
+    using sfz::oscairn::ElementLevelScaling;
+    auto db = [](const ElementLevelScaling& s, int key) { return 20.0 * std::log10(sfz::oscairn::levelScalingGain(s, key)); };
+    // Reference renders (ks1), sine, element level 127 unless given: break points 36/48/84/105
+    // with offsets 0/0/0/-90 (Rd 73's) read 0 dB at 84, -0.42 at 85, -2.68 at 88, -7.16 at 94
+    ElementLevelScaling rd { { 36, 48, 84, 105 }, { 0, 0, 0, -90 } };
+    REQUIRE(db(rd, 84) == Approx(0.0).margin(1e-6));
+    REQUIRE(db(rd, 85) == Approx(-0.42).margin(0.1));
+    REQUIRE(db(rd, 88) == Approx(-2.68).margin(0.1));
+    REQUIRE(db(rd, 94) == Approx(-7.16).margin(0.1));
+    REQUIRE(db(rd, 120) == Approx(db(rd, 105)).margin(1e-6)); // held beyond the outer points
+    REQUIRE(db(rd, 0) == Approx(0.0).margin(1e-6));
+    // -64 halves the level (-12 dB), -96 quarters it, -128 silences
+    ElementLevelScaling s { { 36, 48, 60, 72 }, { 0, 0, -64, 0 } };
+    REQUIRE(db(s, 60) == Approx(-12.04).margin(0.1));
+    REQUIRE(db(s, 54) == Approx(-4.89).margin(0.1)); // halfway: -32
+    s.offsets[2] = -96;
+    REQUIRE(db(s, 60) == Approx(-24.08).margin(0.1));
+    s.offsets[2] = -128;
+    REQUIRE(sfz::oscairn::levelScalingGain(s, 60) == 0.0f);
+    // positive offsets raise a lower element level, up to 127: level 100 is -4.14 dB
+    s.level = 100;
+    s.offsets[2] = 32;
+    REQUIRE(db(s, 60) == Approx(-0.38 + 4.14).margin(0.1));
+    s.offsets[2] = 64;
+    REQUIRE(db(s, 60) == Approx(4.125).margin(1e-4));
+    // key follow: sensitivity * (key - 60) / 32 steps of offset
+    ElementLevelScaling kf;
+    kf.level = 100;
+    kf.keyFollow = 32;
+    REQUIRE(db(kf, 36) == Approx(-7.74 + 4.14).margin(0.2));
+    REQUIRE(db(kf, 84) == Approx(-1.12 + 4.14).margin(0.1));
+    kf.keyFollow = -32;
+    REQUIRE(db(kf, 84) == Approx(-7.89 + 4.14).margin(0.1));
+    // The opcodes reach the voice, only with the profile
+    auto level = [](const std::string& text, int key) {
+        sfz::Synth synth;
+        synth.setSamplesPerBlock(256);
+        synth.loadSfzString(fs::current_path() / "tests/TestFiles/oscairn.sfz", text);
+        synth.noteOn(0, key, 127);
+        sfz::AudioBuffer<float> buffer { 2, 256 };
+        double sum = 0.0;
+        for (int b = 0; b < 40; ++b) {
+            synth.renderBlock(buffer);
+            if (b >= 20)
+                for (float x : buffer.getConstSpan(0))
+                    sum += static_cast<double>(x) * x;
+        }
+        return 10.0 * std::log10(sum);
+    };
+    const std::string opcodes = " sample=*sine amp_veltrack=0 oscairn_amp_scaling_key3=60 oscairn_amp_scaling_offset3=-64";
+    const double plain = level("<region> sample=*sine amp_veltrack=0", 60);
+    REQUIRE(level("<control> oscairn_profile=1 <region>" + opcodes, 60) - plain == Approx(-12.0).margin(0.01));
+    REQUIRE(level("<region>" + opcodes, 60) == Approx(plain).margin(1e-6));
+    sfz::Synth synth;
+    synth.loadSfzString(fs::current_path() / "tests/TestFiles/oscairn.sfz",
+        "<control> oscairn_profile=1 <region> sample=*sine oscairn_amp_scaling_key4=105 oscairn_amp_scaling_offset4=-90 oscairn_amp_keyfollow=-5 oscairn_amp_level=120");
+    const auto& ls = synth.getRegionView(0)->oscairn.levelScaling;
+    REQUIRE(synth.getRegionView(0)->oscairn.levelScalingEnabled);
+    REQUIRE((ls.keys[3] == 105 && ls.offsets[3] == -90 && ls.keyFollow == -5 && ls.level == 120));
 }
