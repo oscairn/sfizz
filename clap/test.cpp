@@ -314,6 +314,8 @@ int main(int argc, char** argv)
         CHECK(load(plugin, stateFor("<region> sample=*silence\n")));
         auto* ctx = static_cast<const oscairn_plugin_sound_contexts_t*>(plugin->get_extension(plugin, OSCAIRN_EXT_SOUND_CONTEXTS));
         CHECK(ctx && ctx->capacity(plugin) == 8);
+        // the draft Oscairn recognises; no presets to prepare
+        CHECK(plugin->get_extension(plugin, "oscairn.sound-contexts/draft-5") == ctx && !ctx->prepare_preset);
         char message[256] {};
         const uint32_t sineId = ctx->prepare(plugin, "Sine", nullptr, 0, "<region> sample=*sine ampeg_release=0.005", nullptr, message, sizeof(message));
         CHECK(sineId != CLAP_INVALID_ID && sineId != 0);

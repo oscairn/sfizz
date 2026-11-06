@@ -730,7 +730,7 @@ bool contextDiscard(const clap_plugin_t* p, uint32_t id)
     return false;
 }
 
-const oscairn_plugin_sound_contexts_t soundContexts { contextCapacity, contextGet, contextPrepare, contextSelect, contextDiscard, nullptr };
+const oscairn_plugin_sound_contexts_t soundContexts { contextCapacity, contextGet, contextPrepare, contextSelect, contextDiscard, nullptr, nullptr };
 
 // Asset dependencies: every context's resolved samples
 
@@ -757,7 +757,7 @@ bool dependencyGet(const clap_plugin_t* p, uint32_t index, oscairn_asset_ref_t* 
     return false;
 }
 
-const oscairn_plugin_asset_dependencies_t dependencies { dependencyCount, dependencyGet };
+const oscairn_plugin_asset_dependencies_t dependencies { dependencyCount, dependencyGet, nullptr };
 
 const void* getExtension(const clap_plugin_t*, const char* id)
 {
