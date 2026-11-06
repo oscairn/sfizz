@@ -97,6 +97,7 @@ void ElementEnvelope::start(const ElementEnvelopeParameters& parameters, int del
     p_.releaseTime = clampIndex(p_.releaseTime - shift.release);
     delay_ = std::max(0, delay);
     releaseDelay_ = -1;
+    releaseOverride_ = 0.0;
     gain_ = levelGain(p_.initialLevel);
     db_ = toDb(gain_);
     enter(delay_ > 0 ? Stage::Delay : Stage::Attack);
@@ -107,6 +108,13 @@ void ElementEnvelope::release(int delay) noexcept
     if (stage_ == Stage::Release || stage_ == Stage::Done)
         return;
     releaseDelay_ = std::max(0, delay);
+}
+
+void ElementEnvelope::setReleaseSeconds(double secondsPer60dB) noexcept
+{
+    releaseOverride_ = secondsPer60dB;
+    if (stage_ == Stage::Release) // already releasing: go on from the current level at the new rate
+        enter(Stage::Release);
 }
 
 void ElementEnvelope::enter(Stage stage) noexcept
@@ -134,7 +142,8 @@ void ElementEnvelope::enter(Stage stage) noexcept
         // which the tables give per 60 dB of it
         const bool release = stage == Stage::Release;
         const int32_t index = release ? p_.releaseTime : stage == Stage::Decay1 ? p_.decay1Time : p_.decay2Time;
-        const double per60 = release ? releaseSecondsPer60dB(index) : decaySecondsPer60dB(index);
+        const double per60 = release ? (releaseOverride_ > 0.0 ? releaseOverride_ : releaseSecondsPer60dB(index))
+                                     : decaySecondsPer60dB(index);
         const double samples = std::max(1.0, per60 * (-floorDb / 60.0) * sampleRate_);
         target_ = release ? floorDb : levelDb(stage == Stage::Decay1 ? p_.decay1Level : p_.decay2Level);
         db_ = toDb(gain_);

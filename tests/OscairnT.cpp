@@ -1383,3 +1383,61 @@ TEST_CASE("[Oscairn] Key-off elements release 2 s after they start")
     REQUIRE(plain[300] == Approx(plain[60]).epsilon(0.01)); // without the opcode it holds
     REQUIRE(voicesPlain == 1);
 }
+
+TEST_CASE("[Oscairn] Chokes and polyphony limits end an element voice at the off time")
+{
+    // off() shortens the stock amplitude EG; under the profile the element envelope is the
+    // audible one, so a choked voice (off_by, polyphony, note_polyphony, a one-shot sample's
+    // end) must release at the off time, not its own release index
+    sfz::Synth synth;
+    synth.setSamplesPerBlock(256);
+    sfz::AudioBuffer<float> buffer { 2, 256 };
+    auto render = [&](int blocks) {
+        for (int i = 0; i < blocks; ++i)
+            synth.renderBlock(buffer);
+    };
+    SECTION("off_by")
+    {
+        synth.loadSfzString(fs::current_path() / "tests/TestFiles/oscairn.sfz", R"(
+<control> oscairn_profile=1
+<global> sample=*sine oscairn_ampeg_release=100
+<region> key=60 group=1 off_by=2
+<region> key=62 group=2
+)");
+        synth.noteOn(0, 60, 100);
+        render(10);
+        REQUIRE(synth.getNumActiveVoices() == 1);
+        synth.noteOn(0, 62, 100);
+        render(10); // 53 ms: the 6 ms off time has passed, release index 100 has not
+        REQUIRE(synth.getNumActiveVoices() == 1);
+    }
+    SECTION("note_polyphony")
+    {
+        synth.loadSfzString(fs::current_path() / "tests/TestFiles/oscairn.sfz", R"(
+<control> oscairn_profile=1
+<region> sample=*sine oscairn_ampeg_release=100 note_polyphony=1
+)");
+        synth.noteOn(0, 60, 100);
+        render(10);
+        synth.noteOn(0, 60, 100);
+        render(10);
+        REQUIRE(synth.getNumActiveVoices() == 1);
+    }
+    SECTION("a choke while already releasing")
+    {
+        synth.loadSfzString(fs::current_path() / "tests/TestFiles/oscairn.sfz", R"(
+<control> oscairn_profile=1
+<global> sample=*sine oscairn_ampeg_release=100
+<region> key=60 group=1 off_by=2
+<region> key=62 group=2
+)");
+        synth.noteOn(0, 60, 100);
+        render(10);
+        synth.noteOff(0, 60, 0);
+        render(10);
+        REQUIRE(synth.getNumActiveVoices() == 1);
+        synth.noteOn(0, 62, 100);
+        render(10);
+        REQUIRE(synth.getNumActiveVoices() == 1);
+    }
+}

@@ -685,7 +685,14 @@ void Voice::off(int delay, bool fast) noexcept
 
 void Voice::Impl::off(int delay, bool fast) noexcept
 {
-    if (!region_->flexAmpEG) {
+    if (region_->oscairn.ampegEnabled) {
+        // the element envelope is the audible one: its release takes the off time
+        if (region_->offMode == OffMode::fast || fast)
+            oscairnAmpEG_.setReleaseSeconds(Default::offTime);
+        else if (region_->offMode == OffMode::time)
+            oscairnAmpEG_.setReleaseSeconds(region_->offTime);
+    }
+    else if (!region_->flexAmpEG) {
         if (region_->offMode == OffMode::fast || fast) {
             egAmplitude_.setReleaseTime(Default::offTime);
         } else if (region_->offMode == OffMode::time) {

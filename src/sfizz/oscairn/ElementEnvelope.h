@@ -76,6 +76,9 @@ public:
     void setSampleRate(double sampleRate) noexcept { sampleRate_ = sampleRate; }
     void start(const ElementEnvelopeParameters& parameters, int delay, int key = 60, int velocity = 127) noexcept;
     void release(int delay) noexcept;
+    // The release lasts `secondsPer60dB` instead of its index's time (a choke's fast release);
+    // cleared by start()
+    void setReleaseSeconds(double secondsPer60dB) noexcept;
     void process(absl::Span<float> output) noexcept;
     bool isFinished() const noexcept { return stage_ == Stage::Done; }
     bool isReleased() const noexcept { return stage_ == Stage::Release || stage_ == Stage::Done || releaseDelay_ >= 0; }
@@ -91,6 +94,7 @@ private:
     Stage stage_ { Stage::Done };
     int delay_ { 0 };
     int releaseDelay_ { -1 };
+    double releaseOverride_ { 0.0 }; // seconds per 60 dB; 0 for the index's time
     double gain_ { 0.0 };   // attack: linear amplitude
     double db_ { -200.0 };  // decays and release: level in dB
     double step_ { 0.0 };   // per sample, in the segment's unit
