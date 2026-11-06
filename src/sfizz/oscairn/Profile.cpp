@@ -105,6 +105,12 @@ bool parseRegionOpcode(const Opcode& opcode, RegionData& data)
     case hash("oscairn_pitcheg_hold_level"): data.peg.holdLevel = opcode.read(level255); data.pegEnabled = true; return true;
     case hash("oscairn_pitcheg_attack_level"): data.peg.attackLevel = opcode.read(level255); data.pegEnabled = true; return true;
     case hash("oscairn_pitcheg_release_level"): data.peg.releaseLevel = opcode.read(level255); data.pegEnabled = true; return true;
+    case hash("oscairn_pitcheg_veltime_segments"): data.peg.timeVelocitySegments = opcode.read(segments); data.pegEnabled = true; return true;
+    case hash("oscairn_pitcheg_veltime"): data.peg.timeVelocitySensitivity = opcode.read(bipolar64); data.pegEnabled = true; return true;
+    case hash("oscairn_pitcheg_keytime"): data.peg.timeKeyFollowSensitivity = opcode.read(bipolar64); data.pegEnabled = true; return true;
+    case hash("oscairn_pitcheg_keytime_center"): data.peg.timeKeyFollowCenter = opcode.read(note); data.pegEnabled = true; return true;
+    case hash("oscairn_pitcheg_veldepth"): data.pegDepthVelocitySensitivity = opcode.read(bipolar64); data.pegEnabled = true; return true;
+    case hash("oscairn_pitcheg_veldepth_curve"): data.pegDepthVelocityCurve = opcode.read(fegCurves); data.pegEnabled = true; return true;
     case hash("oscairn_pitcheg_depth"): data.peg.depth = opcode.read(bipolar64); data.pegEnabled = true; return true;
     case hash("oscairn_fil_type"): data.filter.type = opcode.read(filterTypes); data.filterEnabled = true; return true;
     case hash("oscairn_fil_cutoff"): data.filter.cutoff = opcode.read(index1023); data.filterEnabled = true; return true;

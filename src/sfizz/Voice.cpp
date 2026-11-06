@@ -563,7 +563,9 @@ bool Voice::startVoice(Layer* layer, int delay, const TriggerEvent& event) noexc
     if (region.oscairn.pegEnabled) {
         impl.oscairnPitchEG_.setSampleRate(impl.sampleRate_);
         // fillWithData asks for pitch only once the initial delay has passed
-        impl.oscairnPitchEG_.start(region.oscairn.peg, 0);
+        const int velocity = static_cast<int>(std::lround(impl.triggerEvent_.value * 127.0f));
+        impl.oscairnPitchEG_.start(region.oscairn.peg, 0, impl.triggerEvent_.number, velocity,
+            oscairn::filterDepthVelocityFactor(region.oscairn.pegDepthVelocitySensitivity, region.oscairn.pegDepthVelocityCurve, velocity));
     }
     if (region.oscairn.ampegEnabled) {
         impl.oscairnAmpEG_.setSampleRate(impl.sampleRate_);

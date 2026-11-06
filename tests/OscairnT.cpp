@@ -1275,3 +1275,51 @@ TEST_CASE("[Oscairn] Element level scaling by key")
     REQUIRE(synth.getRegionView(0)->oscairn.levelScalingEnabled);
     REQUIRE((ls.keys[3] == 105 && ls.offsets[3] == -90 && ls.keyFollow == -5 && ls.level == 120));
 }
+
+TEST_CASE("[Oscairn] Pitch envelope velocity and key sensitivities")
+{
+    sfz::Synth parsed;
+    parsed.loadSfzString(fs::current_path() / "tests/TestFiles/oscairn.sfz", R"(
+        <control> oscairn_profile=1
+        <region> sample=*sine oscairn_pitcheg_veltime_segments=2 oscairn_pitcheg_veltime=-20 oscairn_pitcheg_keytime=30
+            oscairn_pitcheg_keytime_center=48 oscairn_pitcheg_veldepth=40 oscairn_pitcheg_veldepth_curve=4
+    )");
+    const auto& o = parsed.getRegionView(0)->oscairn;
+    REQUIRE((o.peg.timeVelocitySegments == 2 && o.peg.timeVelocitySensitivity == -20 && o.peg.timeKeyFollowSensitivity == 30));
+    REQUIRE((o.peg.timeKeyFollowCenter == 48 && o.pegDepthVelocitySensitivity == 40 && o.pegDepthVelocityCurve == 4));
+    REQUIRE(parsed.getUnknownOpcodes().empty());
+    // Frequency (from zero crossings) of a sine voice 0.15-0.25 s after note-on, in cents from A4
+    auto cents = [](const std::string& opcodes, int velocity) {
+        sfz::Synth synth;
+        synth.setSampleRate(48000.0f);
+        synth.setSamplesPerBlock(256);
+        synth.loadSfzString(fs::current_path() / "tests/TestFiles/oscairn.sfz",
+            "<control> oscairn_profile=1 <region> sample=*sine amp_veltrack=0 oscairn_pitcheg_attack=64 oscairn_pitcheg_hold_level=160 "
+            "oscairn_pitcheg_attack_level=128 oscairn_pitcheg_decay1_level=128 oscairn_pitcheg_decay2_level=128 oscairn_pitcheg_depth=63 "
+            "oscairn_pitcheg_keytime_center=60 " + opcodes);
+        synth.noteOn(0, 69, velocity);
+        sfz::AudioBuffer<float> buffer { 2, 256 };
+        std::vector<float> out;
+        for (int b = 0; b < 47; ++b) {
+            synth.renderBlock(buffer);
+            const auto l = buffer.getConstSpan(0);
+            out.insert(out.end(), l.begin(), l.end());
+        }
+        std::vector<double> z;
+        for (size_t i = 7200; i + 1 < 12000; ++i)
+            if (out[i] <= 0.0f && out[i + 1] > 0.0f)
+                z.push_back(static_cast<double>(i) + out[i] / (out[i] - out[i + 1]));
+        return 1200.0 * std::log2(48000.0 * (z.size() - 1) / (z.back() - z.front()) / 440.0);
+    };
+    // Reference renders (ks2): attack 64 from +1200 cents is still about half way at 0.2 s;
+    // time velocity sensitivity +63 at velocity 127 ends it within 15 ms
+    const double plain = cents("", 127);
+    REQUIRE(plain > 400.0);
+    REQUIRE(cents("oscairn_pitcheg_veltime=63", 127) == Approx(0.0).margin(10.0));
+    REQUIRE(cents("oscairn_pitcheg_veltime=63 oscairn_pitcheg_veltime_segments=2", 127) == Approx(plain).margin(1.0)); // decays only
+    REQUIRE(cents("oscairn_pitcheg_veltime=63", 64) < 50.0);
+    // a static +1200 cents scaled by depth velocity sensitivity: +63, curve 3, velocity 64 read 1003.5 cents
+    const std::string held = "oscairn_pitcheg_attack_level=160 oscairn_pitcheg_decay1_level=160 oscairn_pitcheg_decay2_level=160 ";
+    REQUIRE(cents(held, 64) == Approx(1200.0).margin(5.0));
+    REQUIRE(cents(held + "oscairn_pitcheg_veldepth=63 oscairn_pitcheg_veldepth_curve=3", 64) == Approx(1003.5).margin(20.0));
+}

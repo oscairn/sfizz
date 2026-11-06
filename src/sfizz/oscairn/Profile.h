@@ -38,6 +38,8 @@ struct RegionData {
     // Pitch envelope, added to the voice's pitch in cents
     bool pegEnabled { false };
     ElementPitchParameters peg;
+    int32_t pegDepthVelocitySensitivity { 0 }; // -64..+63, the filter envelope's law
+    int32_t pegDepthVelocityCurve { 2 }; // 0-4
     // Element filter, ahead of sfizz's own filters
     bool filterEnabled { false };
     ElementFilterParameters filter;
