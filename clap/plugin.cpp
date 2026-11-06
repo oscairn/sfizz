@@ -367,7 +367,8 @@ bool init(const clap_plugin_t* p)
         s.assets = static_cast<const oscairn_host_assets_t*>(s.host->get_extension(s.host, OSCAIRN_EXT_ASSETS));
     std::string message;
     Context& c = s.contexts[0];
-    c.engine = makeEngine(s, Patch {}, nullptr, message);
+    s.patch.text = "<region> sample=*sine\n"; // a fresh instance plays something
+    c.engine = makeEngine(s, s.patch, nullptr, message);
     c.prepared = true;
     std::snprintf(c.name, sizeof(c.name), "%s", "Default");
     c.selectedChannels = 0xffff;

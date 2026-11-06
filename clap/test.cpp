@@ -406,6 +406,17 @@ int main(int argc, char** argv)
         CHECK(!load(plugin, stateFor(kick, "lib", "sub")));
         plugin->destroy(plugin);
     }
+    { // a fresh instance plays a sine
+        auto* plugin = create();
+        CHECK(plugin->activate(plugin, 48000, 1, 256));
+        Run run { plugin };
+        Events events;
+        events.note(CLAP_EVENT_NOTE_ON, 0, 1, 69, 1.0);
+        run.block(events, 256);
+        CHECK(run.peak > 0.1f);
+        plugin->deactivate(plugin);
+        plugin->destroy(plugin);
+    }
     { // sound-context snapshot: every context, queued selections applied, fresh IDs on load
         auto contexts = [](const clap_plugin_t* p) {
             return static_cast<const oscairn_plugin_sound_contexts_t*>(p->get_extension(p, OSCAIRN_EXT_SOUND_CONTEXTS));
