@@ -1323,3 +1323,24 @@ TEST_CASE("[Oscairn] Pitch envelope velocity and key sensitivities")
     REQUIRE(cents(held, 64) == Approx(1200.0).margin(5.0));
     REQUIRE(cents(held + "oscairn_pitcheg_veldepth=63 oscairn_pitcheg_veldepth_curve=3", 64) == Approx(1003.5).margin(20.0));
 }
+
+TEST_CASE("[Oscairn] Element envelope ends once it holds level 0")
+{
+    // a release-triggered voice is never released: it must end when nothing more can sound
+    ElementEnvelopeParameters p;
+    p.decay1Time = 40;
+    p.decay1Level = 0;
+    p.decay2Level = 0;
+    ElementEnvelope eg;
+    eg.setSampleRate(48000.0);
+    eg.start(p, 0);
+    std::vector<float> out(48000 * 4);
+    eg.process(absl::MakeSpan(out));
+    REQUIRE(eg.isFinished());
+    REQUIRE(out.back() == 0.0f);
+    p.decay2Level = 1; // a level above 0 holds until the release
+    eg.start(p, 0);
+    eg.process(absl::MakeSpan(out));
+    REQUIRE_FALSE(eg.isFinished());
+    REQUIRE(out.back() > 0.0f);
+}

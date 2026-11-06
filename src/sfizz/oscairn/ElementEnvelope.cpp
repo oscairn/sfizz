@@ -143,6 +143,11 @@ void ElementEnvelope::enter(Stage stage) noexcept
         break;
     }
     case Stage::Sustain:
+        // held at level 0: nothing more can sound before a release, so the voice may end (a
+        // release-triggered voice is never released)
+        if (gain_ <= 0.0)
+            stage_ = Stage::Done;
+        break;
     case Stage::Delay:
         break;
     case Stage::Done:
