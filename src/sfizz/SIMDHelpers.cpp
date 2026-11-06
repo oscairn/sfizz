@@ -206,7 +206,10 @@ bool getSIMDOpStatus<float>(SIMDOps op)
 
 void initializeSIMDDispatchers()
 {
-    simdDispatch<float>().resetStatus();
+    // Once: the dispatch tables are global, and a synth built while another renders
+    // must not write them under its feet
+    static std::once_flag once;
+    std::call_once(once, [] { simdDispatch<float>().resetStatus(); });
 }
 
 ///

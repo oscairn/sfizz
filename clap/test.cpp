@@ -18,6 +18,7 @@
 #include <cstdio>
 #include <cstring>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -643,6 +644,39 @@ int main(int argc, char** argv)
         for (int i = 0; i < 40 && run.status != CLAP_PROCESS_SLEEP; ++i)
             run.block(events, 256);
         CHECK(run.status == CLAP_PROCESS_SLEEP); // released as in a fresh instance
+        plugin->deactivate(plugin);
+        plugin->destroy(plugin);
+    }
+    { // context calls on the main thread beside process(): prepare, select, choke_retiring and
+      // discard while the audio thread plays another context (ThreadSanitizer checks the sharing)
+        auto* plugin = create();
+        auto* ctx = static_cast<const oscairn_plugin_sound_contexts_t*>(plugin->get_extension(plugin, OSCAIRN_EXT_SOUND_CONTEXTS));
+        auto* snaps = static_cast<const oscairn_plugin_sound_snapshots_t*>(plugin->get_extension(plugin, OSCAIRN_EXT_SOUND_SNAPSHOTS));
+        CHECK(load(plugin, stateFor(sine)));
+        CHECK(plugin->activate(plugin, 48000, 1, 256));
+        std::atomic<bool> done { false };
+        std::thread audio([&] {
+            Run run { plugin };
+            Events events;
+            for (int n = 0; !done.load(); ++n) {
+                if (n % 8 == 0)
+                    events.note(CLAP_EVENT_NOTE_ON, 0, n, 60, 1.0);
+                if (n % 8 == 4)
+                    events.note(CLAP_EVENT_NOTE_OFF, 0, n - 4, 60, 0.0);
+                run.block(events, 256);
+            }
+        });
+        for (int i = 0; i < 100; ++i) {
+            snaps->choke_retiring(plugin); // may be refused while the queue is full
+            const uint32_t id = ctx->prepare(plugin, "Beside", nullptr, 0, "<region> sample=*silence", nullptr, nullptr, 0);
+            CHECK(id != CLAP_INVALID_ID);
+            CHECK(ctx->select(plugin, id, 5));
+            CHECK(ctx->select(plugin, 0, 5));
+            while (!ctx->discard(plugin, id)) // once the audio thread has applied both selections
+                std::this_thread::yield();
+        }
+        done = true;
+        audio.join();
         plugin->deactivate(plugin);
         plugin->destroy(plugin);
     }
