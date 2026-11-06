@@ -617,6 +617,11 @@ Risks and open questions:
   race in `Voice::Impl::fillInterpolatedWithQuality`). Fixed in `ab0e878c` as a separate,
   upstreamable commit: the new `[Synth] Streamed playback far up...` test raced in 5 of 5
   TSan runs without the fix and in 0 of 5 with it.
+- Stock sfizz: `ScopedFTZ`'s destructor read the ARM control register (FPCR, FPSCR) instead of
+  writing the saved value back, so each render left flush-to-zero on for the rest of the host's
+  audio thread, and other plugins on that thread had their denormals flushed (an Oscairn
+  arpeggiator hung on it). Fixed in `8900c80c` as a separate, upstreamable commit; its test fails
+  on AArch64 without the fix.
 - `-ffast-math` makes the gate compiler-dependent: bit identity is only claimed between the
   two builds made with one compiler on one machine.
 
