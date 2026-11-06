@@ -300,13 +300,26 @@ absl::optional<sfz::FileInformation> sfz::FilePool::getFileInformation(const Fil
     if (existingInformation)
         return existingInformation;
 
+    if (sharedPreloads) {
+        std::lock_guard<std::mutex> lock { sharedPreloads->mutex };
+        const auto shared = sharedPreloads->entries.find(sharedKey(fileId));
+        if (shared != sharedPreloads->entries.end() && !shared->second.data.expired())
+            return shared->second.information;
+    }
+
     const fs::path file { rootDirectory / fileId.filename() };
 
     if (!fs::exists(file))
         return {};
 
+    ++fileOpens;
     AudioReaderPtr reader = createAudioReader(file, fileId.isReverse());
     return getReaderInformation(reader.get());
+}
+
+std::string sfz::FilePool::sharedKey(const FileId& fileId) const
+{
+    return (rootDirectory / fileId.filename()).string() + (fileId.isReverse() ? "|r" : "");
 }
 
 bool sfz::FilePool::preloadFile(const FileId& fileId, uint32_t maxOffset) noexcept
@@ -323,29 +336,70 @@ bool sfz::FilePool::preloadFile(const FileId& fileId, uint32_t maxOffset) noexce
 
     fileInformation->maxOffset = maxOffset;
     const fs::path file { rootDirectory / fileId.filename() };
-    AudioReaderPtr reader = createAudioReader(file, fileId.isReverse());
 
-    const auto frames = static_cast<uint32_t>(reader->frames());
+    // Another pool's data for this file, if it holds at least what this one needs
+    std::shared_ptr<FileAudioBuffer> sharedData;
+    uint32_t frames = 0;
+    double sampleRate = 0.0;
+    std::string key;
+    if (sharedPreloads) {
+        key = sharedKey(fileId);
+        std::lock_guard<std::mutex> lock { sharedPreloads->mutex };
+        const auto shared = sharedPreloads->entries.find(key);
+        if (shared != sharedPreloads->entries.end()) {
+            frames = shared->second.frames;
+            const uint32_t wanted = loadInRam ? frames : min(frames, maxOffset + preloadSize);
+            sharedData = shared->second.data.lock();
+            if (sharedData && sharedData->getNumFrames() >= wanted)
+                sampleRate = shared->second.information.sampleRate;
+            else
+                sharedData.reset();
+        }
+    }
+    AudioReaderPtr reader;
+    if (!sharedData) {
+        ++fileOpens;
+        reader = createAudioReader(file, fileId.isReverse());
+        frames = static_cast<uint32_t>(reader->frames());
+        sampleRate = static_cast<double>(reader->sampleRate());
+    }
+
     const auto framesToLoad = [&]() {
         if (loadInRam)
             return frames;
         else
             return min(frames, maxOffset + preloadSize);
     }();
+    // Reads the file, unless the shared data covers it; offers what it read to the other pools
+    auto load = [&]() -> std::shared_ptr<FileAudioBuffer> {
+        if (sharedData)
+            return sharedData;
+        auto data = std::make_shared<FileAudioBuffer>(readFromFile(*reader, framesToLoad));
+        if (sharedPreloads) {
+            FileInformation information = *fileInformation;
+            information.sampleRate = sampleRate;
+            std::lock_guard<std::mutex> lock { sharedPreloads->mutex };
+            auto& entry = sharedPreloads->entries[key];
+            const auto held = entry.data.lock();
+            if (!held || held->getNumFrames() < data->getNumFrames())
+                entry = { data, information, frames };
+        }
+        return data;
+    };
 
     const auto existingFile = preloadedFiles.find(fileId);
     if (existingFile != preloadedFiles.end()) {
         auto& fileData = existingFile->second;
-        if (framesToLoad > fileData.preloadedData.getNumFrames()) {
+        if (framesToLoad > fileData.preloadedData->getNumFrames()) {
             fileData.information.maxOffset = maxOffset;
-            fileData.preloadedData = readFromFile(*reader, framesToLoad);
+            fileData.preloadedData = load();
             fileData.fullyLoaded = frames == framesToLoad;
         }
         fileData.preloadCallCount++;
     } else {
-        fileInformation->sampleRate = static_cast<double>(reader->sampleRate());
+        fileInformation->sampleRate = sampleRate;
         auto insertedPair = preloadedFiles.insert_or_assign(fileId, {
-            readFromFile(*reader, framesToLoad),
+            load(),
             *fileInformation
         });
 
@@ -398,11 +452,12 @@ sfz::FileDataHolder sfz::FilePool::loadFile(const FileId& fileId) noexcept
     }
 
     const fs::path file { rootDirectory / fileId.filename() };
+    ++fileOpens;
     AudioReaderPtr reader = createAudioReader(file, fileId.isReverse());
 
     const auto frames = static_cast<uint32_t>(reader->frames());
     auto insertedPair = loadedFiles.insert_or_assign(fileId, {
-        readFromFile(*reader, frames),
+        std::make_shared<FileAudioBuffer>(readFromFile(*reader, frames)),
         *fileInformation
     });
     insertedPair.first->second.preloadCallCount++;
@@ -421,7 +476,7 @@ sfz::FileDataHolder sfz::FilePool::loadFromRam(const FileId& fileId, const std::
     auto fileInformation = getReaderInformation(reader.get());
     const auto frames = static_cast<uint32_t>(reader->frames());
     auto insertedPair = loadedFiles.insert_or_assign(fileId, {
-        readFromFile(*reader, frames),
+        std::make_shared<FileAudioBuffer>(readFromFile(*reader, frames)),
         *fileInformation
     });
     insertedPair.first->second.preloadCallCount++;
@@ -474,7 +529,7 @@ void sfz::FilePool::setPreloadSize(uint32_t preloadSize) noexcept
         AudioReaderPtr reader = createAudioReader(file, fileId.isReverse());
         const auto frames = reader->frames();
         const auto framesToLoad = min(frames, maxOffset + preloadSize);
-        fileData.preloadedData = readFromFile(*reader, static_cast<uint32_t>(framesToLoad));
+        fileData.preloadedData = std::make_shared<FileAudioBuffer>(readFromFile(*reader, static_cast<uint32_t>(framesToLoad)));
         fileData.fullyLoaded = frames == framesToLoad;
     }
 }
@@ -645,10 +700,10 @@ void sfz::FilePool::setRamLoading(bool loadInRam) noexcept
             fs::path file { rootDirectory / preloadedFile.first.filename() };
             AudioReaderPtr reader = createAudioReader(file, preloadedFile.first.isReverse());
             auto& fileData = preloadedFile.second;
-            fileData.preloadedData = readFromFile(
+            fileData.preloadedData = std::make_shared<FileAudioBuffer>(readFromFile(
                 *reader,
                 fileData.information.end
-            );
+            ));
             fileData.fullyLoaded = true;
         }
     } else {

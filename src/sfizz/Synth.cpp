@@ -758,7 +758,7 @@ void Synth::Impl::finalizeSfzLoad()
                 bool allZeros = true;
                 int numChannels = sample->information.numChannels;
                 for (int i = 0; i < numChannels; ++i) {
-                    allZeros &= allWithin(sample->preloadedData.getConstSpan(i),
+                    allZeros &= allWithin(sample->preloadedData->getConstSpan(i),
                         -config::virtuallyZero, config::virtuallyZero);
                 }
 

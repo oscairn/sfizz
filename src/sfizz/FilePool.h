@@ -44,6 +44,7 @@
 #include <chrono>
 #include <thread>
 #include <future>
+#include <mutex>
 #include <memory>
 class ThreadPool;
 
@@ -69,7 +70,7 @@ struct FileData
 {
     enum class Status { Invalid, Preloaded, Streaming, Done, GarbageCollecting };
     FileData() = default;
-    FileData(FileAudioBuffer preloaded, FileInformation info)
+    FileData(std::shared_ptr<FileAudioBuffer> preloaded, FileInformation info)
     : preloadedData(std::move(preloaded)), information(std::move(info))
     {
 
@@ -77,10 +78,10 @@ struct FileData
     AudioSpan<const float> getData()
     {
         ASSERT(readerCount > 0);
-        if (status != Status::GarbageCollecting && availableFrames > preloadedData.getNumFrames())
+        if (status != Status::GarbageCollecting && availableFrames > preloadedData->getNumFrames())
             return AudioSpan<const float>(fileData).first(availableFrames);
         else
-            return AudioSpan<const float>(preloadedData);
+            return AudioSpan<const float>(*preloadedData);
     }
 
     FileData(const FileData& other) = delete;
@@ -109,7 +110,8 @@ struct FileData
         return *this;
     }
 
-    FileAudioBuffer preloadedData;
+    // never written once loaded, so file pools may share it (SharedPreloads)
+    std::shared_ptr<FileAudioBuffer> preloadedData { std::make_shared<FileAudioBuffer>() };
     FileInformation information;
     FileAudioBuffer fileData {};
     int preloadCallCount { 0 };
@@ -188,6 +190,21 @@ private:
  */
 
 
+/**
+ * @brief Preloaded file data that several file pools (synths) share: a file another pool has
+ * already read is used from memory instead of read again. Entries hold the data weakly, so it
+ * lives only while a pool uses it.
+ */
+struct SharedPreloads {
+    struct Entry {
+        std::weak_ptr<FileAudioBuffer> data;
+        FileInformation information;
+        uint32_t frames { 0 }; // the file's length
+    };
+    std::mutex mutex;
+    absl::flat_hash_map<std::string, Entry> entries; // by path, "|r" appended when reversed
+};
+
 class FilePool {
 public:
     /**
@@ -211,6 +228,15 @@ public:
      * @return size_t
      */
     size_t getNumPreloadedSamples() const noexcept { return preloadedFiles.size() + loadedFiles.size(); }
+    /**
+     * @brief Share preloaded data with other pools (null: none, the default). Set it before
+     * loading; it applies to files preloaded afterwards.
+     */
+    void setSharedPreloads(std::shared_ptr<SharedPreloads> shared) noexcept { sharedPreloads = std::move(shared); }
+    /**
+     * @brief How many times this pool opened a sample file to preload it or read its information
+     */
+    size_t getNumFileOpens() const noexcept { return fileOpens; }
 
     /**
      * @brief Get metadata information about a file.
@@ -379,6 +405,10 @@ private:
     std::vector<FileAudioBuffer> garbageToCollect;
 
     std::shared_ptr<ThreadPool> threadPool;
+
+    std::shared_ptr<SharedPreloads> sharedPreloads;
+    size_t fileOpens { 0 };
+    std::string sharedKey(const FileId& fileId) const;
 
     // Preloaded data
     absl::flat_hash_map<FileId, FileData> preloadedFiles;

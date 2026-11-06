@@ -7,6 +7,8 @@
 #include "TestHelpers.h"
 #include "sfizz/Synth.h"
 #include "sfizz/Voice.h"
+#include "sfizz/FilePool.h"
+#include "sfizz/Resources.h"
 #include "sfizz/SfzHelpers.h"
 #include "sfizz/parser/Parser.h"
 #include "sfizz/modulations/ModId.h"
@@ -817,4 +819,44 @@ TEST_CASE("[Files] NewDrums: disappearing CCs (#1077)")
     }
 
     REQUIRE( used == expected );
+}
+
+TEST_CASE("[Files] Synths sharing preloaded data read each file once")
+{
+    auto shared = std::make_shared<sfz::SharedPreloads>();
+    const auto patch = fs::current_path() / "tests/TestFiles/looped_regions.sfz";
+    auto render = [](sfz::Synth& synth) {
+        synth.setSamplesPerBlock(256);
+        synth.noteOn(0, 60, 100);
+        synth.noteOn(0, 62, 100);
+        sfz::AudioBuffer<float> buffer { 2, 256 };
+        std::vector<float> out;
+        for (int b = 0; b < 20; ++b) {
+            synth.renderBlock(buffer);
+            const auto l = buffer.getConstSpan(0);
+            out.insert(out.end(), l.begin(), l.end());
+        }
+        return out;
+    };
+    sfz::Synth plain;
+    plain.loadSfzFile(patch);
+    const auto expected = render(plain);
+    auto first = std::make_unique<sfz::Synth>();
+    first->getResources().getFilePool().setSharedPreloads(shared);
+    first->loadSfzFile(patch);
+    REQUIRE(first->getResources().getFilePool().getNumFileOpens() > 0);
+    sfz::Synth second;
+    second.getResources().getFilePool().setSharedPreloads(shared);
+    second.loadSfzFile(patch);
+    REQUIRE(second.getNumPreloadedSamples() == first->getNumPreloadedSamples());
+    REQUIRE(second.getResources().getFilePool().getNumFileOpens() == 0);
+    REQUIRE(render(second) == expected);
+    // the data lives while a pool holds it: with both gone, a third synth reads the files
+    first.reset();
+    second.loadSfzString(fs::current_path() / "tests/TestFiles/empty.sfz", "");
+    sfz::Synth third;
+    third.getResources().getFilePool().setSharedPreloads(shared);
+    third.loadSfzFile(patch);
+    REQUIRE(third.getResources().getFilePool().getNumFileOpens() > 0);
+    REQUIRE(render(third) == expected);
 }
