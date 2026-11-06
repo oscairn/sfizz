@@ -572,6 +572,16 @@ bool Voice::startVoice(Layer* layer, int delay, const TriggerEvent& event) noexc
         impl.oscairnAmpEG_.start(region.oscairn.ampeg, impl.initialDelay_, impl.triggerEvent_.number,
                                  static_cast<int>(std::lround(impl.triggerEvent_.value * 127.0f)));
     }
+    if (region.oscairn.keyOff && impl.triggerEvent_.type == TriggerEventType::NoteOff) {
+        // a key-off element's envelopes release 2.0 s after it starts (measured, ks4)
+        const int hold = static_cast<int>(oscairn::keyOffHoldSeconds * impl.sampleRate_);
+        if (region.oscairn.ampegEnabled)
+            impl.oscairnAmpEG_.release(impl.initialDelay_ + hold);
+        if (region.oscairn.fegEnabled)
+            impl.oscairnFilterEG_.release(impl.initialDelay_ + hold);
+        if (region.oscairn.pegEnabled)
+            impl.oscairnPitchEG_.release(hold);
+    }
 
     if (region.checkSustain) {
         const bool sustainPressed =

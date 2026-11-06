@@ -1344,3 +1344,42 @@ TEST_CASE("[Oscairn] Element envelope ends once it holds level 0")
     REQUIRE_FALSE(eg.isFinished());
     REQUIRE(out.back() > 0.0f);
 }
+
+TEST_CASE("[Oscairn] Key-off elements release 2 s after they start")
+{
+    // Reference (ks4): a key-off element holding its sustain level falls 6 dB 2.007-2.010 s after
+    // it starts, whenever the note-off came
+    auto render = [](const std::string& opcodes, std::vector<float>& out, int& voicesAt3s) {
+        sfz::Synth synth;
+        synth.setSampleRate(48000.0f);
+        synth.setSamplesPerBlock(480);
+        synth.loadSfzString(fs::current_path() / "tests/TestFiles/oscairn.sfz",
+            "<control> oscairn_profile=1 <region> sample=*sine trigger=release rt_dead=1 amp_veltrack=0 oscairn_ampeg_release=40 " + opcodes);
+        sfz::AudioBuffer<float> buffer { 2, 480 };
+        synth.noteOn(0, 60, 100);
+        out.clear();
+        for (int b = 0; b < 350; ++b) {
+            if (b == 50)
+                synth.noteOff(0, 60, 0);
+            synth.renderBlock(buffer);
+            float peak = 0.0f;
+            for (float x : buffer.getConstSpan(0))
+                peak = std::max(peak, std::abs(x));
+            out.push_back(peak);
+            if (b == 349)
+                voicesAt3s = synth.getNumActiveVoices();
+        }
+    };
+    std::vector<float> keyOff, plain;
+    int voicesKeyOff = -1, voicesPlain = -1;
+    render("oscairn_keyoff=1", keyOff, voicesKeyOff);
+    render("", plain, voicesPlain);
+    // blocks of 10 ms: silent before the note-off at 0.5 s, sounding from it
+    REQUIRE(keyOff[49] == 0.0f);
+    REQUIRE(keyOff[52] > 0.1f);
+    REQUIRE(keyOff[248] == Approx(keyOff[60]).epsilon(0.01)); // held until 2.0 s after it started
+    REQUIRE(keyOff[256] < 0.01f * keyOff[60]);                // then released
+    REQUIRE(voicesKeyOff == 0);
+    REQUIRE(plain[300] == Approx(plain[60]).epsilon(0.01)); // without the opcode it holds
+    REQUIRE(voicesPlain == 1);
+}

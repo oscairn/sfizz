@@ -144,6 +144,7 @@ bool parseRegionOpcode(const Opcode& opcode, RegionData& data)
     case hash("oscairn_fileg_keytime_center"): data.feg.timeKeyFollowCenter = opcode.read(note); data.fegEnabled = true; return true;
     case hash("oscairn_fileg_veldepth"): data.fegDepthVelocitySensitivity = opcode.read(bipolar64); data.fegEnabled = true; return true;
     case hash("oscairn_fileg_veldepth_curve"): data.fegDepthVelocityCurve = opcode.read(fegCurves); data.fegEnabled = true; return true;
+    case hash("oscairn_keyoff"): data.keyOff = opcode.read(switchSpec) == 1; return true;
     case hash("oscairn_ref_level"): data.referenceLevel = opcode.read(switchSpec) == 1; return true;
     case hash("oscairn_elfo_mode"): data.lfo.mode = opcode.read(switchSpec); data.lfoEnabled = true; return true;
     case hash("oscairn_elfo_wave"): data.lfo.wave = opcode.read(lfoWaves); data.lfoEnabled = true; return true;

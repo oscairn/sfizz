@@ -20,6 +20,10 @@
 namespace sfz {
 namespace oscairn {
 
+// How long the reference plays a key-off element before releasing it (ks4: 2.007 and 2.010 s
+// after it started, note-off 0.5 and 0.05 s after note-on)
+constexpr double keyOffHoldSeconds = 2.0;
+
 struct RegionData {
     // Amplitude envelope with the reference's raw parameters (0-127). Replaces the SFZ amp EG
     // when any of its opcodes is given.
@@ -32,6 +36,8 @@ struct RegionData {
     // Level scaling by key
     bool levelScalingEnabled { false };
     ElementLevelScaling levelScaling;
+    // Key-off element (a release region): its envelopes release keyOffHoldSeconds after it starts
+    bool keyOff { false };
     // Balance-law pan, after sfizz's pan stage
     bool panEnabled { false };
     int32_t pan { 64 };
