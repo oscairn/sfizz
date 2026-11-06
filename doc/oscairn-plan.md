@@ -985,6 +985,38 @@ timing, a per-sample `exp2` for the pitch).
   reference releases a key-off element 2.0 s after it starts (`ks4`); `oscairn_keyoff=1`
   (`4c38842e`) does that.
 
+### Review session (2026-11-06): six fixes from a code review of the branch
+
+- **Freewheeling** (`ca69309e`, stock bug): `waitForBackgroundLoading` only waited for the
+  loads the dispatch thread had already taken; a note's file queued just before could be
+  missed and the voice cut where the preload ended. Cause of the `[Files] Embedded sample
+  data` flake under load; deterministic with a block longer than the preload (new test).
+- **Reset and activate** (`b2f650ce`, plugin 0.2.1): `reset` only stopped voices, so a held
+  sustain pedal, bend or key carried into the next notes; an instance reset and played again
+  did not sound as a fresh one (`docs/plugin-porting.md`, "Expect a second life"). Both now
+  clear voices, controllers (to the patch's defaults) and note states.
+- **SIMD dispatch tables** (`7418cf38`, stock bug): every `Synth` constructor rewrote the
+  global function-pointer tables, a data race against a rendering synth (ThreadSanitizer,
+  new CLAP test that prepares and discards contexts beside a playing one). Once-only now.
+- **Chokes under the element envelope** (`2aac320e`): `off()` shortened only the stock amp
+  EG, so `off_by`, `polyphony`, `note_polyphony` and a one-shot sample's end left an element
+  voice releasing at its own index (minutes at high indices; drum alternate groups never
+  cut). The element envelope now releases at the off time.
+- **Element filter below 44.1 kHz** (`dee42b60`, K38): at 22.05 kHz the allpass went
+  unstable (NaN with full resonance); such rates run the plain sections.
+- **Context engine pointer** (`ca08e6c6`): the audio thread checked every context's
+  `unique_ptr` while the main thread set or cleared it (prepare, discard): a data race
+  ThreadSanitizer caught in one gate run of the new concurrency test. The audio thread now
+  reads an atomic mirror of the pointer.
+- Found, not changed (for Jacob): a decay segment that rises from level 0 (`decay1_level=0
+  decay2_level=127`) holds 0 and jumps to the target at the segment's end instead of rising
+  (`ElementEnvelope.cpp` runs decays as a gain ratio, so 0 stays 0); the shape the reference
+  gives is not measured. The stock-vs-fork gate counts silent renders as passes (7 of the
+  test patches render silence on both sides) and never renders the streaming path, the one
+  fork change that deliberately differs from stock. A misspelt `oscairn_*` opcode is listed
+  as unknown once per region, not once. Key-off voices report `released()` from their first
+  block (`loop_mode=loop_sustain` on one stops looping at once).
+
 ### Upstream merge test (2026-11-01)
 
 `upstream/develop` has no commits after `f5c6e29f`: merging it into `oscairn` is a no-op
@@ -1039,7 +1071,7 @@ repository, or the local scripts beside the renders).
 | K35 | Element LFO settings mode | Speed, extended speed, wave, delay, fade-in, reset and depth mappings are definitions (decision 21), not measurements: the reference ignores those parameters | By definition | Deliberate | `OscairnT.cpp` "Element LFO, settings mode" | `ElementLfo.h` |
 | K36 | Element LFO in reference mode: what is not built | The filter destination through a controller set (E.LFO FMD), the controller sets' polarity and curve, and ratios below 8 or negative are not measured; the engine uses the ratio and controller value only | Not measured | Open | none yet | `ElementLfo.cpp` |
 | K37 | Filter above 22.05 kHz at 88.2 kHz and up | With the reference-rate delay the response above 22.05 kHz repeats the 44.1 kHz response mirrored (a low-pass passes again toward 44.1 kHz); inaudible, but sample content up there is not attenuated as an analog-style filter would | Consequence of decision 20's design | Accepted by Jacob (inaudible; no ultrasonic low-pass) | none | `ElementFilter.cpp` |
-| K38 | Filter at rates other than the five, or above 705.6 kHz | Rates between 44.1 and 48 kHz put the allpass's pole near Nyquist; above 16 x 44.1 kHz the delay line is capped (comment in the code); neither is tested | Design limits | Unverified | none | `ElementFilter.cpp` `setSampleRate` |
+| K38 | Filter at rates other than the five, or above 705.6 kHz | Rates between 44.1 and 48 kHz put the allpass's pole near Nyquist (an impulse sweep at 32, 45, 46, 47, 50, 64 kHz stayed finite and bounded, response not checked); below 44.1 kHz the allpass went unstable, so those rates run the plain 44.1 kHz sections (`dee42b60`, response off by the rate ratio); above 16 x 44.1 kHz the delay line is capped (comment in the code) | Design limits | Stable everywhere; response unverified off the five rates | `OscairnT.cpp` "finite below the reference rate" | `ElementFilter.cpp` `setSampleRate` |
 | K39 | CPU per voice | Cant Sleep: about 3.0 us per voice per 128-frame block at 48 kHz on an M3 Max (3.5 us under Linux ARM64), half of it stock sfizz; not measured on a small ARM board | The filter's recurrence latency (one section pair per voice, about 6 ns per stereo frame); stock voice stages | Open. Done in the sixth session: the stock amplitude EG is not computed under the element envelope, one pitch ratio per block while the pitch holds (about 10 % of a Cant Sleep block). Next: the two sections' four recurrences as one four-float vector (the second section a sample behind), filter coefficients without the double-precision pin per update | Benchmark described in section 11 (fifth session), not in the repository (it needs the converted samples) | `ElementFilter.cpp` `runDirect`; `Voice.cpp` |
 | K40 | Element level scaling | Offset law (128 + offset) / 128 on the element level, at most level 127, 0.375 dB grid; offsets linear in key between break points, rounded; key follow sensitivity x (key - 60) / 32 steps, summed with the offset (the sum is assumed, not measured with both set). 50 sine probes: 44 within 0.2 dB; at notes 12, 30, 100, 105 and 110 the reference's sine waveform is itself up to 0.95 dB off its note-60 level (`ks3` `sine_*`); after removing that, 105 and 110 still read 0.45 dB below the engine. How it combines with velocity is assumed multiplicative | Fitted law | Built (`93d8e6eb`) | `ks1`, `ks3`; `scratchpad eng_ls.py` | `ElementLevel.cpp` `levelScalingGain` |
 | K41 | Calling After Me 2, Parts 2 and 3 at note 84 | Element 2 of each, isolated, flat (velocity sensitivity 0, flat envelope, filter code 18): Part 3 about 12 dB lower in the engine than the reference (after the 1.84 dB staging), the same on every harmonic; Part 2 about 4.5 dB higher, different by harmonic. Envelope, velocity and level scaling agree. The converted regions for those key banks (sample and `volume`) are the suspects: converter side | Converter (key bank choice or level) | Open, for the converter | `ks1` (`p2only`, `p3only`), `ks3`; `scratchpad eng_ks3.py`, `spec.py` | converter |
