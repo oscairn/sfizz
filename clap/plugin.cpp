@@ -63,6 +63,7 @@ constexpr size_t maxStateBytes = 64 << 20;
 constexpr size_t maxNotes = 256;
 constexpr uint32_t contextCount = 8;
 constexpr uint32_t selectionCapacity = 32;
+constexpr int16_t chokeMark = -2; // a queued choke_retiring, in place of a channel
 
 struct Patch {
     std::string directory; // where relative sample and include paths resolve
@@ -128,6 +129,7 @@ struct Plugin {
 
     // Audio thread
     const clap_audio_buffer_t* ringOut { nullptr }; // for the next process() only
+    bool fading[contextCount] {}; // choked by choke_retiring: rings out into channels 2 and 3
     uint32_t channelContext[16] {};
     Note notes[maxNotes];
     size_t noteCount { 0 };
@@ -273,6 +275,23 @@ void applySelections(Plugin& s)
     const uint32_t head = s.selectionHead.load(std::memory_order_acquire);
     for (; tail != head; ++tail) {
         const Selection sel = s.selections[tail % selectionCapacity];
+        if (sel.channel == chokeMark) {
+            // choke every retiring context (selected by no channel, still sounding) with the
+            // choke fade; its notes no longer wait for a note-off
+            for (uint32_t i = 0; i < contextCount; ++i) {
+                Context& c = s.contexts[i];
+                if (!c.engine || c.selectedChannels.load(std::memory_order_relaxed) || !c.sounding.load(std::memory_order_relaxed))
+                    continue;
+                s.fading[i] = true;
+                for (int key = 0; key < 128; ++key)
+                    c.engine->synth.fadeOutNote(0, key, static_cast<int>(s.chokeFrames));
+                for (size_t n = 0; n < s.noteCount; ++n)
+                    if (s.notes[n].context == i)
+                        s.notes[n].released = true;
+            }
+            continue;
+        }
+        s.fading[sel.context] = false;
         for (int ch = 0; ch < 16; ++ch) {
             if (sel.channel >= 0 && sel.channel != ch)
                 continue;
@@ -429,6 +448,7 @@ void deactivate(const clap_plugin_t* p)
     collectRetired(s);
     for (auto& c : s.contexts) {
         c.sounding = 0;
+        s.fading[&c - s.contexts] = false;
         if (c.engine)
             c.engine->synth.allSoundOff();
     }
@@ -452,7 +472,7 @@ clap_process_status process(const clap_plugin_t* p, const clap_process_t* proces
     // valid for this process() only
     const clap_audio_buffer_t* ringOut = s.ringOut;
     s.ringOut = nullptr;
-    if (ringOut && (ringOut->channel_count < 2 || !ringOut->data32))
+    if (ringOut && (ringOut->channel_count < 4 || !ringOut->data32))
         ringOut = nullptr;
     if (process->audio_outputs_count < 1 || process->audio_outputs[0].channel_count < 2)
         return CLAP_PROCESS_ERROR;
@@ -499,10 +519,12 @@ clap_process_status process(const clap_plugin_t* p, const clap_process_t* proces
                 continue;
             float* buffers[2] = { s.left.data(), s.right.data() };
             c.engine->synth.renderBlock(sfz::AudioSpan<float>(buffers, 2, 0, n));
-            // a retiring context (selected by no channel) rings out into the host's buffer
+            // a retiring context (selected by no channel) rings out into the host's buffer:
+            // channels 0 and 1, or 2 and 3 while a choke fades it
             const bool ring = ringOut && !c.selectedChannels.load(std::memory_order_acquire);
-            float* toLeft = ring ? ringOut->data32[0] + start : s.mixLeft.data();
-            float* toRight = ring ? ringOut->data32[1] + start : s.mixRight.data();
+            const uint32_t pair = s.fading[i] ? 2 : 0;
+            float* toLeft = ring ? ringOut->data32[pair] + start : s.mixLeft.data();
+            float* toRight = ring ? ringOut->data32[pair + 1] + start : s.mixRight.data();
             for (uint32_t k = 0; k < n; ++k) {
                 toLeft[k] += s.left[k];
                 toRight[k] += s.right[k];
@@ -526,6 +548,8 @@ clap_process_status process(const clap_plugin_t* p, const clap_process_t* proces
             continue;
         const bool sounding = notesPerContext[i] > 0 || (c.engine && c.engine->synth.getNumActiveVoices() > 0);
         c.sounding.store(sounding ? 1 : 0, std::memory_order_release);
+        if (!sounding)
+            s.fading[i] = false;
         anySound = anySound || sounding;
     }
     return anySound ? CLAP_PROCESS_CONTINUE : CLAP_PROCESS_SLEEP;
@@ -884,6 +908,7 @@ bool snapshotLoad(const clap_plugin_t* p, const clap_istream_t* stream)
         std::snprintf(c.name, sizeof(c.name), "%s", used[i] ? names[i].c_str() : "");
         c.queued = 0;
         c.sounding = 0;
+        s.fading[&c - s.contexts] = false;
         c.selectedChannels = 0;
     }
     for (uint32_t ch = 0; ch < 16; ++ch) {
@@ -945,7 +970,19 @@ bool snapshotPrepare(const clap_plugin_t* p, const clap_istream_t* stream, uint3
 // Called on the audio thread just before a process(): where retiring contexts ring out
 void snapshotRingOut(const clap_plugin_t* p, const clap_audio_buffer_t* buffer) { self(p).ringOut = buffer; }
 
-const oscairn_plugin_sound_snapshots_t soundSnapshots { snapshotPrepare, snapshotRingOut };
+// Main thread: queued like a selection, so it applies before the selections queued after it
+bool snapshotChokeRetiring(const clap_plugin_t* p)
+{
+    auto& s = self(p);
+    const uint32_t head = s.selectionHead.load(std::memory_order_relaxed);
+    if (head - s.selectionTail.load(std::memory_order_acquire) == selectionCapacity)
+        return false;
+    s.selections[head % selectionCapacity] = { 0, chokeMark };
+    s.selectionHead.store(head + 1, std::memory_order_release);
+    return true;
+}
+
+const oscairn_plugin_sound_snapshots_t soundSnapshots { snapshotPrepare, snapshotRingOut, snapshotChokeRetiring };
 
 const oscairn_plugin_sound_contexts_t soundContexts { contextCapacity, contextGet, contextPrepare, contextSelect, contextDiscard, &snapshot, nullptr };
 

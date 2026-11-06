@@ -508,12 +508,12 @@ int main(int argc, char** argv)
         CHECK(!snaps->prepare(plugin, &bad.in, selected, message, sizeof(message)));
         plugin->destroy(plugin);
     }
-    { // ring-out: a retiring context (selected by no channel) plays into the host's buffer
-      // during the next process() only
+    { // ring-out: a retiring context (selected by no channel) plays into channels 0 and 1 of the
+      // host's buffer during the next process() only; choke_retiring fades it into 2 and 3
         auto* plugin = create();
         auto* ctx = static_cast<const oscairn_plugin_sound_contexts_t*>(plugin->get_extension(plugin, OSCAIRN_EXT_SOUND_CONTEXTS));
         auto* snaps = static_cast<const oscairn_plugin_sound_snapshots_t*>(plugin->get_extension(plugin, OSCAIRN_EXT_SOUND_SNAPSHOTS));
-        CHECK(snaps && snaps->ring_out);
+        CHECK(snaps && snaps->ring_out && snaps->choke_retiring);
         CHECK(load(plugin, stateFor(sine)));
         Buffer saved;
         CHECK(ctx->state->save(plugin, &saved.out));
@@ -527,17 +527,34 @@ int main(int argc, char** argv)
         run.block(events, 256);
         CHECK(run.peak > 0.1f);
         CHECK(ctx->select(plugin, selected[0], -1)); // every channel to the new sound
-        std::vector<float> ringL(256, 0.0f), ringR(256, 0.0f);
-        float* ringChannels[2] = { ringL.data(), ringR.data() };
+        std::vector<std::vector<float>> ringData(4, std::vector<float>(256, 0.0f));
+        float* ringChannels[4] = { ringData[0].data(), ringData[1].data(), ringData[2].data(), ringData[3].data() };
         clap_audio_buffer_t ring {};
         ring.data32 = ringChannels;
-        ring.channel_count = 2;
-        snaps->ring_out(plugin, &ring);
-        run.block(events, 256);
+        ring.channel_count = 4;
+        auto peakOf = [](const std::vector<float>& v) { float m = 0; for (float x : v) m = std::max(m, std::fabs(x)); return m; };
+        auto ringBlock = [&]() {
+            for (auto& c : ringData)
+                std::fill(c.begin(), c.end(), 0.0f);
+            snaps->ring_out(plugin, &ring);
+            run.block(events, 256);
+        };
+        ringBlock();
         CHECK(run.peak == 0.0f);
-        CHECK(*std::max_element(ringL.begin(), ringL.end()) > 0.1f);
+        CHECK(peakOf(ringData[0]) > 0.1f);
+        CHECK(peakOf(ringData[2]) == 0.0f);
         run.block(events, 256); // no ring_out before this one: the main port again
         CHECK(run.peak > 0.1f);
+        // a second change: the retiring context is choked, its fade in channels 2 and 3
+        CHECK(snaps->choke_retiring(plugin));
+        ringBlock();
+        CHECK(peakOf(ringData[0]) == 0.0f);
+        CHECK(peakOf(ringData[2]) > 0.01f);
+        for (int i = 0; i < 4; ++i)
+            ringBlock();
+        CHECK(peakOf(ringData[2]) == 0.0f); // ended (3 ms fade)
+        oscairn_sound_context_info_t info {};
+        CHECK(ctx->get(plugin, 0, &info) && info.idle);
         plugin->deactivate(plugin);
         plugin->destroy(plugin);
     }
