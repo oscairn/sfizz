@@ -1205,7 +1205,7 @@ bool snapshotChokeRetiring(const clap_plugin_t* p)
     return true;
 }
 
-const oscairn_plugin_sound_snapshots_t soundSnapshots { snapshotPrepare, snapshotRingOut, snapshotChokeRetiring };
+const oscairn_plugin_sound_snapshots_t soundSnapshots { snapshotPrepare, snapshotRingOut, snapshotChokeRetiring, nullptr, nullptr };
 
 const oscairn_plugin_sound_contexts_t soundContexts { contextCapacity, contextGet, contextPrepare, contextSelect, contextDiscard, &snapshot, nullptr };
 

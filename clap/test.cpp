@@ -578,6 +578,9 @@ int main(int argc, char** argv)
         auto* ctx = static_cast<const oscairn_plugin_sound_contexts_t*>(plugin->get_extension(plugin, OSCAIRN_EXT_SOUND_CONTEXTS));
         auto* snaps = static_cast<const oscairn_plugin_sound_snapshots_t*>(plugin->get_extension(plugin, OSCAIRN_EXT_SOUND_SNAPSHOTS));
         CHECK(snaps && snaps->prepare);
+        // draft 4, which replaced draft 3 outright
+        CHECK(plugin->get_extension(plugin, "oscairn.sound-snapshots/draft-4") == snaps);
+        CHECK(!plugin->get_extension(plugin, "oscairn.sound-snapshots/draft-3"));
         const std::string kick = "<region> sample=kick.wav loop_mode=one_shot";
         CHECK(load(plugin, stateFor(kick, "", "", OSCAIRN_TEST_FILES)));
         const size_t opened = oscairnSfizzFileOpens(plugin);
