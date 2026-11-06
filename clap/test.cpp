@@ -1196,6 +1196,60 @@ int main(int argc, char** argv)
         plugin->deactivate(plugin);
         plugin->destroy(plugin);
     }
+    { // voice budget on a shared instance: an entry per part (Oscairn RFC 0021), each its sound's
+      // context with its part's reserve and priority and no limit of its own
+        auto* plugin = create();
+        auto* ctx = static_cast<const oscairn_plugin_sound_contexts_t*>(plugin->get_extension(plugin, OSCAIRN_EXT_SOUND_CONTEXTS));
+        char message[256] {};
+        const oscairn_sound_parameter_t bus1 { 1, 1 }, bus2 { 1, 2 };
+        const char* patch = "<region> sample=*sine amp_veltrack=0 ampeg_release=2";
+        const uint32_t a = ctx->prepare(plugin, "A", &bus1, 1, patch, nullptr, message, sizeof(message));
+        const uint32_t b = ctx->prepare(plugin, "B", &bus2, 1, patch, nullptr, message, sizeof(message));
+        CHECK(a != CLAP_INVALID_ID && b != CLAP_INVALID_ID && ctx->select(plugin, a, 0) && ctx->select(plugin, b, 1));
+        auto entry = [](uint32_t context, uint32_t reserve, uint8_t priority) {
+            oscairn_voice_budget_context_t c {};
+            c.context = context;
+            c.reserve = reserve;
+            c.priority = priority;
+            return c;
+        };
+        CHECK(plugin->activate(plugin, 48000, 1, 64));
+        BusRun run { plugin };
+        Events events;
+        auto blocks = [&](int n) { for (int i = 0; i < n; ++i) run.block(events, 64); };
+        // a part's reserve: A's two notes (the oldest) are within its reserve of 2, so B, over
+        // its reserve of 1, gives up its older note, although B's priority is the higher
+        events.note(CLAP_EVENT_NOTE_ON, 0, 1, 60, 1.0, 0);
+        events.note(CLAP_EVENT_NOTE_ON, 0, 2, 62, 1.0, 0);
+        blocks(2);
+        events.note(CLAP_EVENT_NOTE_ON, 0, 3, 64, 1.0, 1);
+        blocks(2);
+        events.note(CLAP_EVENT_NOTE_ON, 0, 4, 65, 1.0, 1);
+        blocks(2);
+        setLimits(plugin, 3, { entry(a, 2, 3), entry(b, 1, 7) });
+        blocks(4);
+        CHECK(events.ends(3) == 1 && events.ends(1) == 0 && events.ends(2) == 0 && events.ends(4) == 0);
+        CHECK(activeVoices(plugin) == 3);
+        // a part's priority: with no reserves, the lower-priority part's note goes, not the oldest
+        setLimits(plugin, 0);
+        for (int id : { 1, 2, 4 })
+            events.note(CLAP_EVENT_NOTE_CHOKE, 0, id, -1, 0.0, -1);
+        blocks(4);
+        CHECK(activeVoices(plugin) == 0);
+        events.note(CLAP_EVENT_NOTE_ON, 0, 5, 60, 1.0, 1); // B first: the oldest
+        events.note(CLAP_EVENT_NOTE_ON, 0, 6, 62, 1.0, 1);
+        blocks(2);
+        events.note(CLAP_EVENT_NOTE_ON, 0, 7, 64, 1.0, 0);
+        blocks(2);
+        events.note(CLAP_EVENT_NOTE_ON, 0, 8, 65, 1.0, 0);
+        blocks(2);
+        setLimits(plugin, 3, { entry(a, 0, 3), entry(b, 0, 7) });
+        blocks(4);
+        CHECK(events.ends(7) == 1 && events.ends(5) == 0 && events.ends(6) == 0 && events.ends(8) == 0);
+        CHECK(run.peak(1) > 0.1f && run.peak(2) > 0.1f && run.peak(0) == 0.0f);
+        plugin->deactivate(plugin);
+        plugin->destroy(plugin);
+    }
     // No allocation in any process call above
     CHECK(guardedAllocations.load() == 0);
     if (guardedAllocations.load())
