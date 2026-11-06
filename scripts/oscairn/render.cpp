@@ -8,9 +8,10 @@
 // the public C++ API, so the same source builds against stock sfizz and against this fork
 // (scripts/oscairn/compare-stock.sh). Prints what the patch loaded, for the load check.
 //
-// usage: oscairn-render <patch.sfz> <out.f32> [block size] [sample rate] [quality]
+// usage: oscairn-render <patch.sfz> <out.f32> [block size] [sample rate] [quality] [preload frames]
 
 #include <sfizz.hpp>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <string>
@@ -60,13 +61,16 @@ const int lengthMs = 7000;
 int main(int argc, char** argv)
 {
     if (argc < 3) {
-        std::fprintf(stderr, "usage: %s <patch.sfz> <out.f32> [block size] [sample rate] [quality]\n", argv[0]);
+        std::fprintf(stderr, "usage: %s <patch.sfz> <out.f32> [block size] [sample rate] [quality] [preload frames]\n", argv[0]);
         return 2;
     }
     const int block = argc > 3 ? std::atoi(argv[3]) : 256;
     const int rate = argc > 4 ? std::atoi(argv[4]) : 48000;
     const int quality = argc > 5 ? std::atoi(argv[5]) : 2;
-    if (block <= 0 || rate <= 0)
+    // Whole files in memory by default. A smaller preload streams the rest of each file in
+    // on background threads; freewheeling makes each block wait for those loads
+    const long preload = argc > 6 ? std::atol(argv[6]) : 1L << 30;
+    if (block <= 0 || rate <= 0 || preload <= 0)
         return 2;
 
     sfz::Sfizz synth;
@@ -74,9 +78,7 @@ int main(int argc, char** argv)
     synth.setSampleRate(static_cast<float>(rate));
     synth.setSampleQuality(sfz::Sfizz::ProcessFreewheeling, quality);
     synth.enableFreeWheeling();
-    // Whole files in memory: background streaming finishes at a time that depends on thread
-    // scheduling, which would make renders differ from run to run
-    synth.setPreloadSize(1u << 30);
+    synth.setPreloadSize(static_cast<uint32_t>(preload));
     if (!synth.loadSfzFile(argv[1])) {
         std::fprintf(stderr, "cannot load %s\n", argv[1]);
         return 1;

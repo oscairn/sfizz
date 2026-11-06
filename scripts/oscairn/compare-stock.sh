@@ -17,6 +17,16 @@
 # Every patch must load in both, with the same regions, groups, masters, curves, preloaded
 # files and unknown opcodes, and must sound: a silent render fails, unless the patch is
 # listed below as silent on purpose.
+#
+# Streaming: with a preload shorter than the files, the rest of each file streams in on
+# background threads. Rendering freewheels, so each block first waits for those loads, and
+# the output must then be the fully preloaded output. The fork's streaming renders must be
+# bit-identical to stock's fully preloaded renders at the same settings. Stock's own
+# streaming renders are made too and only counted: stock's wait can miss a load that a note
+# has just queued (fixed in the fork, ca69309e), so they may differ between runs or from
+# the preloaded output. This shows that native streaming in a freewheeling render gives the
+# preloaded output; it does not cover a voice catching up with the loader in real time (the
+# fork's ab0e878c), which no deterministic render reaches.
 set -euo pipefail
 
 STOCK_COMMIT=f5c6e29f23b8057867c08e88f5f6ac6738baa30b
@@ -79,13 +89,15 @@ while IFS= read -r p; do patches+=("$p"); done < <(
 # 67 s) outlast the render; scripts/oscairn/patches/hierarchy.sfz plays the same hierarchy.
 silent_ok=(tests/TestFiles/basic_hierarchy.sfz tests/TestFiles/basic_hierarchy_antislash.sfz)
 
-configs=("256 48000 2" "37 44100 1" "512 96000 10")
-compared=0 unstable=0 failed=0
+# block size, sample rate, sample quality, preload frames ("all": whole files in memory)
+configs=("256 48000 2 all" "37 44100 1 all" "512 96000 10 all" "256 48000 2 1024" "512 44100 1 64")
+compared=0 streamed=0 unstable=0 failed=0 stock_stream_differs=0 stock_stream_unstable=0
 mkdir -p "$work/out"
 render() { # <binary> <patch> <out> <config>: prints the exit code, or the output's hash
-    local r=0
-    read -r block rate quality <<< "$4"
-    "${run[@]}" "$1" "$2" "$3" "$block" "$rate" "$quality" > "$3.load" 2> /dev/null || r=$?
+    local r=0 preload
+    read -r block rate quality preload <<< "$4"
+    [[ $preload == all ]] && preload=1073741824
+    "${run[@]}" "$1" "$2" "$3" "$block" "$rate" "$quality" "$preload" > "$3.load" 2> /dev/null || r=$?
     if [[ $r -ne 0 ]]; then echo "exit $r"; else cksum < "$3" | cut -d' ' -f1-2; fi
 }
 silent() { cmp -s -n "$(($(wc -c < "$1")))" "$1" /dev/zero; }
@@ -94,15 +106,29 @@ for p in "${patches[@]}"; do
     rel="${p#"$fork"/}"
     for c in "${configs[@]}"; do
         name="$rel [$c]"
-        s1=$(render "$work/render-stock" "$p" "$work/out/s1.f32" "$c")
-        s2=$(render "$work/render-stock" "$p" "$work/out/s2.f32" "$c")
+        stream=false; [[ $c != *" all" ]] && stream=true
+        if $stream; then
+            # the reference: stock with whole files, at the same block size, rate and quality
+            s1=$(render "$work/render-stock" "$p" "$work/out/s1.f32" "${c% *} all")
+            s2=$(render "$work/render-stock" "$p" "$work/out/s2.f32" "${c% *} all")
+            t1=$(render "$work/render-stock" "$p" "$work/out/t1.f32" "$c")
+            t2=$(render "$work/render-stock" "$p" "$work/out/t2.f32" "$c")
+            if [[ "$t1" != "$t2" ]]; then
+                echo "stock streaming, differs between runs: $name"; stock_stream_unstable=$((stock_stream_unstable + 1))
+            elif [[ "$t1" != "$s1" ]]; then
+                echo "stock streaming, differs from preloaded: $name"; stock_stream_differs=$((stock_stream_differs + 1))
+            fi
+        else
+            s1=$(render "$work/render-stock" "$p" "$work/out/s1.f32" "$c")
+            s2=$(render "$work/render-stock" "$p" "$work/out/s2.f32" "$c")
+        fi
         f1=$(render "$work/render-fork" "$p" "$work/out/f1.f32" "$c")
         f2=$(render "$work/render-fork" "$p" "$work/out/f2.f32" "$c")
         if [[ "$s1" != "$s2" ]]; then
             # Stock gives different results from run to run: no reference to compare with
             echo "UNSTABLE IN STOCK $name"; unstable=$((unstable + 1)); continue
         fi
-        if [[ "$f1" != "$f2" ]]; then fail "fork differs between runs, stock does not"; continue; fi
+        if [[ "$f1" != "$f2" ]]; then fail "fork differs between runs, stock's reference does not"; continue; fi
         if [[ "$s1" == exit* || "$f1" == exit* ]]; then fail "does not load: stock $s1, fork $f1"; continue; fi
         if grep -q '^regions 0 ' "$work/out/s1.f32.load"; then fail "loads no region"; continue; fi
         if ! cmp -s "$work/out/s1.f32.load" "$work/out/f1.f32.load"; then
@@ -110,9 +136,11 @@ for p in "${patches[@]}"; do
         fi
         if ! cmp -s "$work/out/s1.f32" "$work/out/f1.f32"; then fail "output differs"; continue; fi
         if silent "$work/out/s1.f32" && [[ " ${silent_ok[*]-} " != *" $rel "* ]]; then fail "silent"; continue; fi
-        compared=$((compared + 1))
+        if $stream; then streamed=$((streamed + 1)); else compared=$((compared + 1)); fi
     done
 done
 echo "stock $STOCK_COMMIT vs fork $(git -C "$fork" rev-parse --short HEAD)$( [[ -n $(git -C "$fork" status --porcelain --untracked-files=no) ]] && echo ' (modified)'):" \
-     "$compared renders bit-identical, $unstable unstable in stock, $failed failed"
-[[ $failed -eq 0 && $compared -gt 0 ]]
+     "$compared renders bit-identical, $streamed streaming renders bit-identical to stock's preloaded ones," \
+     "$unstable unstable in stock, $failed failed;" \
+     "stock's own streaming renders: $stock_stream_differs differ from its preloaded ones, $stock_stream_unstable differ between runs"
+[[ $failed -eq 0 && $compared -gt 0 && $streamed -gt 0 ]]
