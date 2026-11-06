@@ -408,6 +408,16 @@ fresh instance plays a sine (`fae08c7e`), so a new part sounds. Checked with Osc
 with `OSCAIRN_PLUGIN_WORKER`: PASSED both ways (plays, saves, reopens identically, exports,
 installs and plays from the store).
 
+Snapshots prepared beside (`oscairn.sound-snapshots/draft-1`, Oscairn `eecdee4`; `84a07d4c`):
+`prepare` builds every sound of a snapshot, its default included, as new contexts in free slots
+(all or nothing, nothing selected). The instance's synths share preloaded sample data through
+the file pool (`f0604e59`, `FilePool::setSharedPreloads`; the data is held weakly, so it lives
+while any context uses it), so a sound whose files another context holds opens no file; the
+streamed remainder of long samples is still per synth. Measured with `scratchpad
+switchbench.cpp`: Rd 73 and Cant Sleep prepared beside in about 10 ms, against 33-59 ms for a
+state load into a fresh instance (98-144 ms the first time). With one Default plus seven slots,
+a one-sound snapshot needs one free slot.
+
 ### Sound assets (RFC 0009)
 
 All file access goes through the host's `oscairn.assets` resolve: before loading, the wrapper
