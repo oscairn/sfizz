@@ -355,7 +355,8 @@ Checked against `oscairn/docs/plugin-porting.md` at Oscairn `9de5aad`.
 sfizz has no CLAP build in either repository. The fork adds one in `clap/`
 (`oscairn-sfizz.clap`, target `sfizz_clap`, option `SFIZZ_CLAP`, off by default so upstream
 builds are unchanged). It vendors the CLAP headers (MIT) and Oscairn's plugin SDK headers
-(MIT: `sound-contexts.h`, `assets.h`) with their commits. The SDK's
+(MIT: `sound-contexts.h`, `assets.h`, and from 0.3.0 `voice-budget.h` and the helper
+`voice-budget-plugin.hpp`) with their commits. The SDK's
 `sound-contexts-plugin.hpp` owns voices itself, which does not fit sfizz's voice manager, so
 the wrapper implements the extension directly.
 
@@ -419,6 +420,39 @@ streamed remainder of long samples is still per synth. Measured with `scratchpad
 switchbench.cpp`: Rd 73 and Cant Sleep prepared beside in about 10 ms, against 33-59 ms for a
 state load into a fresh instance (98-144 ms the first time). With one Default plus seven slots,
 a one-sound snapshot needs one free slot.
+
+### Voice budget (RFC 0018 step 4, `oscairn.voice-budget/draft-1`)
+
+From 0.3.0 (`3c629261`). Every sfizz voice is a voice to the host: one region of a note, so one
+element of a layered sound, with its own loudness and age, across every context the audio thread
+renders (one pool for the instance, as sfizz's synths are per context but the host's limit is
+not). The plugin keeps the host's settings in the SDK's `voices::Limits` and chooses with
+`voices::victim()`; `notes` uses `voices::Report`. Because the helper needs C++17 and sfizz builds
+as C++14 (its headers change ABI under C++17: absl's `string_view`), the helper is compiled alone
+in `clap/budget.cpp` behind `clap/budget.h`.
+
+- **When.** At the start of each block, and after each note-on and note-off (which may start
+  release regions): while the instance, or a context with a limit of its own, keeps more voices
+  than its limit, the next victim fades out over the choke time, 3 ms. A voice already fading,
+  or offed by sfizz's own `polyphony`, `note_polyphony`, `off_by` or engine voice limit, counts
+  as ending (the SDK's "a choke or a steal"): it is neither counted against the limit nor chosen.
+  Without limits from the host (none set, or limit 0 and no entries) nothing is given up.
+- **Candidates.** Context: the context's ID (kept on its engine for the audio thread). Selected:
+  a channel selects it. Held: not released and, for a note-on voice, its key still down (a key up
+  is released, pedal or not). Loudness: the gain on the voice's last rendered frame (element or
+  amp envelope, level, velocity, crossfades, per-note volume, fade); before its first block, its
+  level and velocity gain, so a new note's quiet elements can go before an older note's louder
+  ones. Age: frames since it started. Mono: never (sfizz has no mono mode of its own; the host's
+  mono and legato flags still protect held voices through the SDK).
+- **sfizz's own limits** (`polyphony`, `note_polyphony`, `off_by`, the engine's voice count, and
+  the element envelope releasing at the off time, `2aac320e`) act first and as before; the budget
+  is a further limit on top. A full pool inside one synth still steals by sfizz's own order
+  (register, K43).
+- **Reports.** `active_voices`: every voice not free, fading and offed ones included; no cost
+  estimate (0). `notes`: each note by its host address, with its context's voices on its key and
+  the largest of their gains (notes sharing a key in one context share them, as for K14).
+  `honors_volume`: true (per-note volume scales the key's voices). `NOTE_END` comes once a note's
+  last voice has ended, as before.
 
 ### Sound assets (RFC 0009)
 
@@ -507,6 +541,10 @@ passes its cross-rate check at 44.1, 48 and 96 kHz (section 6).
     `pitchEnvelope`, gain in `amplitudeEnvelope`, cutoff in `oscairnFilterStage`).
   - `CMakeLists.txt` (option and `add_subdirectory(clap)`), `src/CMakeLists.txt` (sources),
     `tests/CMakeLists.txt` (one test file).
+  - For the CLAP plugin (not the profile): `Synth::getNumActiveVoicesForNote`, `setNoteGain`,
+    `fadeOutNote`, and for the voice budget `getNumVoiceSlots` and `getVoiceSlot`; in `Voice`,
+    `setHostGain`, `fadeOut`, `isFadingOut` and `getLastGain` (the gain stored after the
+    amplitude stage, and the level and velocity gain at `startVoice`).
   Upstream-style fixes that are not Oscairn-specific are separate commits (section 11).
 - **Candidates for upstream as they are:** the streaming fix `ab0e878c` (interpolator taps
   kept within the frames streamed in so far; `Voice.cpp`, `tests/SynthT.cpp`), the toolchain
@@ -615,6 +653,14 @@ Taken in the fourth session; Jacob accepted 22-24 and 26 and decided 25 (2026-11
     the profile) applies that; it is off by default, so sfizz's own level stays the default
     (Jacob sometimes finds the reference too quiet).
 26. **Filter code 18's late low-pass (K27)** is not modelled: factory elements use code 21.
+
+Taken in the voice budget session (2026-11-06), for Jacob to confirm:
+
+27. **Voice budget** (section 5, K43): one pool across the instance's contexts, a voice per
+    region; the SDK's order only while the host has set limits, at block start and after note
+    events, with sfizz's own polyphony limits acting first and unchanged; a voice offed by those
+    counts as ending; loudness is the last rendered gain (the level and velocity gain before the
+    first block); no cost estimate; `honors_volume` true.
 
 Risks and open questions:
 
@@ -1017,6 +1063,57 @@ timing, a per-sample `exp2` for the pitch).
   as unknown once per region, not once. Key-off voices report `released()` from their first
   block (`loop_mode=loop_sustain` on one stops looping at once).
 
+### Voice budget session (2026-11-06): `oscairn.voice-budget/draft-1`, plugin 0.3.0
+
+Oscairn read at `0d6a3e1` (local main; it contains `2f05937`, "Add oscairn.voice-budget/draft-1"):
+`voice-budget.h`, the SDK's `voice-budget-plugin.hpp`, the porting guide's voice budget section and
+RFC 0018 step 4. Both headers vendored unchanged (`dc39393a`); `sound-contexts.h` and `assets.h`
+are the same at `0d6a3e1` as at `b9e90c7`. The extension (`3c629261`; section 5, decision 27, K43),
+then the version and this entry.
+
+**Tests** (`clap/test.cpp`, 48 kHz, 64-frame blocks):
+
+- The RFC 0018 step 4 gate: four elements a note under the profile (element envelope, element
+  velocity, levels 0, -6, -12, -18 dB), a limit of 16 with one `OSCAIRN_VOICE_BUDGET_SELECTED`
+  entry (what Oscairn sends), eight notes: every note keeps its two loudest elements and its
+  loudness; at a limit of 8, one element each; no `NOTE_END` while a note has a voice, one each
+  after the release.
+- A lowered limit: six notes, the limit lowered to four; from the next block the two oldest
+  fade (3 ms), counted by `active_voices` and listed by `notes` (more quietly) while they fade,
+  `NOTE_END` in the block the fade ends, and the render from then on equal (within 1e-6) to an
+  instance playing only the four kept notes; largest step during the fade no larger than the
+  notes' own steps plus their level / 64 (Octet's threshold); before the limit, the render is
+  the unlimited one.
+- The order: a released note before a quieter, older held one; the quietest held note, not the
+  oldest; a new note's own sound before another sound's quieter, older note.
+- The concurrency test (prepare, select, discard beside a playing context, under TSan) runs with
+  a limit set, so the budget reads every context.
+- Every budget call on the audio thread under the allocation guard.
+
+Each was checked to fail with its part undone (mutations applied one at a time in a scratch
+build): every candidate's loudness 0 (oldest whole notes go: the gate's checks and the quietest
+case), giving up the victim's whole key instead of one voice (the gate, including `NOTE_END`
+while other elements remained), no block-start check (the lowered limit and the order cases), a
+cut instead of the fade (the step check, the still-fading check and the counts), every voice
+taken as held (released before held), the incoming context not passed (own sound first), fading
+voices left out of `active_voices` or of `notes` (the counts), an allocation in the limit path
+(the guard: 488 allocations), the `get_extension` line removed, and no level estimate before a
+voice's first block (a new note's quiet elements then never go first: the gate fails).
+
+A converted sound outside the repository (`Evens and Odds`, 13 elements a note, scratch harness
+through the built plugin): eight notes, a limit of 45 against 52 counted voices: elements went
+from the quietest notes first (13 to 6 and 13 to 12), no note lost to the budget; sfizz's own
+64-voice limit had already offed the first notes' elements, which ring out their off-time release
+for about 100 ms (K43). A converted 18-element piano plays one region a note, so it gives up
+whole notes, as it must.
+
+**Gates** (`gate.sh`: Release, ASan/UBSan and TSan builds of `sfizz_tests` and the CLAP tests, and
+stock vs fork, each on the committed tree): `dc39393a` and `3c629261` passed all four (sfizz 518
+test cases, the CLAP tests, 162 renders bit-identical). `oscairn-plugin-check` (Oscairn `0d6a3e1`,
+built from an export outside the repository, in-process) PASSED on `3c629261`'s plugin; it does
+not exercise the voice budget. Oscairn's own voice-budget host tests were not run against this
+plugin, and the worker protocol does not carry the extension yet.
+
 ### Upstream merge test (2026-11-01)
 
 `upstream/develop` has no commits after `f5c6e29f`: merging it into `oscairn` is a no-op
@@ -1076,3 +1173,4 @@ repository, or the local scripts beside the renders).
 | K40 | Element level scaling | Offset law (128 + offset) / 128 on the element level, at most level 127, 0.375 dB grid; offsets linear in key between break points, rounded; key follow sensitivity x (key - 60) / 32 steps, summed with the offset (the sum is assumed, not measured with both set). 50 sine probes: 44 within 0.2 dB; at notes 12, 30, 100, 105 and 110 the reference's sine waveform is itself up to 0.95 dB off its note-60 level (`ks3` `sine_*`); after removing that, 105 and 110 still read 0.45 dB below the engine. How it combines with velocity is assumed multiplicative | Fitted law | Built (`93d8e6eb`) | `ks1`, `ks3`; `scratchpad eng_ls.py` | `ElementLevel.cpp` `levelScalingGain` |
 | K41 | Calling After Me 2, Parts 2 and 3 at note 84 | Element 2 of each, isolated, flat (velocity sensitivity 0, flat envelope, filter code 18): Part 3 about 12 dB lower in the engine than the reference (after the 1.84 dB staging), the same on every harmonic; Part 2 about 4.5 dB higher, different by harmonic. Envelope, velocity and level scaling agree. The converted regions for those key banks (sample and `volume`) are the suspects: converter side | Converter (key bank choice or level) | Open, for the converter | `ks1` (`p2only`, `p3only`), `ks3`; `scratchpad eng_ks3.py`, `spec.py` | converter |
 | K42 | Key-off elements | The reference plays a key-off element from the note-off without any other voice of the key, and releases it 2.0 s after it starts (measured once, release time 40, sustain held); a decay to level 0 ends it. Engine: `rt_dead=1` (stock opcode) plus `oscairn_keyoff=1` (release 2.0 s after the start); the CLAP wrapper keeps the note until its note-off; an envelope holding level 0 ends its voice. Whether the 2.0 s depends on any parameter is not measured | Measured at one setting | Built (`a2c16d82`, `ad43ddac`, `4c38842e`) | `ks4` | `Voice.cpp` `startVoice`; `clap/plugin.cpp` `endFinishedNotes` |
+| K43 | Voice stealing under a voice budget | While Oscairn sets voice limits (`oscairn.voice-budget`), voices past them go in the SDK's order (released before held, the new voice's own sound, lower priority, quieter, older; never a held voice within its sound's reserve or of a part marked mono or legato), a region at a time, at a block's start and after note events, faded over 3 ms. sfizz's own limits (the engine's voices, 64 a context by default; `polyphony`; `note_polyphony`; `off_by`) still steal first, in sfizz's order, and a voice they off counts as ending though it still renders its off-time release (a converted 13-element sound, eight notes: up to 39 such voices for about 100 ms). A voice in its attack counts as quiet as it is then. The reference's own stealing order is not measured | Oscairn RFC 0018's order, so the host and the plugin agree on what is least audible | Deliberate (decision 27, proposed) | `clap/test.cpp` voice budget cases | `clap/plugin.cpp` `keepWithinLimits`; `clap/budget.cpp` |
