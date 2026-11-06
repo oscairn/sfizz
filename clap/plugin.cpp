@@ -585,45 +585,60 @@ bool readField(const std::string& data, size_t& at, std::string& field)
     return true;
 }
 
-bool stateLoad(const clap_plugin_t* p, const clap_istream_t* stream)
+bool readAll(const clap_istream_t* stream, std::string& data)
 {
-    auto& s = self(p);
-    std::string data;
     char buffer[4096];
     for (;;) {
         const int64_t n = stream->read(stream, buffer, sizeof(buffer));
         if (n < 0 || data.size() + static_cast<size_t>(n) > maxStateBytes)
             return false;
         if (n == 0)
-            break;
+            return true;
         data.append(buffer, static_cast<size_t>(n));
     }
+}
+
+// A version 1 or 2 state: context 0's patch
+bool parsePatchState(const std::string& data, Patch& patch)
+{
     const std::string header = std::string(stateVersion) + "\n";
     const std::string header1 = std::string(stateVersion1) + "\n";
     const bool v1 = data.compare(0, header1.size(), header1) == 0;
     if (!v1 && data.compare(0, header.size(), header) != 0)
         return false;
     size_t at = v1 ? header1.size() : header.size();
-    Patch patch;
     if (!readField(data, at, patch.directory))
         return false;
     if (!v1 && (!readField(data, at, patch.library) || !readField(data, at, patch.basePath)))
         return false;
-    if (!readField(data, at, patch.text) || at != data.size())
-        return false;
+    return readField(data, at, patch.text) && at == data.size();
+}
+
+// An engine for a saved patch, its base (if any) taken from the patch's fields
+std::unique_ptr<Engine> engineFor(const Plugin& s, const Patch& patch, std::string& message)
+{
     oscairn_asset_ref_t base {};
     const bool hasBase = !patch.library.empty();
     if (hasBase) {
         if (patch.library.size() >= sizeof(base.library) || patch.basePath.size() >= sizeof(base.path))
-            return false;
+            return nullptr;
         std::snprintf(base.library, sizeof(base.library), "%s", patch.library.c_str());
         std::snprintf(base.path, sizeof(base.path), "%s", patch.basePath.c_str());
         // without the host's assets a base can only fall back to a local directory
         if (!s.assets && patch.directory.empty())
-            return false;
+            return nullptr;
     }
-    std::string message;
-    auto e = makeEngine(s, patch, hasBase ? &base : nullptr, message);
+    return makeEngine(s, patch, hasBase ? &base : nullptr, message);
+}
+
+bool stateLoad(const clap_plugin_t* p, const clap_istream_t* stream)
+{
+    auto& s = self(p);
+    std::string data, message;
+    Patch patch;
+    if (!readAll(stream, data) || !parsePatchState(data, patch))
+        return false;
+    auto e = engineFor(s, patch, message);
     if (!e)
         return false;
     collectRetired(s);
@@ -678,6 +693,10 @@ uint32_t contextPrepare(const clap_plugin_t* p, const char* name, const oscairn_
         return fail("no free sound context");
     Patch patch;
     patch.text = patchText;
+    if (base) { // kept for the snapshot
+        patch.library.assign(base->library, strnlen(base->library, sizeof(base->library)));
+        patch.basePath.assign(base->path, strnlen(base->path, sizeof(base->path)));
+    }
     std::string why;
     auto e = makeEngine(s, patch, base, why);
     if (!e)
@@ -730,7 +749,112 @@ bool contextDiscard(const clap_plugin_t* p, uint32_t id)
     return false;
 }
 
-const oscairn_plugin_sound_contexts_t soundContexts { contextCapacity, contextGet, contextPrepare, contextSelect, contextDiscard, nullptr, nullptr };
+// Sound-context snapshot (the host stops processing first): every prepared context's name and
+// patch, and each channel's context with the queued selections applied. Text, like the state:
+//   oscairn-sfizz-contexts-1\n
+// then for each of the eight slots six fields (as in the state: decimal length, \n, bytes, \n):
+// "1" or empty for a free slot, name, directory, library, path, patch; then one field of 16
+// digits, the slot each MIDI channel plays. Slot 0 is the default context (the state's patch).
+// Loading builds every engine before replacing any; contexts other than 0 get fresh IDs. A
+// version 1 or 2 state loads too, as context 0 alone.
+constexpr const char* snapshotVersion = "oscairn-sfizz-contexts-1";
+
+bool snapshotSave(const clap_plugin_t* p, const clap_ostream_t* stream)
+{
+    auto& s = self(p);
+    uint32_t channels[16];
+    std::copy(std::begin(s.channelContext), std::end(s.channelContext), channels);
+    const uint32_t head = s.selectionHead.load(std::memory_order_acquire);
+    for (uint32_t tail = s.selectionTail.load(std::memory_order_acquire); tail != head; ++tail) {
+        const Selection sel = s.selections[tail % selectionCapacity];
+        for (int ch = 0; ch < 16; ++ch)
+            if (sel.channel < 0 || sel.channel == ch)
+                channels[ch] = sel.context;
+    }
+    std::string data = std::string(snapshotVersion) + "\n";
+    auto field = [&](const std::string& f) { data += std::to_string(f.size()) + "\n" + f + "\n"; };
+    for (uint32_t i = 0; i < contextCount; ++i) {
+        const Context& c = s.contexts[i];
+        const bool used = c.prepared && c.engine;
+        const Patch none {}, &patch = i == 0 ? s.patch : used ? c.engine->patch : none;
+        field(used ? "1" : "");
+        field(used ? std::string(c.name, strnlen(c.name, sizeof(c.name))) : "");
+        for (const std::string* f : { &patch.directory, &patch.library, &patch.basePath, &patch.text })
+            field(*f);
+    }
+    std::string digits;
+    for (uint32_t ch : channels)
+        digits += static_cast<char>('0' + ch);
+    field(digits);
+    return writeAll(stream, data);
+}
+
+bool snapshotLoad(const clap_plugin_t* p, const clap_istream_t* stream)
+{
+    auto& s = self(p);
+    std::string data, message;
+    if (!readAll(stream, data))
+        return false;
+    bool used[contextCount] {};
+    std::string names[contextCount];
+    Patch patches[contextCount];
+    uint32_t channels[16] {};
+    used[0] = true;
+    names[0] = "Default";
+    const std::string header = std::string(snapshotVersion) + "\n";
+    if (data.compare(0, header.size(), header) == 0) {
+        size_t at = header.size();
+        std::string flag, digits;
+        for (uint32_t i = 0; i < contextCount; ++i) {
+            Patch& patch = patches[i];
+            if (!readField(data, at, flag) || !readField(data, at, names[i]) || !readField(data, at, patch.directory)
+                || !readField(data, at, patch.library) || !readField(data, at, patch.basePath) || !readField(data, at, patch.text))
+                return false;
+            if ((flag != "1" && !flag.empty()) || (i == 0 && flag.empty()) || names[i].size() >= sizeof(Context::name))
+                return false;
+            used[i] = flag == "1";
+        }
+        if (!readField(data, at, digits) || at != data.size() || digits.size() != 16)
+            return false;
+        for (int ch = 0; ch < 16; ++ch) {
+            channels[ch] = static_cast<uint32_t>(digits[ch] - '0');
+            if (channels[ch] >= contextCount || !used[channels[ch]])
+                return false;
+        }
+    } else if (!parsePatchState(data, patches[0]))
+        return false;
+    if (s.nextId > CLAP_INVALID_ID - contextCount)
+        return false;
+    std::unique_ptr<Engine> engines[contextCount];
+    for (uint32_t i = 0; i < contextCount; ++i)
+        if (used[i] && !(engines[i] = engineFor(s, patches[i], message)))
+            return false;
+    // Replace everything: no voices, notes or queued selections survive
+    delete s.pendingDefault.exchange(nullptr);
+    collectRetired(s);
+    s.selectionTail.store(s.selectionHead.load());
+    s.noteCount = 0;
+    s.patch = patches[0];
+    for (uint32_t i = 0; i < contextCount; ++i) {
+        Context& c = s.contexts[i];
+        c.engine = std::move(engines[i]);
+        c.prepared = used[i];
+        c.id = !used[i] || i == 0 ? 0 : s.nextId++;
+        std::snprintf(c.name, sizeof(c.name), "%s", used[i] ? names[i].c_str() : "");
+        c.queued = 0;
+        c.sounding = 0;
+        c.selectedChannels = 0;
+    }
+    for (uint32_t ch = 0; ch < 16; ++ch) {
+        s.channelContext[ch] = channels[ch];
+        s.contexts[channels[ch]].selectedChannels.fetch_or(1u << ch);
+    }
+    return true;
+}
+
+const clap_plugin_state_t snapshot { snapshotSave, snapshotLoad };
+
+const oscairn_plugin_sound_contexts_t soundContexts { contextCapacity, contextGet, contextPrepare, contextSelect, contextDiscard, &snapshot, nullptr };
 
 // Asset dependencies: every context's resolved samples
 

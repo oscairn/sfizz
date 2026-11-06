@@ -406,6 +406,52 @@ int main(int argc, char** argv)
         CHECK(!load(plugin, stateFor(kick, "lib", "sub")));
         plugin->destroy(plugin);
     }
+    { // sound-context snapshot: every context, queued selections applied, fresh IDs on load
+        auto contexts = [](const clap_plugin_t* p) {
+            return static_cast<const oscairn_plugin_sound_contexts_t*>(p->get_extension(p, OSCAIRN_EXT_SOUND_CONTEXTS));
+        };
+        auto* plugin = create();
+        auto* ctx = contexts(plugin);
+        CHECK(ctx->state && ctx->state->save && ctx->state->load);
+        CHECK(load(plugin, stateFor("<region> sample=*silence\n")));
+        char message[256] {};
+        const uint32_t sineId = ctx->prepare(plugin, "Sine", nullptr, 0, sine.c_str(), nullptr, message, sizeof(message));
+        CHECK(sineId != CLAP_INVALID_ID && ctx->select(plugin, sineId, 3)); // queued, not yet applied
+        Buffer saved;
+        CHECK(ctx->state->save(plugin, &saved.out));
+        Buffer in; in.data = saved.data;
+        CHECK(ctx->state->load(plugin, &in.in));
+        oscairn_sound_context_info_t info {};
+        CHECK(ctx->get(plugin, 1, &info) && info.id != sineId && info.id != 0 && !std::strcmp(info.name, "Sine")
+              && info.selected_channels == 8u && info.idle == false);
+        CHECK(ctx->get(plugin, 0, &info) && info.id == 0 && info.selected_channels == 0xfff7u);
+        CHECK(!ctx->select(plugin, sineId, 0)); // the old ID is gone
+        Buffer again;
+        CHECK(ctx->state->save(plugin, &again.out) && again.data == saved.data);
+        CHECK(save(plugin) == stateFor("<region> sample=*silence\n"));
+        CHECK(plugin->activate(plugin, 48000, 1, 256));
+        Run run { plugin };
+        Events events;
+        events.note(CLAP_EVENT_NOTE_ON, 0, 1, 69, 1.0, 0);
+        run.block(events, 256);
+        CHECK(run.peak == 0.0f);
+        events.note(CLAP_EVENT_NOTE_ON, 0, 2, 69, 1.0, 3);
+        run.block(events, 256);
+        CHECK(run.peak > 0.1f);
+        plugin->deactivate(plugin);
+        // a version 2 state loads as the default context alone
+        Buffer v2; v2.data = stateFor(sine);
+        CHECK(ctx->state->load(plugin, &v2.in));
+        CHECK(!ctx->get(plugin, 1, &info));
+        CHECK(ctx->get(plugin, 0, &info) && info.selected_channels == 0xffffu);
+        CHECK(save(plugin) == stateFor(sine));
+        // an invalid snapshot (channel 15 on a free slot) changes nothing
+        Buffer bad; bad.data = saved.data;
+        bad.data[bad.data.size() - 2] = '5';
+        CHECK(!ctx->state->load(plugin, &bad.in));
+        CHECK(!ctx->get(plugin, 1, &info) && save(plugin) == stateFor(sine));
+        plugin->destroy(plugin);
+    }
     // No allocation in any process call above
     CHECK(guardedAllocations.load() == 0);
     if (guardedAllocations.load())
