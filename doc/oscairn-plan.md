@@ -273,8 +273,8 @@ before the row is done. Factory usage counts are from RFC 0013.
 | AEG time velocity segment and sensitivity | `ampeg_vel2*` (seconds added) | engine (scaling factor per segment set): measure |
 | AEG time key follow, centre note, release adjustment | – | engine: measure |
 | Level velocity sensitivity, offset, key curve 0-4 | `amp_veltrack`, `amp_velcurve_N` | engine (`oscairn_amp_velsens`, `_veloffset`, `_velcurve`): measure the five curves |
-| Level scaling: 4 break points, 4 offsets | `amp_keytrack` (linear dB per key) | engine (`oscairn_amp_keyscale_*` breakpoint curve) |
-| Level key follow sensitivity | `amp_keytrack` | mapping if it is dB per key around a fixed centre: measure |
+| Level scaling: 4 break points, 4 offsets | `amp_keytrack` (linear dB per key) | engine, built: `oscairn_amp_scaling_key1`-`4`, `oscairn_amp_scaling_offset1`-`4`, with `oscairn_amp_level` (K40) |
+| Level key follow sensitivity | `amp_keytrack` | engine, built: `oscairn_amp_keyfollow`, an offset of sensitivity x (key - 60) / 32 steps (K40) |
 
 ### Pitch (`2p 03`)
 
@@ -285,7 +285,7 @@ before the row is done. Factory usage counts are from RFC 0013.
 | Random pitch depth | `pitch_random` (cents, uniform) | mapping if uniform: measure distribution and scale |
 | Pitch key follow (−200..+200 %) and centre note | `pitch_keytrack`, but around `pitch_keycenter` of each region | engine: key follow around its own centre note independent of key banks (`oscairn_pitch_keytrack`, `_keycenter`) |
 | Fine tune key follow scaling | – | engine: measure |
-| PEG hold/attack/decay1/decay2/release times and hold/attack/decay1/decay2/release levels (±4800 c), depth, depth velocity sensitivity and curve, time velocity segment and sensitivity, time key follow and centre | `pitcheg_*` DAHDSR, `pitcheg_depth`, `pitcheg_veltodepth` | engine: the same multi-point EG as the AEG, routed to pitch (`oscairn_pitcheg_*`): tables and curves measured |
+| PEG hold/attack/decay1/decay2/release times and hold/attack/decay1/decay2/release levels (±4800 c), depth, depth velocity sensitivity and curve, time velocity segment and sensitivity, time key follow and centre | `pitcheg_*` DAHDSR, `pitcheg_depth`, `pitcheg_veltodepth` | engine: the same multi-point EG as the AEG, routed to pitch (`oscairn_pitcheg_*`): tables and curves measured; sensitivities `oscairn_pitcheg_veltime_segments`, `_veltime`, `_keytime`, `_keytime_center`, `_veldepth`, `_veldepth_curve` (K13) |
 
 ### Filter (`2p 04`)
 
@@ -387,7 +387,7 @@ the wrapper implements the extension directly.
 - **Deterministic rendering.** Seed sfizz's random generators per instance and per context
   (a hook replacing the TU-static generators by one owned by `Resources`; upstreamable).
 
-### Native sound contexts (RFC 0005, `oscairn.sound-contexts/draft-4`)
+### Native sound contexts (RFC 0005, `oscairn.sound-contexts/draft-5`)
 
 A context is one `sfz::Synth` with its patch. Up to 8 per instance, each channel selecting
 one; held voices finish in the synth they started in; all synths are mixed into the output.
@@ -396,6 +396,17 @@ queued and applied at the next process boundary; discard waits until the synth i
 Contexts that use the same sample files should share decoded audio; sfizz's `FilePool` is
 per synth, so sharing needs a pool shared between synths (measured first: memory per
 context with and without sharing).
+
+Draft 5 (sixth session, `fd859853`): the plugin lists no CLAP presets, so `prepare_preset` is
+null. Oscairn saves a Performance through the contexts' own snapshot interface and refuses one
+without it, so the plugin has one (`a5e93e55`, format at `snapshotSave` in `clap/plugin.cpp`):
+every prepared context's name and patch and each channel's context, queued selections applied;
+loading builds every engine first and gives contexts other than the default fresh IDs; a
+version 1 or 2 plugin state (what converted libraries hold) loads as the default context. A
+fresh instance plays a sine (`fae08c7e`), so a new part sounds. Checked with Oscairn's
+`oscairn-plugin-check` at Oscairn `66a16e5`, built outside the repository, in the engine and
+with `OSCAIRN_PLUGIN_WORKER`: PASSED both ways (plays, saves, reopens identically, exports,
+installs and plays from the store).
 
 ### Sound assets (RFC 0009)
 
@@ -907,6 +918,56 @@ bound by its recurrence latency; about half of a voice is stock sfizz (interpola
 pan and width, the stock amplitude EG that still runs under the element envelope, voice
 timing, a per-sample `exp2` for the pitch).
 
+### Sixth session (2026-11-05): level scaling, Calling After Me 2, CPU, draft 5, key-off elements
+
+- **Element level scaling** (`93d8e6eb`, K40): break points, offsets, level key follow, measured
+  with sine probes (`ks1`). Rd 73's third break point is note 84 with offset 0, so at the played
+  note 84 its scaling is 0 dB on the reference too: it is not the cause of the Part's level.
+- **Calling After Me 2, Parts 2 and 3 at note 84** (K41): isolated on the reference (only that
+  Part sounding, Part Volume 127, effects off; `ks1` `p2only`, `p3only`; `ks3` one element at a
+  time) against the converted SFZ at CC 7 127. After the 1.84 dB of output staging (K28), Part 3
+  (element 2) plays about 12 dB lower in the engine and Part 2 (element 2) about 4.5 dB higher,
+  in both cases already with velocity sensitivity 0, a flat amplitude envelope and filter code
+  18 on both sides; the amplitude envelope (sine probe with Part 3's settings, `p3eg`: within
+  0.1 dB of level after staging, slopes within 0.1 dB per 100 ms) and the velocity response
+  (within 0.4 dB) agree. Part 3's difference is the same on every harmonic (same sample, wrong
+  level); Part 2's is not (-5.6 dB on the fundamental, -2.7 and -3.1 on the next two), which
+  suggests another key bank. So the level is decided before the element's processing: the
+  region the converter writes for those key banks (sample and `volume`). Part 3 is "nearly
+  silent" because that deficit adds to its Part Volume of 30 (-25 dB). Converter note in K41.
+  Caveat: on the reference the filter-code-18 variant of each element read exactly the level
+  of the unchanged element (to 0.01 dB), so that override may not have taken effect; if so the
+  reference's "flat" renders still carry the element filter and its gain, and the sizes above
+  move by up to the filter gain's 5.45 dB (Part 3 larger, Part 2 smaller), not the signs.
+- **Converter notes.** (1) Level scaling: write `oscairn_amp_scaling_key1`-`4` (break points,
+  MIDI notes), `oscairn_amp_scaling_offset1`-`4` (offsets as displayed, raw - 128),
+  `oscairn_amp_keyfollow` (Level Key Follow Sensitivity, raw - 64) and `oscairn_amp_level`
+  (Element Level, raw) on each element's group, whenever an offset or the key follow is not 0;
+  keep the element level in `volume` as now. (2) Pitch envelope: write the six
+  `oscairn_pitcheg_*` sensitivity opcodes (raw - 64 for the sensitivities, the segment and curve
+  codes raw, the centre note as a MIDI note), as for the filter envelope. (3) Key-off elements
+  (XA Control Key Off): `trigger=release rt_dead=1 oscairn_keyoff=1` on the group. (4) Calling
+  After Me 2 (K41): compare the key banks written for waves 338 and 348 at note 84, velocity 100
+  (sample and `volume`) with the reference; the `ks3` probes isolate one element.
+- **Pitch envelope sensitivities** (`8f92e7df`, K13): time velocity and key follow follow the
+  amplitude envelope's law; depth velocity sensitivity the filter envelope's curves (`ks2`).
+- **CPU** (`466bc961`, `b22746d4`): regions with the element envelope no longer generate the
+  stock amplitude EG (the connection is not made); element voices compute one pitch ratio per
+  block while the pitch holds (stock voices keep the per-sample loop, so stock output stays
+  bit-identical whatever the compiler vectorizes). Benchmark (section 11, fifth session; M3 Max,
+  best of three runs of three passes, us per 128-frame block, average / p99): Cant Sleep
+  137.5 / 212 -> 130 / 199 (EG) -> 124 / 191 (pitch); Rd 73 25.1 / 51.8 -> 23.9 / 49 -> 23.3 /
+  46.6. Profile renders (Rd 73 and Cant Sleep, notes 36/60/84, 44.1/48/96 kHz) are
+  bit-identical before and after.
+- **Draft 5, snapshot, default sound** (section 5): `fd859853`, `a5e93e55`, `fae08c7e`.
+- **Key-off elements** (`a2c16d82`, `ad43ddac`, K42): the CLAP wrapper keeps a note while its
+  key has a release region, so the note-off reaches the synth; an element envelope that holds
+  level 0 ends its voice (a release-triggered voice is never released). Stock sfizz plays a
+  release region only while an attack voice of that key plays, unless `rt_dead=1`: the converter
+  writes `rt_dead=1` on key-off groups (an existing opcode with the meaning needed). The
+  reference releases a key-off element 2.0 s after it starts (`ks4`); `oscairn_keyoff=1`
+  (`4c38842e`) does that.
+
 ### Upstream merge test (2026-11-01)
 
 `upstream/develop` has no commits after `f5c6e29f`: merging it into `oscairn` is a no-op
@@ -936,7 +997,7 @@ repository, or the local scripts beside the renders).
 | K10 | Envelope velocity/key shifts that move an index below 56 | Up to 10 % (decay index 55) | Outside the decay table's valid span | Unresolved | `eg6` (`tvd_127_66/67`) | `ElementEnvelope.cpp` |
 | K11 | Pitch ceiling | Reference: +4800 cents at full depth gave 4573 cents (note 60, sine waveform); Oscairn: 4800 | Reference clamps pitch shift | Deliberate (decision 16) | `pf1` (`pl_255_127`); `scripts/engine_peg.py` | none (no clamp) |
 | K12 | Pitch envelope hold times | Measured at 16, 32, 64, 80 only; between knots log-interpolated, above 80 extrapolated | Four knots | Above 80 accepted (decision 15); between knots unverified | `pf2` (`ph_*`) | `oscairn/ElementPitch.cpp` |
-| K13 | Pitch envelope depth and time sensitivity to velocity and key | Not implemented | Not measured | Open | none yet | - |
+| K13 | Pitch envelope depth and time sensitivity to velocity and key | Built (`8f92e7df`). Time velocity sensitivity and key follow use the amplitude envelope's law: 14 glides (sensitivities +-32, +63; velocities 32, 64, 127; notes 36, 60, 84) within one 10 ms analysis step at 44.1, 48 and 96 kHz, except a shift to index 0 (+63 at velocity 127): the reference glides within 15 ms, the engine takes 65 ms (the table's time at index 0). Depth velocity sensitivity uses the filter envelope's curves (K34): 17 static probes on a 1200-cent depth within 61 cents (curves 0, 1 and 4 at velocity 100 and 32 the largest). The release adjustment is not a parameter here; the release gets the whole key shift (not measured) | Shared laws | Built; checks against fitting renders | `ks2`; `scratchpad eng_peg.py` | `ElementPitch.cpp` `start`, `filterDepthVelocityFactor` |
 | K14 | Note ends, chokes and per-note volume in the CLAP plugin | Per key, not per note: notes sharing a key in one context end, choke and scale together | sfizz voices know their key, not a note ID | Accepted limitation | `clap/test.cpp` | `clap/plugin.cpp` |
 | K15 | Loop continuity | 40 waveforms checked; largest click metric 1.62 (Clarinet3 ff St at 8.05 s), criterion proposed, not listened to | - | Unverified | `loops.py` (scratchpad) | - |
 | K16 | Factory waveform playback | Loads and sounds; level and timbre against the reference not compared per waveform | - | Unverified | `loadcheck` | - |
@@ -962,4 +1023,7 @@ repository, or the local scripts beside the renders).
 | K36 | Element LFO in reference mode: what is not built | The filter destination through a controller set (E.LFO FMD), the controller sets' polarity and curve, and ratios below 8 or negative are not measured; the engine uses the ratio and controller value only | Not measured | Open | none yet | `ElementLfo.cpp` |
 | K37 | Filter above 22.05 kHz at 88.2 kHz and up | With the reference-rate delay the response above 22.05 kHz repeats the 44.1 kHz response mirrored (a low-pass passes again toward 44.1 kHz); inaudible, but sample content up there is not attenuated as an analog-style filter would | Consequence of decision 20's design | Accepted by Jacob (inaudible; no ultrasonic low-pass) | none | `ElementFilter.cpp` |
 | K38 | Filter at rates other than the five, or above 705.6 kHz | Rates between 44.1 and 48 kHz put the allpass's pole near Nyquist; above 16 x 44.1 kHz the delay line is capped (comment in the code); neither is tested | Design limits | Unverified | none | `ElementFilter.cpp` `setSampleRate` |
-| K39 | CPU per voice | Cant Sleep: about 3.0 us per voice per 128-frame block at 48 kHz on an M3 Max (3.5 us under Linux ARM64), half of it stock sfizz; not measured on a small ARM board | The filter's recurrence latency (one section pair per voice, about 6 ns per stereo frame); stock voice stages | Open. Next: the two sections' four recurrences as one four-float vector (the second section a sample behind), filter coefficients without the double-precision pin per update, skipping the stock amplitude EG under the element envelope | Benchmark described in section 11 (fifth session), not in the repository (it needs the converted samples) | `ElementFilter.cpp` `runDirect`; `Voice.cpp` |
+| K39 | CPU per voice | Cant Sleep: about 3.0 us per voice per 128-frame block at 48 kHz on an M3 Max (3.5 us under Linux ARM64), half of it stock sfizz; not measured on a small ARM board | The filter's recurrence latency (one section pair per voice, about 6 ns per stereo frame); stock voice stages | Open. Done in the sixth session: the stock amplitude EG is not computed under the element envelope, one pitch ratio per block while the pitch holds (about 10 % of a Cant Sleep block). Next: the two sections' four recurrences as one four-float vector (the second section a sample behind), filter coefficients without the double-precision pin per update | Benchmark described in section 11 (fifth session), not in the repository (it needs the converted samples) | `ElementFilter.cpp` `runDirect`; `Voice.cpp` |
+| K40 | Element level scaling | Offset law (128 + offset) / 128 on the element level, at most level 127, 0.375 dB grid; offsets linear in key between break points, rounded; key follow sensitivity x (key - 60) / 32 steps, summed with the offset (the sum is assumed, not measured with both set). 50 sine probes: 44 within 0.2 dB; at notes 12, 30, 100, 105 and 110 the reference's sine waveform is itself up to 0.95 dB off its note-60 level (`ks3` `sine_*`); after removing that, 105 and 110 still read 0.45 dB below the engine. How it combines with velocity is assumed multiplicative | Fitted law | Built (`93d8e6eb`) | `ks1`, `ks3`; `scratchpad eng_ls.py` | `ElementLevel.cpp` `levelScalingGain` |
+| K41 | Calling After Me 2, Parts 2 and 3 at note 84 | Element 2 of each, isolated, flat (velocity sensitivity 0, flat envelope, filter code 18): Part 3 about 12 dB lower in the engine than the reference (after the 1.84 dB staging), the same on every harmonic; Part 2 about 4.5 dB higher, different by harmonic. Envelope, velocity and level scaling agree. The converted regions for those key banks (sample and `volume`) are the suspects: converter side | Converter (key bank choice or level) | Open, for the converter | `ks1` (`p2only`, `p3only`), `ks3`; `scratchpad eng_ks3.py`, `spec.py` | converter |
+| K42 | Key-off elements | The reference plays a key-off element from the note-off without any other voice of the key, and releases it 2.0 s after it starts (measured once, release time 40, sustain held); a decay to level 0 ends it. Engine: `rt_dead=1` (stock opcode) plus `oscairn_keyoff=1` (release 2.0 s after the start); the CLAP wrapper keeps the note until its note-off; an envelope holding level 0 ends its voice. Whether the 2.0 s depends on any parameter is not measured | Measured at one setting | Built (`a2c16d82`, `ad43ddac`, `4c38842e`) | `ks4` | `Voice.cpp` `startVoice`; `clap/plugin.cpp` `endFinishedNotes` |
