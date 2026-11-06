@@ -617,20 +617,25 @@ bool is_ready(std::future<R> const& f)
     return f.wait_for(std::chrono::seconds(0)) == std::future_status::ready;
 }
 
+void sfz::FilePool::dispatchQueuedFiles() noexcept
+{
+    QueuedFileData queuedData;
+    while (filesToLoad->try_pop(queuedData)) {
+        if (queuedData.id.expired()) {
+            // file ID was nulled, it means the region was deleted, ignore
+        }
+        else
+            loadingJobs.push_back(
+                threadPool->enqueue([this](const QueuedFileData& data) { loadingJob(data); }, std::move(queuedData)));
+    }
+}
+
 void sfz::FilePool::dispatchingJob() noexcept
 {
     while (dispatchBarrier.wait(), dispatchFlag) {
         std::lock_guard<std::mutex> guard { loadingJobsMutex };
 
-        QueuedFileData queuedData;
-        if (filesToLoad->try_pop(queuedData)) {
-            if (queuedData.id.expired()) {
-                // file ID was nulled, it means the region was deleted, ignore
-            }
-            else
-                loadingJobs.push_back(
-                    threadPool->enqueue([this](const QueuedFileData& data) { loadingJob(data); }, std::move(queuedData)));
-        }
+        dispatchQueuedFiles();
 
         // Clear finished jobs
         swapAndPopAll(loadingJobs, [](std::future<void>& future) {
@@ -650,6 +655,9 @@ void sfz::FilePool::garbageJob() noexcept
 void sfz::FilePool::waitForBackgroundLoading() noexcept
 {
     std::lock_guard<std::mutex> guard { loadingJobsMutex };
+
+    // Files queued by the notes just dispatched may not have reached the dispatch thread yet
+    dispatchQueuedFiles();
 
     for (auto& job : loadingJobs)
         job.wait();

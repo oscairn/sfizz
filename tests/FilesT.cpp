@@ -860,3 +860,25 @@ TEST_CASE("[Files] Synths sharing preloaded data read each file once")
     REQUIRE(third.getResources().getFilePool().getNumFileOpens() > 0);
     REQUIRE(render(third) == expected);
 }
+
+TEST_CASE("[Files] Freewheeling waits for the file a note just queued")
+{
+    // A note queues its file for the dispatch thread; the wait at the start of the next
+    // renderBlock must cover that load whether or not the dispatch thread has taken it yet.
+    // One block longer than the preload shows it: the voice is cut where the data ends.
+    auto render = [](uint32_t preloadSize) {
+        sfz::Synth synth;
+        synth.enableFreeWheeling();
+        synth.setSamplesPerBlock(8192);
+        synth.setPreloadSize(preloadSize);
+        synth.loadSfzFile(fs::current_path() / "tests/TestFiles/kick.sfz");
+        sfz::AudioBuffer<float> buffer { 2, 8192 };
+        synth.noteOn(0, 60, 100);
+        synth.renderBlock(buffer);
+        const auto left = buffer.getConstSpan(0);
+        return std::vector<float>(left.begin(), left.end());
+    };
+    const auto expected = render(1u << 30);
+    for (int i = 0; i < 10; ++i)
+        REQUIRE(render(1024) == expected);
+}

@@ -392,6 +392,7 @@ private:
     aligned_unique_ptr<FileQueue> filesToLoad;
 
     void dispatchingJob() noexcept;
+    void dispatchQueuedFiles() noexcept; // with loadingJobsMutex held
     void garbageJob() noexcept;
     void loadingJob(const QueuedFileData& data) noexcept;
     std::mutex loadingJobsMutex;
