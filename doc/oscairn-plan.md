@@ -202,7 +202,8 @@ What it took to make stock renders reproducible, found while building the gate (
 - **Whole samples preloaded.** With sfizz's default preload size, the rest of a file streams
   in on background threads, and when it arrives decides what a voice plays; renders
   differed from run to run (`looped_regions.sfz`: four different outputs in six runs). The render tool sets the preload size to 2^30 frames, so the
-  gate does not cover sfizz's streaming path.
+  gate did not cover sfizz's streaming path. (From the decay session, 2026-11-06, two
+  settings stream; see the last bullets.)
 - **ASLR off.** abseil seeds its hash tables from an address, and some patches render
   differently depending on the iteration order (with ASLR on, `newdrums_flat.sfz` gave two
   different outputs in six runs, split 4 and 2; with ASLR off, all six agreed). Renders run with ASLR off (`no-aslr` on macOS,
@@ -218,6 +219,31 @@ What it took to make stock renders reproducible, found while building the gate (
   quality 10): 159 renders.
 - A one-character change in the amp EG's decay coefficient made 125 of the 159 renders
   fail, so the gate does see small changes.
+
+Added in the decay session (2026-11-06):
+
+- **Load check.** The render tool prints what a patch loaded (regions, groups, masters,
+  curves, preloaded files, unknown opcodes); stock and fork must agree, and a load error or a
+  patch with no region fails (before, both sides failing to load passed).
+- **No silent passes.** A silent render fails unless the patch is listed as silent on purpose
+  (the two `basic_hierarchy` fixtures, whose group delays of 36-67 s outlast the render;
+  `patches/hierarchy.sfz` plays the same hierarchy). 21 of the 162 renders had passed with
+  both sides silent. The event script now also plays keys 2, 17 and 61, which three fixtures
+  map; `Includes/subdir/included_subdir.sfz` (a fragment) and `table_embedded.sfz` (base64
+  over several lines, which sfizz does not parse) load no region alone and are left out.
+  That makes 53 patches.
+- **Streaming.** Two more settings stream (256 frames, 48 kHz, quality 2, preload 1024 frames;
+  512 frames, 44.1 kHz, quality 1, preload 64), with files longer than the preload. Rendering
+  freewheels, so each block waits for its notes' loads, and the output must be the preloaded
+  output: the fork's streaming renders must equal stock's fully preloaded renders at the same
+  settings, bit for bit (106 renders). Stock's own streaming renders are only counted: its
+  wait can miss a just-queued load (`ca69309e`), and on the first run 26 of 106 differed from
+  its preloaded output and 18 between runs. With `ca69309e` reverted, 35 of the fork's 106
+  fail. What this does not cover: a voice catching up with the loader in real time, where the
+  fork deliberately changed stock (`ab0e878c`: the interpolator stays within the frames
+  loaded so far). A freewheeling render never gets there, and a live render is not
+  deterministic on either side; the fork's test "Streamed playback far up stays within the
+  frames loaded so far" (`SynthT.cpp`, run under ThreadSanitizer in the gates) covers it.
 
 ---
 
@@ -1114,6 +1140,50 @@ built from an export outside the repository, in-process) PASSED on `3c629261`'s 
 not exercise the voice budget. Oscairn's own voice-budget host tests were not run against this
 plugin, and the worker protocol does not carry the extension yet.
 
+### Decay session (2026-11-06): rising decays, stock gate coverage, plugin 0.3.1
+
+Two items from the review session's open findings.
+
+**A decay from level 0** (`762ae0e2`). The element envelope ran decays as a gain times a ratio
+per sample, so a decay starting at level 0 (attack level 0, or the decay after one to level 0)
+stayed silent and stepped to its target at the segment's end. Measured on the reference
+(batch `eg7`, 23 renders, sine, filter code 18): rises from 0 to 127 at decay indices 56, 64,
+72, 80 and 88, from 0 to 64 and from 64 to 127 at 64 and 80, notes 45, 69 and 93 at index 72,
+key follow +63 at notes 48 and 72, falls to 0 followed by rises (decay 1 / decay 2 indices 40/64,
+40/80, 64/72, 72/64), and a release during a rise. Such a segment rises as a straight line in dB
+from -90 dB (the level a fall to 0 ends at) over a full-scale decay's time, exactly like a fall
+in reverse: the fall's rate at the same index, the same in both directions; from 64 to 127 the
+time is again the full-scale time (`mid_64`, `mid_80`). The engine now starts a rising
+segment from that floor. Engine against reference, 14 renders at 44.1, 48 and 96 kHz: time from
+the segment start to 1 dB below the target within 1.0 % (the accepted tolerance is 2.5 %), slope
+within 1.1 %, start level within 0.3 dB of the reference's (-89.5 to -90.1 dB); scripts in
+`measurements/awm2/scripts/eg7/`.
+Two differences found on the way are in the register: the reference holds about -95 dB after a
+fall to 0 where the engine is silent (K44), and one release from -47 dB falls 5.5 % faster on
+the reference (K45). The new test ("A decay from level 0 rises from the floor", every rate)
+fails without the change; the initial-level test now holds level 0 after its attack, as
+it meant to (with the change its default decay levels made it rise again).
+
+**Stock gate coverage** (`a5bee48e`, `126deb6e`; section 3). Every patch must now load (the
+same regions, groups, masters, curves, preloaded files and unknown opcodes in stock and fork,
+at least one region) and sound, unless listed as silent on purpose; the event script plays
+three more keys so that three of the seven silent fixtures sound; a new hierarchy patch stands
+in for the two that cannot; two fixtures that load nothing alone are left out. Two streaming
+settings compare the fork's streaming renders with stock's preloaded ones. Results on the
+working tree before the commits (macOS, M3 Max): 159 renders bit-identical, 106 streaming
+renders bit-identical to stock's preloaded output, none failed; stock's own streaming renders: 26 differed from its
+preloaded output and 18 between runs (a second run gave 30 and 7), which is the stock bug
+`ca69309e` fixed, not a difference in the fork. No real difference between stock and fork was
+found. Shown to fail: a reduced patch list with the two fragments back and nothing marked
+silent (9 of 9 of their renders fail); the fork with `ca69309e` reverted (35 of 106 streaming
+renders fail).
+
+**Gates** (`gate.sh`: Release, ASan/UBSan and TSan builds of `sfizz_tests` and the CLAP tests, and
+stock vs fork, each on the committed tree): `762ae0e2`, `a5bee48e` and `126deb6e` passed all four
+(519 test cases, the CLAP tests; stock vs fork with each commit's own gate: 162, 159, and 159 plus
+106 streaming renders bit-identical; on `126deb6e` stock's own streaming renders differed from its
+preloaded output in 34 and between runs in 2).
+
 ### Upstream merge test (2026-11-01)
 
 `upstream/develop` has no commits after `f5c6e29f`: merging it into `oscairn` is a no-op
@@ -1174,3 +1244,5 @@ repository, or the local scripts beside the renders).
 | K41 | Calling After Me 2, Parts 2 and 3 at note 84 | Element 2 of each, isolated, flat (velocity sensitivity 0, flat envelope, filter code 18): Part 3 about 12 dB lower in the engine than the reference (after the 1.84 dB staging), the same on every harmonic; Part 2 about 4.5 dB higher, different by harmonic. Envelope, velocity and level scaling agree. The converted regions for those key banks (sample and `volume`) are the suspects: converter side | Converter (key bank choice or level) | Open, for the converter | `ks1` (`p2only`, `p3only`), `ks3`; `scratchpad eng_ks3.py`, `spec.py` | converter |
 | K42 | Key-off elements | The reference plays a key-off element from the note-off without any other voice of the key, and releases it 2.0 s after it starts (measured once, release time 40, sustain held); a decay to level 0 ends it. Engine: `rt_dead=1` (stock opcode) plus `oscairn_keyoff=1` (release 2.0 s after the start); the CLAP wrapper keeps the note until its note-off; an envelope holding level 0 ends its voice. Whether the 2.0 s depends on any parameter is not measured | Measured at one setting | Built (`a2c16d82`, `ad43ddac`, `4c38842e`) | `ks4` | `Voice.cpp` `startVoice`; `clap/plugin.cpp` `endFinishedNotes` |
 | K43 | Voice stealing under a voice budget | While Oscairn sets voice limits (`oscairn.voice-budget`), voices past them go in the SDK's order (released before held, the new voice's own sound, lower priority, quieter, older; never a held voice within its sound's reserve or of a part marked mono or legato), a region at a time, at a block's start and after note events, faded over 3 ms. sfizz's own limits (the engine's voices, 64 a context by default; `polyphony`; `note_polyphony`; `off_by`) still steal first, in sfizz's order, and a voice they off counts as ending though it still renders its off-time release (a converted 13-element sound, eight notes: up to 39 such voices for about 100 ms). A voice in its attack counts as quiet as it is then. The reference's own stealing order is not measured | Oscairn RFC 0018's order, so the host and the plugin agree on what is least audible | Deliberate (decision 27, proposed) | `clap/test.cpp` voice budget cases | `clap/plugin.cpp` `keepWithinLimits`; `clap/budget.cpp` |
+| K44 | Level held after a decay to level 0 | After a decay segment reaches level 0 (a straight line in dB to -90 dB), the reference keeps sounding the tone at about -95 dB below level 127 (`eg7` `dn_*`, held 1 s and more, the same in every probe); the engine is silent from -90 dB on, and a voice whose envelope holds level 0 ends there (test "Element envelope ends once it holds level 0") | Inaudible floor | Not modelled (not decided by Jacob) | `eg7` (`dn_*`); `scripts/eg7/rl.py` | `ElementEnvelope.cpp` `floorDb` |
+| K45 | Release from a low level | One probe: a release (index 64) from a decay still rising from level 0, at -47 dB below level 127, falls at 60.5 dB/s on the reference and 57.2 dB/s in the engine (5.5 %), which takes the full-scale release time whatever the distance. Releases from other levels below 127 were not compared | Not known: the reference's segments are neither a fixed time nor a fixed rate here | Unresolved, one measurement | `eg7` (`uprel`); `scripts/eg7/rl.py` | `ElementEnvelope.cpp` `enter` |
