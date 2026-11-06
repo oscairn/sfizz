@@ -615,6 +615,37 @@ int main(int argc, char** argv)
         CHECK(!ctx->get(plugin, 1, &info) && save(plugin) == stateFor(sine));
         plugin->destroy(plugin);
     }
+    { // reset clears the controllers too: a sustain pedal held before it does not hold the next note
+        auto* plugin = create();
+        CHECK(load(plugin, stateFor("<region> sample=*sine ampeg_release=0.005\n")));
+        CHECK(plugin->activate(plugin, 48000, 1, 256));
+        Run run { plugin };
+        Events events;
+        clap_event_midi_t pedal {};
+        pedal.header = { sizeof(pedal), 0, CLAP_CORE_EVENT_SPACE_ID, CLAP_EVENT_MIDI, 0 };
+        pedal.data[0] = 0xb0; pedal.data[1] = 64; pedal.data[2] = 127;
+        events.add(pedal);
+        events.note(CLAP_EVENT_NOTE_ON, 0, 1, 69, 1.0);
+        run.block(events, 256);
+        events.note(CLAP_EVENT_NOTE_OFF, 0, 1, 69, 0.0);
+        for (int i = 0; i < 40; ++i)
+            run.block(events, 256);
+        CHECK(run.peak > 0.1f && run.status == CLAP_PROCESS_CONTINUE); // the pedal holds it
+        guarded = true; // reset runs on the audio thread
+        plugin->reset(plugin);
+        guarded = false;
+        run.block(events, 256);
+        CHECK(run.peak == 0.0f);
+        events.note(CLAP_EVENT_NOTE_ON, 0, 2, 69, 1.0);
+        run.block(events, 256);
+        CHECK(run.peak > 0.1f);
+        events.note(CLAP_EVENT_NOTE_OFF, 0, 2, 69, 0.0);
+        for (int i = 0; i < 40 && run.status != CLAP_PROCESS_SLEEP; ++i)
+            run.block(events, 256);
+        CHECK(run.status == CLAP_PROCESS_SLEEP); // released as in a fresh instance
+        plugin->deactivate(plugin);
+        plugin->destroy(plugin);
+    }
     // No allocation in any process call above
     CHECK(guardedAllocations.load() == 0);
     if (guardedAllocations.load())

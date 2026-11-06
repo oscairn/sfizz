@@ -241,6 +241,15 @@ std::unique_ptr<Engine> makeEngine(const Plugin& s, const Patch& patch, const os
 
 void collectRetired(Plugin& s) { delete s.retired.exchange(nullptr); }
 
+// Voices, held keys, controllers and the clock as in a fresh synth, so an instance played
+// before sounds as a fresh one (Oscairn's "second life"); allocation-free
+void clearPlayingState(sfz::Synth& synth)
+{
+    synth.allSoundOff();
+    synth.hdcc(0, 121, 0.0f); // reset all controllers: CCs and pitch bend to the patch's defaults
+    synth.getResources().getMidiState().resetNoteStates();
+}
+
 // Audio thread
 
 void endNote(const clap_output_events_t* out, const Note& n, uint32_t time)
@@ -430,8 +439,10 @@ bool activate(const clap_plugin_t* p, double rate, uint32_t, uint32_t maxFrames)
     for (auto* v : { &s.left, &s.right, &s.mixLeft, &s.mixRight })
         v->assign(s.maxFrames, 0.0f);
     for (auto& c : s.contexts)
-        if (c.engine)
+        if (c.engine) {
             configure(s, c.engine->synth);
+            clearPlayingState(c.engine->synth);
+        }
     s.active = true;
     return true;
 }
@@ -461,9 +472,10 @@ void stopProcessing(const clap_plugin_t*) {}
 void reset(const clap_plugin_t* p)
 {
     auto& s = self(p);
+    // Only the contexts the audio thread owns; the main thread may be replacing the others
     for (auto& c : s.contexts)
-        if (c.sounding.load() && c.engine)
-            c.engine->synth.allSoundOff();
+        if ((c.selectedChannels.load(std::memory_order_acquire) || c.sounding.load()) && c.engine)
+            clearPlayingState(c.engine->synth);
 }
 
 clap_process_status process(const clap_plugin_t* p, const clap_process_t* process)
@@ -1053,7 +1065,7 @@ const clap_plugin_descriptor_t descriptor {
     "https://github.com/oscairn/sfizz",
     "",
     "",
-    "0.2.0",
+    "0.2.1",
     "SFZ sample player, sfizz with Oscairn's extensions",
     features,
 };
