@@ -17,6 +17,11 @@
 // one context end together. A choke fades the key's voices over 3 ms; a note's volume
 // expression scales the key's voices.
 //
+// Voice budget (oscairn.voice-budget): every sfizz voice (one region of a note, an element of a
+// layered sound) is one voice to the host. Past the host's limits, voices fade out over the
+// choke time in the SDK's order (voice-budget-plugin.hpp), at the start of a block and when a
+// note starts voices; sfizz's own polyphony limits act as before. Without limits nothing changes.
+//
 // Files: with the host's oscairn.assets, every sample a patch uses is resolved through the
 // host, and oscairn.asset-dependencies lists them; without it, paths resolve from the
 // patch's directory.
@@ -35,7 +40,10 @@
 // oscairn.asset-dependencies; a sample the host cannot resolve fails the state load.
 
 #include "plugin.h"
+#include "budget.h"
 #include "sfizz/Synth.h"
+#include "sfizz/Config.h"
+#include "sfizz/Voice.h"
 #include "sfizz/Region.h"
 #include "sfizz/AudioSpan.h"
 #include "sfizz/FilePool.h"
@@ -51,6 +59,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <limits>
 #include <memory>
 #include <string>
 #include <vector>
@@ -64,6 +73,8 @@ constexpr size_t maxNotes = 256;
 constexpr uint32_t contextCount = 8;
 constexpr uint32_t selectionCapacity = 32;
 constexpr int16_t chokeMark = -2; // a queued choke_retiring, in place of a channel
+constexpr size_t maxSlots = sfz::config::maxVoices; // voice slots a synth has at most
+static_assert(contextCount * maxSlots <= oscairn_sfizz::maxBudgetVoices && maxNotes <= oscairn_sfizz::maxBudgetNotes, "budget.h");
 
 struct Patch {
     std::string directory; // where relative sample and include paths resolve
@@ -77,6 +88,7 @@ struct Engine {
     sfz::Synth synth;
     std::vector<oscairn_asset_ref_t> assets; // resolved through the host, for dependencies
     std::bitset<128> releaseKeys; // keys a release region may still play on at note-off
+    uint32_t id { 0 };            // its context's ID, set before the audio thread sees it
 };
 
 struct Note {
@@ -104,6 +116,13 @@ struct Context {
 struct Selection {
     uint32_t context;
     int16_t channel;
+};
+
+// Where a voice budget candidate plays
+struct BudgetVoice {
+    Engine* engine;
+    uint32_t context; // slot
+    int voice;
 };
 
 struct Plugin {
@@ -136,6 +155,8 @@ struct Plugin {
     Note notes[maxNotes];
     size_t noteCount { 0 };
     std::vector<float> left, right, mixLeft, mixRight;
+    oscairn_sfizz::VoiceBudget budget; // the host's limits, as set_limits last gave them
+    BudgetVoice budgetVoices[contextCount * maxSlots];
 };
 
 Plugin& self(const clap_plugin_t* p) { return *static_cast<Plugin*>(p->plugin_data); }
@@ -324,6 +345,81 @@ void applySelections(Plugin& s)
     s.selectionTail.store(tail, std::memory_order_release);
 }
 
+// Voice budget (audio thread)
+
+// The engine of a context the audio thread renders now, or null
+Engine* rendered(Plugin& s, uint32_t i)
+{
+    Context& c = s.contexts[i];
+    return (c.selectedChannels.load(std::memory_order_acquire) || c.sounding.load(std::memory_order_relaxed))
+        ? c.live.load(std::memory_order_relaxed) : nullptr;
+}
+
+// Fades voices out until every context keeps within its own limit and the instance within its
+// limit: in the SDK's order, for a new voice of context slot `incoming` (contextCount: none),
+// from `delay` frames into the block.
+void keepWithinLimits(Plugin& s, uint32_t incoming, int delay)
+{
+    using oscairn_sfizz::VoiceBudget;
+    VoiceBudget& budget = s.budget;
+    if (!budget.limited())
+        return;
+    budget.clearCandidates();
+    size_t count = 0;
+    uint32_t kept[contextCount] {}, total = 0;
+    uint32_t ids[contextCount + 1];
+    ids[contextCount] = VoiceBudget::none;
+    for (uint32_t i = 0; i < contextCount; ++i) {
+        Engine* e = rendered(s, i);
+        ids[i] = e ? e->id : VoiceBudget::none;
+        if (!e)
+            continue;
+        const bool selected = s.contexts[i].selectedChannels.load(std::memory_order_relaxed) != 0;
+        const sfz::MidiState& midi = e->synth.getResources().getMidiState();
+        for (int k = 0, slots = e->synth.getNumVoiceSlots(); k < slots; ++k) {
+            const sfz::Voice& v = *e->synth.getVoiceSlot(k);
+            if (v.isFree())
+                continue;
+            const sfz::TriggerEvent& trigger = v.getTriggerEvent();
+            if (count == oscairn_sfizz::maxBudgetVoices)
+                break;
+            s.budgetVoices[count++] = { e, i, k };
+            oscairn_sfizz::BudgetCandidate c;
+            c.context = e->id;
+            c.selected = selected;
+            // a key up is released, pedal or not
+            c.held = !v.released() && (trigger.type != sfz::TriggerEventType::NoteOn || midi.isNotePressed(trigger.number));
+            c.ending = v.offedOrFree() || v.isFadingOut(); // sfizz's own steal, or a fade
+            c.loudness = v.getLastGain(); // a voice this block's events started: the level it starts at
+            c.age = static_cast<uint64_t>(std::numeric_limits<int>::max() - v.getAge());
+            budget.addCandidate(c);
+            if (!c.ending) {
+                ++kept[i];
+                ++total;
+            }
+        }
+    }
+    auto giveUp = [&](uint32_t only) {
+        const int i = budget.victim(ids[incoming], ids[only]);
+        if (i < 0)
+            return false;
+        const BudgetVoice& b = s.budgetVoices[i];
+        b.engine->synth.getVoiceSlot(b.voice)->fadeOut(delay, static_cast<int>(s.chokeFrames));
+        budget.setEnding(static_cast<size_t>(i));
+        --kept[b.context];
+        --total;
+        return true;
+    };
+    for (uint32_t i = 0; i < contextCount; ++i) {
+        const uint32_t own = ids[i] == VoiceBudget::none ? 0
+            : budget.limitOf(ids[i], s.contexts[i].selectedChannels.load(std::memory_order_relaxed) != 0);
+        while (own && kept[i] > own && giveUp(i)) {
+        }
+    }
+    while (budget.limit() && total > budget.limit() && giveUp(contextCount)) {
+    }
+}
+
 bool matches(const Note& note, int32_t id, int16_t channel, int16_t key)
 {
     return (id < 0 || note.id == id) && (channel < 0 || note.channel == channel) && (key < 0 || note.key == key);
@@ -347,8 +443,10 @@ void applyEvent(Plugin& s, const clap_event_header_t* h, int delay)
             const uint32_t context = s.channelContext[n->channel];
             // A velocity-0 note-on stays a note-on (Oscairn RFC 0005); sfizz needs a velocity
             // above 0 to start a voice, so use the smallest one it distinguishes.
-            if (Engine* e = s.contexts[context].live.load(std::memory_order_relaxed))
+            if (Engine* e = s.contexts[context].live.load(std::memory_order_relaxed)) {
                 e->synth.hdNoteOn(delay, n->key, std::max(velocity, 1.0f / 127.0f));
+                keepWithinLimits(s, context, delay);
+            }
             if (s.noteCount < maxNotes)
                 s.notes[s.noteCount++] = { n->note_id, n->channel, n->key, context, false };
             return;
@@ -360,9 +458,10 @@ void applyEvent(Plugin& s, const clap_event_header_t* h, int delay)
             if (!e || note.released || !matches(note, n->note_id, n->channel, n->key))
                 continue;
             note.released = true;
-            if (h->type == CLAP_EVENT_NOTE_OFF)
-                e->synth.hdNoteOff(delay, note.key, velocity);
-            else
+            if (h->type == CLAP_EVENT_NOTE_OFF) {
+                e->synth.hdNoteOff(delay, note.key, velocity); // may start release regions
+                keepWithinLimits(s, note.context, delay);
+            } else
                 e->synth.fadeOutNote(delay, note.key, static_cast<int>(s.chokeFrames));
         }
         break;
@@ -518,6 +617,7 @@ clap_process_status process(const clap_plugin_t* p, const clap_process_t* proces
         }
     }
     applySelections(s);
+    keepWithinLimits(s, contextCount, 0); // past limits the host lowered
 
     float* outL = process->audio_outputs[0].data32[0];
     float* outR = process->audio_outputs[0].data32[1];
@@ -777,6 +877,7 @@ uint32_t contextPrepare(const clap_plugin_t* p, const char* name, const oscairn_
     auto e = makeEngine(s, patch, base, why);
     if (!e)
         return fail(why);
+    e->id = s.nextId;
     setEngine(*slot, std::move(e));
     slot->id = s.nextId++;
     std::snprintf(slot->name, sizeof(slot->name), "%s", name ? name : "");
@@ -926,9 +1027,11 @@ bool snapshotLoad(const clap_plugin_t* p, const clap_istream_t* stream)
     s.patch = patches[0];
     for (uint32_t i = 0; i < contextCount; ++i) {
         Context& c = s.contexts[i];
+        c.id = !used[i] || i == 0 ? 0 : s.nextId++;
+        if (engines[i])
+            engines[i]->id = c.id;
         setEngine(c, std::move(engines[i]));
         c.prepared = used[i];
-        c.id = !used[i] || i == 0 ? 0 : s.nextId++;
         std::snprintf(c.name, sizeof(c.name), "%s", used[i] ? names[i].c_str() : "");
         c.queued = 0;
         c.sounding = 0;
@@ -980,6 +1083,7 @@ bool snapshotPrepare(const clap_plugin_t* p, const clap_istream_t* stream, uint3
         if (!parsed.used[i])
             continue;
         Context& c = s.contexts[slotFor[i]];
+        engines[i]->id = s.nextId;
         setEngine(c, std::move(engines[i]));
         c.id = s.nextId++;
         std::snprintf(c.name, sizeof(c.name), "%s", parsed.names[i].c_str());
@@ -1037,6 +1141,61 @@ bool dependencyGet(const clap_plugin_t* p, uint32_t index, oscairn_asset_ref_t* 
 
 const oscairn_plugin_asset_dependencies_t dependencies { dependencyCount, dependencyGet, nullptr };
 
+// Voice budget (oscairn.voice-budget/draft-1)
+
+// Every voice follows CLAP_NOTE_EXPRESSION_VOLUME (per key, as notes are)
+bool budgetHonorsVolume(const clap_plugin_t*) { return true; }
+
+void budgetSetLimits(const clap_plugin_t* p, uint32_t limit, const oscairn_voice_budget_context_t* contexts, uint32_t count)
+{
+    self(p).budget.setLimits(limit, contexts, count);
+}
+
+uint32_t budgetActiveVoices(const clap_plugin_t* p, double* voiceCost)
+{
+    auto& s = self(p);
+    if (voiceCost)
+        *voiceCost = 0; // no estimate: the host measures the instance
+    uint32_t n = 0;
+    for (uint32_t i = 0; i < contextCount; ++i)
+        if (Engine* e = rendered(s, i))
+            for (int k = 0, slots = e->synth.getNumVoiceSlots(); k < slots; ++k)
+                n += !e->synth.getVoiceSlot(k)->isFree();
+    return n;
+}
+
+uint32_t budgetNotes(const clap_plugin_t* p, oscairn_voice_budget_note_t* out, uint32_t capacity)
+{
+    auto& s = self(p);
+    oscairn_sfizz::VoiceBudget& report = s.budget;
+    report.clearReport();
+    for (uint32_t i = 0; i < contextCount; ++i) {
+        Engine* e = rendered(s, i);
+        if (!e)
+            continue;
+        uint32_t voices[128] {};
+        float gain[128] {};
+        for (int k = 0, slots = e->synth.getNumVoiceSlots(); k < slots; ++k) {
+            const sfz::Voice& v = *e->synth.getVoiceSlot(k);
+            const int key = v.getTriggerEvent().number;
+            if (v.isFree() || v.getTriggerEvent().type == sfz::TriggerEventType::CC || key < 0 || key > 127)
+                continue;
+            ++voices[key];
+            gain[key] = std::max(gain[key], v.getLastGain());
+        }
+        // notes sharing a key in one context share its voices (sfizz's voices know their key)
+        for (size_t n = 0; n < s.noteCount; ++n) {
+            const Note& note = s.notes[n];
+            if (note.context == i)
+                for (uint32_t k = 0; k < voices[note.key]; ++k)
+                    report.addToReport(note.id, note.channel, note.key, gain[note.key]);
+        }
+    }
+    return report.writeReport(out, capacity);
+}
+
+const oscairn_plugin_voice_budget_t voiceBudget { budgetHonorsVolume, budgetSetLimits, budgetActiveVoices, budgetNotes };
+
 const void* getExtension(const clap_plugin_t*, const char* id)
 {
     if (!std::strcmp(id, CLAP_EXT_AUDIO_PORTS))
@@ -1051,6 +1210,8 @@ const void* getExtension(const clap_plugin_t*, const char* id)
         return &dependencies;
     if (!std::strcmp(id, OSCAIRN_EXT_SOUND_SNAPSHOTS))
         return &soundSnapshots;
+    if (!std::strcmp(id, OSCAIRN_EXT_VOICE_BUDGET))
+        return &voiceBudget;
     return nullptr;
 }
 

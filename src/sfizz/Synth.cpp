@@ -1863,6 +1863,18 @@ void Synth::fadeOutNote(int delay, int noteNumber, int frames) noexcept
             v.fadeOut(delay, frames);
 }
 
+int Synth::getNumVoiceSlots() const noexcept
+{
+    const Impl& impl = *impl_;
+    return static_cast<int>(impl.voiceManager_.cend() - impl.voiceManager_.cbegin());
+}
+
+Voice* Synth::getVoiceSlot(int idx) noexcept
+{
+    Impl& impl = *impl_;
+    return idx >= 0 && idx < getNumVoiceSlots() ? &impl.voiceManager_[idx] : nullptr;
+}
+
 const Voice* Synth::getVoiceView(int idx) const noexcept
 {
     Impl& impl = *impl_;

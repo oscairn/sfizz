@@ -5,8 +5,13 @@
 add_library(sfizz_clap_headers INTERFACE)
 target_include_directories(sfizz_clap_headers INTERFACE third_party/clap/include third_party/oscairn-clap/include)
 
+# The SDK's voice-budget helper needs C++17; sfizz's headers stay C++14 (budget.h)
+add_library(sfizz_clap_budget STATIC budget.cpp budget.h)
+target_link_libraries(sfizz_clap_budget PUBLIC sfizz_clap_headers)
+set_target_properties(sfizz_clap_budget PROPERTIES POSITION_INDEPENDENT_CODE ON CXX_STANDARD 17)
+
 add_library(sfizz_clap_plugin STATIC plugin.cpp plugin.h)
-target_link_libraries(sfizz_clap_plugin PUBLIC sfizz_clap_headers sfizz::internal)
+target_link_libraries(sfizz_clap_plugin PUBLIC sfizz_clap_headers sfizz::internal PRIVATE sfizz_clap_budget)
 set_target_properties(sfizz_clap_plugin PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 add_library(sfizz_clap MODULE entry.cpp)

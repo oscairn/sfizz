@@ -291,6 +291,7 @@ struct Voice::Impl
     int fadeDelay_ { -1 }; // a fade-out starts after this many frames; -1 when none
     int fadeLeft_ { 0 };
     int fadeLength_ { 0 };
+    float lastGain_ { 0.0f }; // the amplitude stage's last gain, for a host's voice budget
     std::unique_ptr<ADSREnvelope> egPitch_;
     std::unique_ptr<ADSREnvelope> egFilter_;
 
@@ -524,6 +525,7 @@ bool Voice::startVoice(Layer* layer, int delay, const TriggerEvent& event) noexc
         impl.baseGain_ *= oscairn::levelScalingGain(region.oscairn.levelScaling, impl.triggerEvent_.number);
     if (region.oscairn.velocityEnabled)
         impl.baseGain_ *= oscairn::velocityGain(region.oscairn.velocity, static_cast<int>(std::lround(impl.triggerEvent_.value * 127.0f)));
+    impl.lastGain_ = impl.baseGain_ * db2mag(impl.baseVolumedB_); // until its first block
 
     impl.gainSmoother_.reset();
     impl.resetCrossfades();
@@ -675,6 +677,16 @@ void Voice::fadeOut(int delay, int frames) noexcept
         return; // already fading
     impl.fadeDelay_ = std::max(0, delay);
     impl.fadeLength_ = impl.fadeLeft_ = std::max(1, frames);
+}
+
+bool Voice::isFadingOut() const noexcept
+{
+    return impl_->fadeDelay_ >= 0;
+}
+
+float Voice::getLastGain() const noexcept
+{
+    return impl_->lastGain_;
 }
 
 void Voice::off(int delay, bool fast) noexcept
@@ -1061,6 +1073,8 @@ void Voice::Impl::ampStageMono(AudioSpan<float> buffer) noexcept
     amplitudeEnvelope(*modulationSpan);
     applyCrossfades(*modulationSpan);
     applyGain<float>(*modulationSpan, leftBuffer);
+    if (numSamples > 0)
+        lastGain_ = modulationSpan->back();
 }
 
 void Voice::Impl::ampStageStereo(AudioSpan<float> buffer) noexcept
@@ -1077,6 +1091,8 @@ void Voice::Impl::ampStageStereo(AudioSpan<float> buffer) noexcept
     amplitudeEnvelope(*modulationSpan);
     applyCrossfades(*modulationSpan);
     buffer.applyGain(*modulationSpan);
+    if (numSamples > 0)
+        lastGain_ = modulationSpan->back();
 }
 
 void Voice::Impl::panStageMono(AudioSpan<float> buffer) noexcept
@@ -1870,6 +1886,7 @@ void Voice::reset() noexcept
     impl.region_ = nullptr;
     impl.hostGain_ = 1.0f;
     impl.fadeDelay_ = -1;
+    impl.lastGain_ = 0.0f;
     impl.currentPromise_.reset();
     impl.sourcePosition_ = 0;
     impl.age_ = 0;

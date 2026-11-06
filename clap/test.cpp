@@ -9,6 +9,7 @@
 #include "plugin.h"
 #include <oscairn-clap/assets.h>
 #include <oscairn-clap/sound-contexts.h>
+#include <oscairn-clap/voice-budget.h>
 #include <dlfcn.h>
 #include <atomic>
 #include <cstdlib>
@@ -179,6 +180,64 @@ const clap_plugin_t* create()
 }
 
 const std::string sine = "<region> sample=*sine ampeg_release=0.01\n";
+
+// Voice budget calls, on the audio thread (guarded like process)
+const oscairn_plugin_voice_budget_t* budgetOf(const clap_plugin_t* p)
+{
+    return static_cast<const oscairn_plugin_voice_budget_t*>(p->get_extension(p, OSCAIRN_EXT_VOICE_BUDGET));
+}
+void setLimits(const clap_plugin_t* p, uint32_t limit, std::vector<oscairn_voice_budget_context_t> contexts = {})
+{
+    CHECK(budgetOf(p));
+    guarded = true;
+    if (budgetOf(p))
+        budgetOf(p)->set_limits(p, limit, contexts.data(), static_cast<uint32_t>(contexts.size()));
+    guarded = false;
+}
+uint32_t activeVoices(const clap_plugin_t* p)
+{
+    if (!budgetOf(p))
+        return 0;
+    double cost = -1;
+    guarded = true;
+    const uint32_t n = budgetOf(p)->active_voices(p, &cost);
+    guarded = false;
+    CHECK(cost == 0); // no estimate
+    return n;
+}
+struct BudgetNotes {
+    oscairn_voice_budget_note_t notes[64] {};
+    uint32_t count = 0;
+    explicit BudgetNotes(const clap_plugin_t* p)
+    {
+        guarded = true;
+        count = budgetOf(p) ? budgetOf(p)->notes(p, notes, 64) : 0;
+        guarded = false;
+    }
+    const oscairn_voice_budget_note_t* find(int32_t id) const
+    {
+        for (uint32_t i = 0; i < count; ++i)
+            if (notes[i].note_id == id)
+                return &notes[i];
+        return nullptr;
+    }
+    uint32_t voices(int32_t id) const { return find(id) ? find(id)->voices : 0; }
+    float loudness(int32_t id) const { return find(id) ? find(id)->loudness : -1.0f; }
+};
+oscairn_voice_budget_context_t selectedEntry(uint32_t limit, uint32_t reserve, uint8_t priority)
+{
+    oscairn_voice_budget_context_t c {};
+    c.context = OSCAIRN_VOICE_BUDGET_SELECTED;
+    c.limit = limit;
+    c.reserve = reserve;
+    c.priority = priority;
+    return c;
+}
+// Four elements a note under the profile, each with the element envelope and velocity, at
+// element levels 0, -6, -12 and -18 dB (the converter keeps an element's level in volume)
+const std::string layered =
+    "<control> oscairn_profile=1\n<group> sample=*sine oscairn_ampeg_attack=0 oscairn_ampeg_release=60 oscairn_amp_velsens=32\n"
+    "<region> volume=0\n<region> volume=-6\n<region> volume=-12\n<region> volume=-18\n";
 
 } // namespace
 
@@ -658,6 +717,7 @@ int main(int argc, char** argv)
         std::thread audio([&] {
             Run run { plugin };
             Events events;
+            setLimits(plugin, 1); // the voice budget reads every context too
             for (int n = 0; !done.load(); ++n) {
                 if (n % 8 == 0)
                     events.note(CLAP_EVENT_NOTE_ON, 0, n, 60, 1.0);
@@ -677,6 +737,158 @@ int main(int argc, char** argv)
         }
         done = true;
         audio.join();
+        plugin->deactivate(plugin);
+        plugin->destroy(plugin);
+    }
+    { // voice budget: the extension, every entry
+        auto* plugin = create();
+        auto* vb = budgetOf(plugin);
+        CHECK(vb && vb->honors_volume && vb->set_limits && vb->active_voices && vb->notes);
+        CHECK(vb && vb->honors_volume(plugin));
+        plugin->destroy(plugin);
+    }
+    { // voice budget, the gate of Oscairn RFC 0018 step 4: a layered sound under pressure gives up
+      // quiet elements before whole notes; a note ends only once its last voice has
+        auto* plugin = create();
+        CHECK(load(plugin, stateFor(layered)));
+        CHECK(plugin->activate(plugin, 48000, 1, 64));
+        Run run { plugin };
+        Events events;
+        setLimits(plugin, 16, { selectedEntry(0, 0, 5) }); // what Oscairn sends a part's instance
+        for (int n = 0; n < 8; ++n) {
+            events.note(CLAP_EVENT_NOTE_ON, 0, n, static_cast<int16_t>(60 + n), 1.0);
+            for (int b = 0; b < 8; ++b) // past each note's attack
+                run.block(events, 64);
+        }
+        for (int b = 0; b < 4; ++b) // past the last fades
+            run.block(events, 64);
+        CHECK(activeVoices(plugin) == 16);
+        BudgetNotes notes(plugin);
+        CHECK(notes.count == 8);
+        for (int n = 0; n < 8; ++n) { // every note keeps its two loudest elements, and its level
+            CHECK(notes.voices(n) == 2);
+            CHECK(std::fabs(notes.loudness(n) - notes.loudness(0)) < 1e-3f && notes.loudness(n) > 0.5f);
+            CHECK(events.ends(n) == 0);
+        }
+        // the limit lowered to 8: each note's second element goes, every note still sounds
+        setLimits(plugin, 8, { selectedEntry(0, 0, 5) });
+        for (int b = 0; b < 4; ++b)
+            run.block(events, 64);
+        CHECK(activeVoices(plugin) == 8);
+        BudgetNotes fewer(plugin);
+        CHECK(fewer.count == 8);
+        for (int n = 0; n < 8; ++n)
+            CHECK(fewer.voices(n) == 1 && events.ends(n) == 0);
+        for (int n = 0; n < 8; ++n)
+            events.note(CLAP_EVENT_NOTE_OFF, 0, n, static_cast<int16_t>(60 + n), 0.0);
+        for (int b = 0; b < 2000 && run.status != CLAP_PROCESS_SLEEP; ++b)
+            run.block(events, 64);
+        for (int n = 0; n < 8; ++n)
+            CHECK(events.ends(n) == 1);
+        plugin->deactivate(plugin);
+        plugin->destroy(plugin);
+    }
+    { // voice budget: a lowered limit fades the excess out from the next block, over 3 ms, without
+      // a click; fading voices are counted and listed until they end
+        const std::string flat = "<region> sample=*sine amp_veltrack=0 ampeg_release=0.01\n";
+        auto render = [&](bool all, bool limit, std::vector<float>& out, std::vector<uint32_t>* counts) {
+            auto* plugin = create();
+            CHECK(load(plugin, stateFor(flat)));
+            CHECK(plugin->activate(plugin, 48000, 1, 64));
+            Run run { plugin };
+            Events events;
+            for (int n = 0; n < 6; ++n) { // a note a block
+                if (all || n >= 2)
+                    events.note(CLAP_EVENT_NOTE_ON, 0, n, static_cast<int16_t>(60 + 3 * n), 1.0);
+                run.block(events, 64);
+                out.insert(out.end(), run.left.begin(), run.left.end());
+            }
+            if (limit)
+                setLimits(plugin, 4);
+            for (int b = 0; b < 6; ++b) {
+                run.block(events, 64);
+                out.insert(out.end(), run.left.begin(), run.left.end());
+                if (counts) {
+                    BudgetNotes notes(plugin);
+                    counts->push_back(activeVoices(plugin));
+                    counts->push_back(notes.count);
+                    counts->push_back(static_cast<uint32_t>(events.ends(0) + events.ends(1)));
+                    counts->push_back(static_cast<uint32_t>(events.ends(2) + events.ends(3) + events.ends(4) + events.ends(5)));
+                    if (b == 0)
+                        CHECK(notes.loudness(0) < notes.loudness(5) && notes.loudness(0) > 0.0f);
+                }
+            }
+            plugin->deactivate(plugin);
+            plugin->destroy(plugin);
+        };
+        std::vector<float> limited, kept, unlimited;
+        std::vector<uint32_t> counts;
+        render(true, true, limited, &counts);
+        render(false, false, kept, nullptr);
+        render(true, false, unlimited, nullptr);
+        const size_t at = 6 * 64; // the limit's block
+        // blocks 0 to 2 fade (144 frames): six voices counted and listed, no NOTE_END before the
+        // fade's block ends; then four, the two oldest ended once, the others not
+        const std::vector<uint32_t> expected { 6, 6, 0, 0, 6, 6, 0, 0, 4, 4, 2, 0, 4, 4, 2, 0, 4, 4, 2, 0, 4, 4, 2, 0 };
+        CHECK(counts == expected);
+        float diff = 0, level = 0, step = 0, ownStep = 0;
+        for (size_t i = at + 145; i < limited.size(); ++i) // gone after the fade
+            diff = std::max(diff, std::fabs(limited[i] - kept[i]));
+        CHECK(diff < 1e-6f);
+        for (size_t i = at; i < at + 145; ++i) {
+            level = std::max(level, std::fabs(unlimited[i]));
+            step = std::max(step, std::fabs(limited[i] - limited[i - 1]));
+            ownStep = std::max(ownStep, std::fabs(unlimited[i] - unlimited[i - 1]));
+        }
+        CHECK(step <= ownStep + level / 64); // no step beyond the notes' own
+        CHECK(std::fabs(limited[at + 10] - kept[at + 10]) > 1e-3f); // still fading, not cut
+        // until the limit, the render is the unlimited one
+        CHECK(limited.size() == unlimited.size() && std::equal(unlimited.begin(), unlimited.begin() + at, limited.begin()));
+    }
+    { // voice budget: the order: released before held, the quietest, the new note's own sound
+        auto* plugin = create();
+        auto* ctx = static_cast<const oscairn_plugin_sound_contexts_t*>(plugin->get_extension(plugin, OSCAIRN_EXT_SOUND_CONTEXTS));
+        CHECK(load(plugin, stateFor("<region> sample=*sine ampeg_release=2\n")));
+        CHECK(plugin->activate(plugin, 48000, 1, 64));
+        Run run { plugin };
+        Events events;
+        auto blocks = [&](int n) { for (int b = 0; b < n; ++b) run.block(events, 64); };
+        // a quiet held note, then a loud newer one released (its long release still sounding)
+        events.note(CLAP_EVENT_NOTE_ON, 0, 1, 60, 0.3);
+        blocks(2);
+        events.note(CLAP_EVENT_NOTE_ON, 0, 2, 64, 1.0);
+        blocks(2);
+        events.note(CLAP_EVENT_NOTE_OFF, 0, 2, 64, 0.0);
+        blocks(2);
+        setLimits(plugin, 1, { selectedEntry(0, 0, 5) });
+        blocks(4);
+        CHECK(events.ends(2) == 1 && events.ends(1) == 0);
+        CHECK(activeVoices(plugin) == 1);
+        // held notes: the quietest goes, not the oldest
+        setLimits(plugin, 0);
+        events.note(CLAP_EVENT_NOTE_CHOKE, 0, 1, 60, 0.0);
+        events.note(CLAP_EVENT_NOTE_ON, 0, 3, 67, 1.0);
+        blocks(2);
+        events.note(CLAP_EVENT_NOTE_ON, 0, 4, 71, 0.3);
+        blocks(2);
+        events.note(CLAP_EVENT_NOTE_ON, 0, 5, 74, 1.0);
+        blocks(2);
+        CHECK(events.ends(1) == 1 && activeVoices(plugin) == 3); // no limit: all three
+        setLimits(plugin, 2, { selectedEntry(0, 0, 5) });
+        blocks(4);
+        CHECK(events.ends(4) == 1 && events.ends(3) == 0 && events.ends(5) == 0);
+        // a new note gives up a voice of its own sound before another sound's quieter, older one
+        setLimits(plugin, 0);
+        char message[256] {};
+        const uint32_t other = ctx->prepare(plugin, "Other", nullptr, 0, "<region> sample=*sine ampeg_release=2", nullptr, message, sizeof(message));
+        CHECK(other != CLAP_INVALID_ID && ctx->select(plugin, other, 1));
+        events.note(CLAP_EVENT_NOTE_ON, 0, 6, 60, 0.3, 1); // the other sound
+        blocks(2);
+        setLimits(plugin, 3, { selectedEntry(0, 0, 5) });
+        events.note(CLAP_EVENT_NOTE_ON, 0, 7, 76, 1.0, 0); // the default sound
+        blocks(4);
+        CHECK(events.ends(3) == 1 && events.ends(5) == 0 && events.ends(6) == 0 && events.ends(7) == 0);
+        CHECK(activeVoices(plugin) == 3);
         plugin->deactivate(plugin);
         plugin->destroy(plugin);
     }

@@ -386,6 +386,18 @@ public:
     void fadeOut(int delay, int frames) noexcept;
 
     /**
+     * @brief Is the voice fading out (fadeOut)?
+     */
+    bool isFadingOut() const noexcept;
+
+    /**
+     * @brief The gain on the voice's last rendered frame: envelope, level, velocity,
+     *        crossfades, host gain and fade-out; before its first block, its level and
+     *        velocity gain.
+     */
+    float getLastGain() const noexcept;
+
+    /**
      * @brief gets the age of the Voice
      *
      * @return

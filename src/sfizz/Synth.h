@@ -691,6 +691,16 @@ public:
     void fadeOutNote(int delay, int noteNumber, int frames) noexcept;
 
     /**
+     * @brief Number of voice slots, the overflow voices included (for getVoiceSlot).
+     */
+    int getNumVoiceSlots() const noexcept;
+
+    /**
+     * @brief A voice slot, to inspect or fade out one voice (a host's voice budget).
+     */
+    Voice* getVoiceSlot(int idx) noexcept;
+
+    /**
      * @brief Add external definitions prior to loading.
      *
      */
