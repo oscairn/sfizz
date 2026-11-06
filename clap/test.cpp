@@ -508,6 +508,39 @@ int main(int argc, char** argv)
         CHECK(!snaps->prepare(plugin, &bad.in, selected, message, sizeof(message)));
         plugin->destroy(plugin);
     }
+    { // ring-out: a retiring context (selected by no channel) plays into the host's buffer
+      // during the next process() only
+        auto* plugin = create();
+        auto* ctx = static_cast<const oscairn_plugin_sound_contexts_t*>(plugin->get_extension(plugin, OSCAIRN_EXT_SOUND_CONTEXTS));
+        auto* snaps = static_cast<const oscairn_plugin_sound_snapshots_t*>(plugin->get_extension(plugin, OSCAIRN_EXT_SOUND_SNAPSHOTS));
+        CHECK(snaps && snaps->ring_out);
+        CHECK(load(plugin, stateFor(sine)));
+        Buffer saved;
+        CHECK(ctx->state->save(plugin, &saved.out));
+        uint32_t selected[16] {};
+        char message[256] {};
+        CHECK(snaps->prepare(plugin, &saved.in, selected, message, sizeof(message)));
+        CHECK(plugin->activate(plugin, 48000, 1, 256));
+        Run run { plugin };
+        Events events;
+        events.note(CLAP_EVENT_NOTE_ON, 0, 1, 69, 1.0); // held on the default context
+        run.block(events, 256);
+        CHECK(run.peak > 0.1f);
+        CHECK(ctx->select(plugin, selected[0], -1)); // every channel to the new sound
+        std::vector<float> ringL(256, 0.0f), ringR(256, 0.0f);
+        float* ringChannels[2] = { ringL.data(), ringR.data() };
+        clap_audio_buffer_t ring {};
+        ring.data32 = ringChannels;
+        ring.channel_count = 2;
+        snaps->ring_out(plugin, &ring);
+        run.block(events, 256);
+        CHECK(run.peak == 0.0f);
+        CHECK(*std::max_element(ringL.begin(), ringL.end()) > 0.1f);
+        run.block(events, 256); // no ring_out before this one: the main port again
+        CHECK(run.peak > 0.1f);
+        plugin->deactivate(plugin);
+        plugin->destroy(plugin);
+    }
     { // a fresh instance plays a sine
         auto* plugin = create();
         CHECK(plugin->activate(plugin, 48000, 1, 256));

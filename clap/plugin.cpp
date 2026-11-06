@@ -127,6 +127,7 @@ struct Plugin {
     std::atomic<uint32_t> selectionHead { 0 }, selectionTail { 0 };
 
     // Audio thread
+    const clap_audio_buffer_t* ringOut { nullptr }; // for the next process() only
     uint32_t channelContext[16] {};
     Note notes[maxNotes];
     size_t noteCount { 0 };
@@ -448,6 +449,11 @@ void reset(const clap_plugin_t* p)
 clap_process_status process(const clap_plugin_t* p, const clap_process_t* process)
 {
     auto& s = self(p);
+    // valid for this process() only
+    const clap_audio_buffer_t* ringOut = s.ringOut;
+    s.ringOut = nullptr;
+    if (ringOut && (ringOut->channel_count < 2 || !ringOut->data32))
+        ringOut = nullptr;
     if (process->audio_outputs_count < 1 || process->audio_outputs[0].channel_count < 2)
         return CLAP_PROCESS_ERROR;
     const clap_output_events_t* out = process->out_events;
@@ -493,9 +499,13 @@ clap_process_status process(const clap_plugin_t* p, const clap_process_t* proces
                 continue;
             float* buffers[2] = { s.left.data(), s.right.data() };
             c.engine->synth.renderBlock(sfz::AudioSpan<float>(buffers, 2, 0, n));
+            // a retiring context (selected by no channel) rings out into the host's buffer
+            const bool ring = ringOut && !c.selectedChannels.load(std::memory_order_acquire);
+            float* toLeft = ring ? ringOut->data32[0] + start : s.mixLeft.data();
+            float* toRight = ring ? ringOut->data32[1] + start : s.mixRight.data();
             for (uint32_t k = 0; k < n; ++k) {
-                s.mixLeft[k] += s.left[k];
-                s.mixRight[k] += s.right[k];
+                toLeft[k] += s.left[k];
+                toRight[k] += s.right[k];
             }
         }
         std::copy(s.mixLeft.begin(), s.mixLeft.begin() + n, outL + start);
@@ -932,7 +942,10 @@ bool snapshotPrepare(const clap_plugin_t* p, const clap_istream_t* stream, uint3
     return true;
 }
 
-const oscairn_plugin_sound_snapshots_t soundSnapshots { snapshotPrepare };
+// Called on the audio thread just before a process(): where retiring contexts ring out
+void snapshotRingOut(const clap_plugin_t* p, const clap_audio_buffer_t* buffer) { self(p).ringOut = buffer; }
+
+const oscairn_plugin_sound_snapshots_t soundSnapshots { snapshotPrepare, snapshotRingOut };
 
 const oscairn_plugin_sound_contexts_t soundContexts { contextCapacity, contextGet, contextPrepare, contextSelect, contextDiscard, &snapshot, nullptr };
 
