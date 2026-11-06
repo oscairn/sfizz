@@ -91,9 +91,11 @@ struct Context {
     bool prepared { false };
     uint32_t id { 0 };
     char name[64] {};
-    std::unique_ptr<Engine> engine;
+    std::unique_ptr<Engine> engine; // owned here; set through setEngine
     // Shared: the audio thread renders a context while any of these is set; the main thread
-    // frees it only when all are clear.
+    // frees it only when all are clear. It reads the engine through `live`, never `engine`:
+    // the main thread writes the pointer while it checks contexts it does not own.
+    std::atomic<Engine*> live { nullptr };
     std::atomic<uint32_t> selectedChannels { 0 }; // written by the audio thread
     std::atomic<uint32_t> queued { 0 };           // selections not yet applied
     std::atomic<uint32_t> sounding { 0 };         // notes or voices left, audio thread
@@ -241,6 +243,13 @@ std::unique_ptr<Engine> makeEngine(const Plugin& s, const Patch& patch, const os
 
 void collectRetired(Plugin& s) { delete s.retired.exchange(nullptr); }
 
+// Gives a context its engine (null for none); the old one is freed here
+void setEngine(Context& c, std::unique_ptr<Engine> e)
+{
+    c.live.store(e.get(), std::memory_order_release);
+    c.engine = std::move(e);
+}
+
 // Voices, held keys, controllers and the clock as in a fresh synth, so an instance played
 // before sounds as a fresh one (Oscairn's "second life"); allocation-free
 void clearPlayingState(sfz::Synth& synth)
@@ -268,7 +277,7 @@ void endFinishedNotes(Plugin& s, const clap_output_events_t* out, uint32_t time)
     size_t kept = 0;
     for (size_t i = 0; i < s.noteCount; ++i) {
         const Note& n = s.notes[i];
-        Engine* e = s.contexts[n.context].engine.get();
+        Engine* e = s.contexts[n.context].live.load(std::memory_order_relaxed);
         // a held key with a release region keeps its note, so its note-off still arrives
         if (!e || (e->synth.getNumActiveVoicesForNote(n.key) == 0 && (n.released || !e->releaseKeys[static_cast<size_t>(n.key)])))
             endNote(out, n, time);
@@ -289,11 +298,12 @@ void applySelections(Plugin& s)
             // choke fade; its notes no longer wait for a note-off
             for (uint32_t i = 0; i < contextCount; ++i) {
                 Context& c = s.contexts[i];
-                if (!c.engine || c.selectedChannels.load(std::memory_order_relaxed) || !c.sounding.load(std::memory_order_relaxed))
+                Engine* e = c.live.load(std::memory_order_relaxed);
+                if (!e || c.selectedChannels.load(std::memory_order_relaxed) || !c.sounding.load(std::memory_order_relaxed))
                     continue;
                 s.fading[i] = true;
                 for (int key = 0; key < 128; ++key)
-                    c.engine->synth.fadeOutNote(0, key, static_cast<int>(s.chokeFrames));
+                    e->synth.fadeOutNote(0, key, static_cast<int>(s.chokeFrames));
                 for (size_t n = 0; n < s.noteCount; ++n)
                     if (s.notes[n].context == i)
                         s.notes[n].released = true;
@@ -337,7 +347,7 @@ void applyEvent(Plugin& s, const clap_event_header_t* h, int delay)
             const uint32_t context = s.channelContext[n->channel];
             // A velocity-0 note-on stays a note-on (Oscairn RFC 0005); sfizz needs a velocity
             // above 0 to start a voice, so use the smallest one it distinguishes.
-            if (Engine* e = s.contexts[context].engine.get())
+            if (Engine* e = s.contexts[context].live.load(std::memory_order_relaxed))
                 e->synth.hdNoteOn(delay, n->key, std::max(velocity, 1.0f / 127.0f));
             if (s.noteCount < maxNotes)
                 s.notes[s.noteCount++] = { n->note_id, n->channel, n->key, context, false };
@@ -346,7 +356,7 @@ void applyEvent(Plugin& s, const clap_event_header_t* h, int delay)
         // Note-off and choke address the notes they match, in the context each started in
         for (size_t i = 0; i < s.noteCount; ++i) {
             Note& note = s.notes[i];
-            Engine* e = s.contexts[note.context].engine.get();
+            Engine* e = s.contexts[note.context].live.load(std::memory_order_relaxed);
             if (!e || note.released || !matches(note, n->note_id, n->channel, n->key))
                 continue;
             note.released = true;
@@ -364,7 +374,7 @@ void applyEvent(Plugin& s, const clap_event_header_t* h, int delay)
         const float gain = static_cast<float>(std::min(4.0, std::max(x->value, 0.0)));
         for (size_t i = 0; i < s.noteCount; ++i) {
             const Note& note = s.notes[i];
-            if (Engine* e = s.contexts[note.context].engine.get())
+            if (Engine* e = s.contexts[note.context].live.load(std::memory_order_relaxed))
                 if (matches(note, x->note_id, x->channel, x->key))
                     e->synth.setNoteGain(note.key, gain);
         }
@@ -387,7 +397,7 @@ void applyEvent(Plugin& s, const clap_event_header_t* h, int delay)
             applyEvent(s, &n.header, delay);
             return;
         }
-        Engine* e = s.contexts[s.channelContext[channel]].engine.get();
+        Engine* e = s.contexts[s.channelContext[channel]].live.load(std::memory_order_relaxed);
         if (!e)
             return;
         switch (kind) {
@@ -414,7 +424,7 @@ bool init(const clap_plugin_t* p)
     std::string message;
     Context& c = s.contexts[0];
     s.patch.text = "<region> sample=*sine\n"; // a fresh instance plays something
-    c.engine = makeEngine(s, s.patch, nullptr, message);
+    setEngine(c, makeEngine(s, s.patch, nullptr, message));
     c.prepared = true;
     std::snprintf(c.name, sizeof(c.name), "%s", "Default");
     c.selectedChannels = 0xffff;
@@ -454,7 +464,7 @@ void deactivate(const clap_plugin_t* p)
     if (Engine* e = s.pendingDefault.exchange(nullptr)) {
         collectRetired(s);
         s.retired.store(s.contexts[0].engine.release());
-        s.contexts[0].engine.reset(e);
+        setEngine(s.contexts[0], std::unique_ptr<Engine>(e));
     }
     collectRetired(s);
     for (auto& c : s.contexts) {
@@ -474,8 +484,8 @@ void reset(const clap_plugin_t* p)
     auto& s = self(p);
     // Only the contexts the audio thread owns; the main thread may be replacing the others
     for (auto& c : s.contexts)
-        if ((c.selectedChannels.load(std::memory_order_acquire) || c.sounding.load()) && c.engine)
-            clearPlayingState(c.engine->synth);
+        if (Engine* e = (c.selectedChannels.load(std::memory_order_acquire) || c.sounding.load()) ? c.live.load(std::memory_order_relaxed) : nullptr)
+            clearPlayingState(e->synth);
 }
 
 clap_process_status process(const clap_plugin_t* p, const clap_process_t* process)
@@ -502,7 +512,7 @@ clap_process_status process(const clap_plugin_t* p, const clap_process_t* proces
             }
             s.noteCount = kept;
             s.retired.store(s.contexts[0].engine.release(), std::memory_order_release);
-            s.contexts[0].engine.reset(next);
+            setEngine(s.contexts[0], std::unique_ptr<Engine>(next));
             if (s.host->request_callback)
                 s.host->request_callback(s.host);
         }
@@ -526,11 +536,12 @@ clap_process_status process(const clap_plugin_t* p, const clap_process_t* proces
         std::fill(s.mixRight.begin(), s.mixRight.begin() + n, 0.0f);
         for (uint32_t i = 0; i < contextCount; ++i) {
             Context& c = s.contexts[i];
-            // Check the flags before the engine: an unused context's engine may be freed
-            if ((!c.selectedChannels.load(std::memory_order_acquire) && !c.sounding.load(std::memory_order_relaxed)) || !c.engine)
+            Engine* e = (c.selectedChannels.load(std::memory_order_acquire) || c.sounding.load(std::memory_order_relaxed))
+                ? c.live.load(std::memory_order_relaxed) : nullptr;
+            if (!e)
                 continue;
             float* buffers[2] = { s.left.data(), s.right.data() };
-            c.engine->synth.renderBlock(sfz::AudioSpan<float>(buffers, 2, 0, n));
+            e->synth.renderBlock(sfz::AudioSpan<float>(buffers, 2, 0, n));
             // a retiring context (selected by no channel) rings out into the host's buffer:
             // channels 0 and 1, or 2 and 3 while a choke fades it
             const bool ring = ringOut && !c.selectedChannels.load(std::memory_order_acquire);
@@ -558,7 +569,8 @@ clap_process_status process(const clap_plugin_t* p, const clap_process_t* proces
         const bool rendered = c.selectedChannels.load(std::memory_order_acquire) || c.sounding.load(std::memory_order_relaxed);
         if (!rendered && !notesPerContext[i])
             continue;
-        const bool sounding = notesPerContext[i] > 0 || (c.engine && c.engine->synth.getNumActiveVoices() > 0);
+        Engine* e = c.live.load(std::memory_order_relaxed);
+        const bool sounding = notesPerContext[i] > 0 || (e && e->synth.getNumActiveVoices() > 0);
         c.sounding.store(sounding ? 1 : 0, std::memory_order_release);
         if (!sounding)
             s.fading[i] = false;
@@ -710,7 +722,7 @@ bool stateLoad(const clap_plugin_t* p, const clap_istream_t* stream)
     if (s.active)
         delete s.pendingDefault.exchange(e.release()); // replaces one the audio thread never took
     else
-        s.contexts[0].engine = std::move(e);
+        setEngine(s.contexts[0], std::move(e));
     return true;
 }
 
@@ -765,7 +777,7 @@ uint32_t contextPrepare(const clap_plugin_t* p, const char* name, const oscairn_
     auto e = makeEngine(s, patch, base, why);
     if (!e)
         return fail(why);
-    slot->engine = std::move(e);
+    setEngine(*slot, std::move(e));
     slot->id = s.nextId++;
     std::snprintf(slot->name, sizeof(slot->name), "%s", name ? name : "");
     slot->prepared = true;
@@ -807,7 +819,7 @@ bool contextDiscard(const clap_plugin_t* p, uint32_t id)
             || c.sounding.load(std::memory_order_acquire))
             return false;
         c.prepared = false;
-        c.engine.reset();
+        setEngine(c, nullptr);
         return true;
     }
     return false;
@@ -914,7 +926,7 @@ bool snapshotLoad(const clap_plugin_t* p, const clap_istream_t* stream)
     s.patch = patches[0];
     for (uint32_t i = 0; i < contextCount; ++i) {
         Context& c = s.contexts[i];
-        c.engine = std::move(engines[i]);
+        setEngine(c, std::move(engines[i]));
         c.prepared = used[i];
         c.id = !used[i] || i == 0 ? 0 : s.nextId++;
         std::snprintf(c.name, sizeof(c.name), "%s", used[i] ? names[i].c_str() : "");
@@ -968,7 +980,7 @@ bool snapshotPrepare(const clap_plugin_t* p, const clap_istream_t* stream, uint3
         if (!parsed.used[i])
             continue;
         Context& c = s.contexts[slotFor[i]];
-        c.engine = std::move(engines[i]);
+        setEngine(c, std::move(engines[i]));
         c.id = s.nextId++;
         std::snprintf(c.name, sizeof(c.name), "%s", parsed.names[i].c_str());
         c.prepared = true;
