@@ -1441,3 +1441,32 @@ TEST_CASE("[Oscairn] Chokes and polyphony limits end an element voice at the off
         REQUIRE(synth.getNumActiveVoices() == 1);
     }
 }
+
+TEST_CASE("[Oscairn] Element filter stays finite below the reference rate")
+{
+    // Below 44.1 kHz the allpass delay cannot be pinned (its points lie above Nyquist) and
+    // went unstable; such rates run the plain 44.1 kHz sections instead: the response is
+    // off, the output finite
+    for (double rate : { 22050.0, 32000.0 }) {
+        for (int type : { 0, 2, 4, 10, 14, 19 }) {
+            for (int cutoff : { 0, 512, 1023 }) {
+                sfz::oscairn::ElementFilterParameters p;
+                p.type = type;
+                p.cutoff = cutoff;
+                p.resonance = 127;
+                sfz::oscairn::ElementFilter filter;
+                filter.setSampleRate(rate);
+                filter.start(p, 127);
+                std::vector<float> left(4096, 0.0f), right(4096, 0.0f);
+                left[0] = right[0] = 1.0f;
+                filter.process(absl::MakeSpan(left), absl::MakeSpan(right), {});
+                float peak = 0.0f;
+                for (float x : left)
+                    peak = std::max(peak, std::fabs(x));
+                INFO("rate " << rate << " type " << type << " cutoff " << cutoff);
+                REQUIRE(std::isfinite(peak));
+                REQUIRE(peak < 1e3f);
+            }
+        }
+    }
+}

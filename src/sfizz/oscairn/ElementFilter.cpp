@@ -164,6 +164,13 @@ void ElementFilter::setSampleRate(double sampleRate) noexcept
     // (more would need a higher order to stay accurate) and the rest is a delay line
     delay_ = allpass_ ? std::max(0, static_cast<int>(std::floor(r)) - 2) : static_cast<int>(whole);
     delay_ = std::min(delay_, kMaxDelay - 1);
+    if (r < 1.0) {
+        // shortcut: below 44.1 kHz the allpass's pin points lie above Nyquist and it went
+        // unstable; such rates run the plain 44.1 kHz sections (cutoffs scaled by the rate),
+        // design for them if they are ever used
+        allpass_ = false;
+        delay_ = 1;
+    }
     // shortcut: rates above 16 x 44.1 kHz keep a 15-sample delay line and drift from the
     // 44.1 kHz response; raise kMaxDelay if such rates are ever used
     const double theta = 2.0 * kPi * 18000.0 / kReferenceRate;
