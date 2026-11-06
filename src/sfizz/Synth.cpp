@@ -1096,6 +1096,11 @@ void Synth::setSampleRate(float sampleRate) noexcept
 
 void Synth::renderBlock(AudioSpan<float> buffer) noexcept
 {
+    renderBlock(buffer, nullptr, 0);
+}
+
+void Synth::renderBlock(AudioSpan<float> buffer, float* const* busChannels, int numBuses) noexcept
+{
     Impl& impl = *impl_;
     ScopedFTZ ftz;
     auto& callbackBreakdown = impl.callbackBreakdown_;
@@ -1176,11 +1181,18 @@ void Synth::renderBlock(AudioSpan<float> buffer) noexcept
             const auto& effectBuses = impl.getEffectBusesForOutput(region->output);
 
             voice.renderBlock(*tempSpan);
-            for (size_t i = 0, n = effectBuses.size(); i < n; ++i) {
+            const int hostBus = voice.getHostBus();
+            const bool elsewhere = hostBus != impl.hostBus_ && hostBus >= 0 && hostBus < numBuses;
+            for (size_t i = elsewhere ? 1 : 0, n = effectBuses.size(); i < n; ++i) {
                 if (auto& bus = effectBuses[i]) {
                     float addGain = region->getGainToEffectBus(i);
                     bus->addToInputs(*tempSpan, addGain, numFrames);
                 }
+            }
+            if (elsewhere) {
+                const float gain = region->getGainToEffectBus(0) * db2mag(impl.volume_);
+                for (int c = 0; c < 2; ++c)
+                    multiplyAdd1(gain, tempSpan->getConstSpan(c), absl::Span<float>(busChannels[2 * hostBus + c], numFrames));
             }
             callbackBreakdown.data += voice.getLastDataDuration();
             callbackBreakdown.amplitude += voice.getLastAmplitudeDuration();
@@ -1311,6 +1323,7 @@ void Synth::Impl::startVoice(Layer* layer, int delay, const TriggerEvent& trigge
         return;
 
     selectedVoice->reset();
+    selectedVoice->setHostBus(hostBus_);
     if (selectedVoice->startVoice(layer, delay, triggerEvent))
         ring.addVoiceToRing(selectedVoice);
 }
@@ -1873,6 +1886,11 @@ Voice* Synth::getVoiceSlot(int idx) noexcept
 {
     Impl& impl = *impl_;
     return idx >= 0 && idx < getNumVoiceSlots() ? &impl.voiceManager_[idx] : nullptr;
+}
+
+void Synth::setHostBus(int bus) noexcept
+{
+    impl_->hostBus_ = bus;
 }
 
 const Voice* Synth::getVoiceView(int idx) const noexcept

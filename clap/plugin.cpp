@@ -22,19 +22,27 @@
 // choke time in the SDK's order (voice-budget-plugin.hpp), at the start of a block and when a
 // note starts voices; sfizz's own polyphony limits act as before. Without limits nothing changes.
 //
+// Buses: Main and a sound bus for each of the eight sounds (Oscairn's parts sharing one instance,
+// RFC 0021). One parameter, Output bus (oscairn.ui's output bus role), is each sound's: an event on
+// a channel sets the bus of the sound that channel selects, one without a channel every selected
+// sound's, from the start of the block it arrives in. A voice keeps the bus it started on. While a
+// sound rings out (oscairn.sound-snapshots), only what it plays on Main goes to the host's buffer.
+//
 // Files: with the host's oscairn.assets, every sample a patch uses is resolved through the
 // host, and oscairn.asset-dependencies lists them; without it, paths resolve from the
 // patch's directory.
 //
-// State (version 2; version 1, without the two base fields, still loads): UTF-8 text,
-//   oscairn-sfizz-2\n
-// then four fields, each its byte length in decimal, \n, the bytes, \n:
+// State (version 3; versions 1 and 2, without the bus or the two base fields, still load): UTF-8
+// text,
+//   oscairn-sfizz-3\n
+// then five fields, each its byte length in decimal, \n, the bytes, \n:
 //   directory   - local folder relative sample paths resolve from when no base is given
 //                 (or when the host offers no oscairn.assets); may be empty
 //   library     - base asset reference: library name (under 64 bytes); empty for none
 //   path        - base asset reference: folder inside the library (under 1024 bytes,
 //                 may be empty for the library's root)
 //   patch       - the SFZ text
+//   bus         - the output bus, one digit (0 for Main)
 // With a base, every sample= path (relative, no "..", after default_path) is resolved through
 // the host as the asset <library>/<path>/<sample path> and listed in
 // oscairn.asset-dependencies; a sample the host cannot resolve fails the state load.
@@ -52,6 +60,7 @@
 #include "sfizz/parser/ParserListener.h"
 #include <oscairn-clap/assets.h>
 #include <oscairn-clap/sound-contexts.h>
+#include <oscairn-clap/ui.h>
 
 #include <algorithm>
 #include <atomic>
@@ -66,14 +75,19 @@
 
 namespace {
 
-constexpr const char* stateVersion = "oscairn-sfizz-2";
+constexpr const char* stateVersion = "oscairn-sfizz-3";
+constexpr const char* stateVersion2 = "oscairn-sfizz-2";
 constexpr const char* stateVersion1 = "oscairn-sfizz-1";
 constexpr size_t maxStateBytes = 64 << 20;
 constexpr size_t maxNotes = 256;
 constexpr uint32_t contextCount = 8;
+constexpr uint32_t busCount = contextCount + 1; // Main and a sound bus per sound
+constexpr clap_id busParam = 1;
+constexpr const char* freshPatch = "<region> sample=*sine\n"; // a fresh instance plays something
 constexpr uint32_t selectionCapacity = 32;
 constexpr int16_t chokeMark = -2; // a queued choke_retiring, in place of a channel
 constexpr size_t maxSlots = sfz::config::maxVoices; // voice slots a synth has at most
+static_assert(busCount <= 10, "a bus is saved as one digit");
 static_assert(contextCount * maxSlots <= oscairn_sfizz::maxBudgetVoices && maxNotes <= oscairn_sfizz::maxBudgetNotes, "budget.h");
 
 struct Patch {
@@ -81,6 +95,7 @@ struct Patch {
     std::string library;   // base asset reference for host-resolved samples (empty: none)
     std::string basePath;
     std::string text;      // SFZ
+    uint32_t bus { 0 };    // as read from a state or snapshot; the playing one is Context::bus
 };
 
 struct Engine {
@@ -111,6 +126,7 @@ struct Context {
     std::atomic<uint32_t> selectedChannels { 0 }; // written by the audio thread
     std::atomic<uint32_t> queued { 0 };           // selections not yet applied
     std::atomic<uint32_t> sounding { 0 };         // notes or voices left, audio thread
+    std::atomic<uint32_t> bus { 0 };              // the output bus new voices take
 };
 
 struct Selection {
@@ -152,9 +168,10 @@ struct Plugin {
     const clap_audio_buffer_t* ringOut { nullptr }; // for the next process() only
     bool fading[contextCount] {}; // choked by choke_retiring: rings out into channels 2 and 3
     uint32_t channelContext[16] {};
+    uint32_t busesInUse[contextCount] {}; // buses a context's voices may be on: its own, and older ones until it is silent
     Note notes[maxNotes];
     size_t noteCount { 0 };
-    std::vector<float> left, right, mixLeft, mixRight;
+    std::vector<float> left, right, mix[2 * busCount];
     oscairn_sfizz::VoiceBudget budget; // the host's limits, as set_limits last gave them
     BudgetVoice budgetVoices[contextCount * maxSlots];
 };
@@ -420,6 +437,21 @@ void keepWithinLimits(Plugin& s, uint32_t incoming, int delay)
     }
 }
 
+// An Output bus event: the bus of the sound its channel selects, or of every selected sound
+void applyParam(Plugin& s, const clap_event_header_t* h)
+{
+    if (h->space_id != CLAP_CORE_EVENT_SPACE_ID || h->type != CLAP_EVENT_PARAM_VALUE)
+        return;
+    const auto* e = reinterpret_cast<const clap_event_param_value_t*>(h);
+    if (e->param_id != busParam || e->note_id >= 0 || e->key >= 0 || e->port_index > 0 || e->channel < -1 || e->channel > 15
+        || !std::isfinite(e->value))
+        return;
+    const auto bus = static_cast<uint32_t>(std::lround(std::min(std::max(e->value, 0.0), double(busCount - 1))));
+    for (int ch = 0; ch < 16; ++ch)
+        if (e->channel < 0 || e->channel == ch)
+            s.contexts[s.channelContext[ch]].bus.store(bus, std::memory_order_relaxed);
+}
+
 bool matches(const Note& note, int32_t id, int16_t channel, int16_t key)
 {
     return (id < 0 || note.id == id) && (channel < 0 || note.channel == channel) && (key < 0 || note.key == key);
@@ -522,7 +554,7 @@ bool init(const clap_plugin_t* p)
         s.assets = static_cast<const oscairn_host_assets_t*>(s.host->get_extension(s.host, OSCAIRN_EXT_ASSETS));
     std::string message;
     Context& c = s.contexts[0];
-    s.patch.text = "<region> sample=*sine\n"; // a fresh instance plays something
+    s.patch.text = freshPatch;
     setEngine(c, makeEngine(s, s.patch, nullptr, message));
     c.prepared = true;
     std::snprintf(c.name, sizeof(c.name), "%s", "Default");
@@ -545,8 +577,10 @@ bool activate(const clap_plugin_t* p, double rate, uint32_t, uint32_t maxFrames)
     s.maxFrames = std::max<uint32_t>(1, maxFrames);
     // A choke fades over 3 ms (Oscairn RFC 0018)
     s.chokeFrames = std::max<uint32_t>(1, static_cast<uint32_t>(rate * 0.003 + 0.5));
-    for (auto* v : { &s.left, &s.right, &s.mixLeft, &s.mixRight })
-        v->assign(s.maxFrames, 0.0f);
+    s.left.assign(s.maxFrames, 0.0f);
+    s.right.assign(s.maxFrames, 0.0f);
+    for (auto& v : s.mix)
+        v.assign(s.maxFrames, 0.0f);
     for (auto& c : s.contexts)
         if (c.engine) {
             configure(s, c.engine->synth);
@@ -617,12 +651,30 @@ clap_process_status process(const clap_plugin_t* p, const clap_process_t* proces
         }
     }
     applySelections(s);
-    keepWithinLimits(s, contextCount, 0); // past limits the host lowered
-
-    float* outL = process->audio_outputs[0].data32[0];
-    float* outR = process->audio_outputs[0].data32[1];
     const uint32_t frames = process->frames_count;
     const uint32_t count = process->in_events->size(process->in_events);
+    // Output buses change at the block's start: the voices started from then on take the new one
+    for (uint32_t i = 0; i < count; ++i)
+        applyParam(s, process->in_events->get(process->in_events, i));
+    uint32_t hostBus[contextCount] {}, used = 1; // buses something may play on; Main always written
+    for (uint32_t i = 0; i < contextCount; ++i)
+        if (Engine* e = rendered(s, i)) {
+            hostBus[i] = s.contexts[i].bus.load(std::memory_order_relaxed);
+            e->synth.setHostBus(static_cast<int>(hostBus[i]));
+            used |= s.busesInUse[i] |= 1u << hostBus[i];
+        }
+    keepWithinLimits(s, contextCount, 0); // past limits the host lowered
+
+    const uint32_t ports = std::min(busCount, process->audio_outputs_count);
+    auto port = [&](uint32_t b) {
+        const clap_audio_buffer_t& o = process->audio_outputs[b];
+        return o.channel_count >= 2 && o.data32 && o.data32[0] && o.data32[1];
+    };
+    for (uint32_t b = 1; b < ports; ++b)
+        if (!(used >> b & 1) && port(b)) { // silent, and nothing rendered for it
+            std::fill(process->audio_outputs[b].data32[0], process->audio_outputs[b].data32[0] + frames, 0.0f);
+            std::fill(process->audio_outputs[b].data32[1], process->audio_outputs[b].data32[1] + frames, 0.0f);
+        }
     uint32_t e = 0;
     for (uint32_t start = 0; start < frames; start += s.maxFrames) {
         const uint32_t n = std::min(s.maxFrames, frames - start);
@@ -632,29 +684,42 @@ clap_process_status process(const clap_plugin_t* p, const clap_process_t* proces
                 break;
             applyEvent(s, h, static_cast<int>(h->time >= start ? h->time - start : 0));
         }
-        std::fill(s.mixLeft.begin(), s.mixLeft.begin() + n, 0.0f);
-        std::fill(s.mixRight.begin(), s.mixRight.begin() + n, 0.0f);
+        for (uint32_t b = 0; b < busCount; ++b)
+            if (used >> b & 1) {
+                std::fill(s.mix[2 * b].begin(), s.mix[2 * b].begin() + n, 0.0f);
+                std::fill(s.mix[2 * b + 1].begin(), s.mix[2 * b + 1].begin() + n, 0.0f);
+            }
         for (uint32_t i = 0; i < contextCount; ++i) {
             Context& c = s.contexts[i];
             Engine* e = (c.selectedChannels.load(std::memory_order_acquire) || c.sounding.load(std::memory_order_relaxed))
                 ? c.live.load(std::memory_order_relaxed) : nullptr;
             if (!e)
                 continue;
+            float* to[2 * busCount];
+            for (uint32_t k = 0; k < 2 * busCount; ++k)
+                to[k] = s.mix[k].data();
+            // a retiring context (selected by no channel) rings out what it plays on Main into
+            // the host's buffer: channels 0 and 1, or 2 and 3 while a choke fades it
+            if (ringOut && !c.selectedChannels.load(std::memory_order_acquire)) {
+                const uint32_t pair = s.fading[i] ? 2 : 0;
+                to[0] = ringOut->data32[pair] + start;
+                to[1] = ringOut->data32[pair + 1] + start;
+            }
             float* buffers[2] = { s.left.data(), s.right.data() };
-            e->synth.renderBlock(sfz::AudioSpan<float>(buffers, 2, 0, n));
-            // a retiring context (selected by no channel) rings out into the host's buffer:
-            // channels 0 and 1, or 2 and 3 while a choke fades it
-            const bool ring = ringOut && !c.selectedChannels.load(std::memory_order_acquire);
-            const uint32_t pair = s.fading[i] ? 2 : 0;
-            float* toLeft = ring ? ringOut->data32[pair] + start : s.mixLeft.data();
-            float* toRight = ring ? ringOut->data32[pair + 1] + start : s.mixRight.data();
+            // voices on an older bus than the context's play into it (only buses in busesInUse)
+            e->synth.renderBlock(sfz::AudioSpan<float>(buffers, 2, 0, n), to, static_cast<int>(busCount));
+            float* toLeft = to[2 * hostBus[i]];
+            float* toRight = to[2 * hostBus[i] + 1];
             for (uint32_t k = 0; k < n; ++k) {
                 toLeft[k] += s.left[k];
                 toRight[k] += s.right[k];
             }
         }
-        std::copy(s.mixLeft.begin(), s.mixLeft.begin() + n, outL + start);
-        std::copy(s.mixRight.begin(), s.mixRight.begin() + n, outR + start);
+        for (uint32_t b = 0; b < ports; ++b)
+            if ((used >> b & 1) && port(b)) {
+                std::copy(s.mix[2 * b].begin(), s.mix[2 * b].begin() + n, process->audio_outputs[b].data32[0] + start);
+                std::copy(s.mix[2 * b + 1].begin(), s.mix[2 * b + 1].begin() + n, process->audio_outputs[b].data32[1] + start);
+            }
     }
     for (; e < count; ++e)
         applyEvent(s, process->in_events->get(process->in_events, e), 0);
@@ -672,8 +737,10 @@ clap_process_status process(const clap_plugin_t* p, const clap_process_t* proces
         Engine* e = c.live.load(std::memory_order_relaxed);
         const bool sounding = notesPerContext[i] > 0 || (e && e->synth.getNumActiveVoices() > 0);
         c.sounding.store(sounding ? 1 : 0, std::memory_order_release);
-        if (!sounding)
+        if (!sounding) {
             s.fading[i] = false;
+            s.busesInUse[i] = 0; // no voice left on an older bus
+        }
         anySound = anySound || sounding;
     }
     return anySound ? CLAP_PROCESS_CONTINUE : CLAP_PROCESS_SLEEP;
@@ -683,16 +750,19 @@ void onMainThread(const clap_plugin_t* p) { collectRetired(self(p)); }
 
 // Audio ports
 
-uint32_t audioPortCount(const clap_plugin_t*, bool isInput) { return isInput ? 0 : 1; }
+uint32_t audioPortCount(const clap_plugin_t*, bool isInput) { return isInput ? 0 : busCount; }
 
 bool audioPortGet(const clap_plugin_t*, uint32_t index, bool isInput, clap_audio_port_info_t* info)
 {
-    if (isInput || index != 0)
+    if (isInput || index >= busCount)
         return false;
     *info = {};
-    info->id = 0;
-    std::snprintf(info->name, sizeof(info->name), "%s", "Main");
-    info->flags = CLAP_AUDIO_PORT_IS_MAIN;
+    info->id = index;
+    if (index == 0)
+        std::snprintf(info->name, sizeof(info->name), "%s", "Main");
+    else
+        std::snprintf(info->name, sizeof(info->name), "Sound bus %u", index);
+    info->flags = index == 0 ? CLAP_AUDIO_PORT_IS_MAIN : 0;
     info->channel_count = 2;
     info->port_type = CLAP_PORT_STEREO;
     info->in_place_pair = CLAP_INVALID_ID;
@@ -719,8 +789,7 @@ bool notePortGet(const clap_plugin_t*, uint32_t index, bool isInput, clap_note_p
 
 const clap_plugin_note_ports_t notePorts { notePortCount, notePortGet };
 
-// State: a version line, then the directory and the SFZ text of context 0, each as a length
-// line and the bytes.
+// State: a version line, then context 0's fields, each as a length line and the bytes.
 
 bool writeAll(const clap_ostream_t* stream, const std::string& data)
 {
@@ -733,11 +802,23 @@ bool writeAll(const clap_ostream_t* stream, const std::string& data)
     return true;
 }
 
+std::string busField(uint32_t bus) { return std::string(1, static_cast<char>('0' + bus)); }
+
+bool parseBus(const std::string& field, uint32_t& bus)
+{
+    if (field.size() != 1 || field[0] < '0' || field[0] >= static_cast<char>('0' + busCount))
+        return false;
+    bus = static_cast<uint32_t>(field[0] - '0');
+    return true;
+}
+
 bool stateSave(const clap_plugin_t* p, const clap_ostream_t* stream)
 {
-    const Patch& patch = self(p).patch;
+    auto& s = self(p);
+    const Patch& patch = s.patch;
+    const std::string bus = busField(s.contexts[0].bus.load(std::memory_order_relaxed));
     std::string data = std::string(stateVersion) + "\n";
-    for (const std::string* f : { &patch.directory, &patch.library, &patch.basePath, &patch.text })
+    for (const std::string* f : { &patch.directory, &patch.library, &patch.basePath, &patch.text, &bus })
         data += std::to_string(f->size()) + "\n" + *f + "\n";
     return writeAll(stream, data);
 }
@@ -774,20 +855,22 @@ bool readAll(const clap_istream_t* stream, std::string& data)
     }
 }
 
-// A version 1 or 2 state: context 0's patch
+// A version 1, 2 or 3 state: context 0's patch
 bool parsePatchState(const std::string& data, Patch& patch)
 {
-    const std::string header = std::string(stateVersion) + "\n";
-    const std::string header1 = std::string(stateVersion1) + "\n";
-    const bool v1 = data.compare(0, header1.size(), header1) == 0;
-    if (!v1 && data.compare(0, header.size(), header) != 0)
+    auto starts = [&](const char* version) { return data.compare(0, std::strlen(version) + 1, std::string(version) + "\n") == 0; };
+    const int version = starts(stateVersion) ? 3 : starts(stateVersion2) ? 2 : starts(stateVersion1) ? 1 : 0;
+    if (!version)
         return false;
-    size_t at = v1 ? header1.size() : header.size();
+    size_t at = std::strlen(stateVersion) + 1; // the three are the same length
+    std::string bus;
     if (!readField(data, at, patch.directory))
         return false;
-    if (!v1 && (!readField(data, at, patch.library) || !readField(data, at, patch.basePath)))
+    if (version > 1 && (!readField(data, at, patch.library) || !readField(data, at, patch.basePath)))
         return false;
-    return readField(data, at, patch.text) && at == data.size();
+    if (!readField(data, at, patch.text) || (version > 2 && (!readField(data, at, bus) || !parseBus(bus, patch.bus))))
+        return false;
+    return at == data.size();
 }
 
 // An engine for a saved patch, its base (if any) taken from the patch's fields
@@ -819,6 +902,7 @@ bool stateLoad(const clap_plugin_t* p, const clap_istream_t* stream)
         return false;
     collectRetired(s);
     s.patch = patch;
+    s.contexts[0].bus.store(patch.bus, std::memory_order_relaxed);
     if (s.active)
         delete s.pendingDefault.exchange(e.release()); // replaces one the audio thread never took
     else
@@ -848,7 +932,8 @@ bool contextGet(const clap_plugin_t* p, uint32_t slot, oscairn_sound_context_inf
     return true;
 }
 
-uint32_t contextPrepare(const clap_plugin_t* p, const char* name, const oscairn_sound_parameter_t*, uint32_t count,
+// A sound from its patch (none: a fresh instance's sine), with its output bus as its one parameter
+uint32_t contextPrepare(const clap_plugin_t* p, const char* name, const oscairn_sound_parameter_t* parameters, uint32_t count,
                         const char* patchText, const oscairn_asset_ref_t* base, char* message, uint32_t capacity)
 {
     auto& s = self(p);
@@ -857,10 +942,15 @@ uint32_t contextPrepare(const clap_plugin_t* p, const char* name, const oscairn_
             std::snprintf(message, capacity, "%s", why.c_str());
         return CLAP_INVALID_ID;
     };
-    if (count)
-        return fail("this plugin has no parameters");
+    uint32_t bus = 0;
+    for (uint32_t i = 0; i < count; ++i) {
+        if (!parameters || parameters[i].id != busParam || !(parameters[i].value >= 0 && parameters[i].value < busCount)
+            || parameters[i].value != std::floor(parameters[i].value))
+            return fail("the only parameter is the output bus, 0 to 8");
+        bus = static_cast<uint32_t>(parameters[i].value);
+    }
     if (!patchText)
-        return fail("a patch is required");
+        base = nullptr;
     Context* slot = nullptr;
     for (uint32_t i = 1; i < contextCount && !slot; ++i)
         if (!s.contexts[i].prepared)
@@ -868,7 +958,7 @@ uint32_t contextPrepare(const clap_plugin_t* p, const char* name, const oscairn_
     if (!slot || s.nextId == CLAP_INVALID_ID)
         return fail("no free sound context");
     Patch patch;
-    patch.text = patchText;
+    patch.text = patchText ? patchText : freshPatch;
     if (base) { // kept for the snapshot
         patch.library.assign(base->library, strnlen(base->library, sizeof(base->library)));
         patch.basePath.assign(base->path, strnlen(base->path, sizeof(base->path)));
@@ -878,6 +968,7 @@ uint32_t contextPrepare(const clap_plugin_t* p, const char* name, const oscairn_
     if (!e)
         return fail(why);
     e->id = s.nextId;
+    slot->bus.store(bus, std::memory_order_relaxed);
     setEngine(*slot, std::move(e));
     slot->id = s.nextId++;
     std::snprintf(slot->name, sizeof(slot->name), "%s", name ? name : "");
@@ -926,15 +1017,15 @@ bool contextDiscard(const clap_plugin_t* p, uint32_t id)
     return false;
 }
 
-// Sound-context snapshot (the host stops processing first): every prepared context's name and
-// patch, and each channel's context with the queued selections applied. Text, like the state:
-//   oscairn-sfizz-contexts-1\n
-// then for each of the eight slots six fields (as in the state: decimal length, \n, bytes, \n):
-// "1" or empty for a free slot, name, directory, library, path, patch; then one field of 16
-// digits, the slot each MIDI channel plays. Slot 0 is the default context (the state's patch).
-// Loading builds every engine before replacing any; contexts other than 0 get fresh IDs. A
-// version 1 or 2 state loads too, as context 0 alone.
-constexpr const char* snapshotVersion = "oscairn-sfizz-contexts-1";
+// Sound-context snapshot (the host stops processing first): every prepared context's name, patch
+// and bus, and each channel's context with the queued selections applied. Text, like the state:
+//   oscairn-sfizz-contexts-2\n
+// then for each of the eight slots seven fields (as in the state: decimal length, \n, bytes, \n):
+// "1" or empty for a free slot, name, directory, library, path, patch, output bus (one digit; 0
+// for a free slot); then one field of 16 digits, the slot each MIDI channel plays. Slot 0 is the
+// default context (the state's patch). Loading builds every engine before replacing any; contexts
+// other than 0 get fresh IDs. A version 1, 2 or 3 state loads too, as context 0 alone.
+constexpr const char* snapshotVersion = "oscairn-sfizz-contexts-2";
 
 bool snapshotSave(const clap_plugin_t* p, const clap_ostream_t* stream)
 {
@@ -958,6 +1049,7 @@ bool snapshotSave(const clap_plugin_t* p, const clap_ostream_t* stream)
         field(used ? std::string(c.name, strnlen(c.name, sizeof(c.name))) : "");
         for (const std::string* f : { &patch.directory, &patch.library, &patch.basePath, &patch.text })
             field(*f);
+        field(busField(used ? c.bus.load(std::memory_order_relaxed) : 0));
     }
     std::string digits;
     for (uint32_t ch : channels)
@@ -982,11 +1074,12 @@ bool parseSnapshot(const std::string& data, ParsedSnapshot& out)
     if (data.compare(0, header.size(), header) != 0)
         return parsePatchState(data, out.patches[0]);
     size_t at = header.size();
-    std::string flag, digits;
+    std::string flag, digits, bus;
     for (uint32_t i = 0; i < contextCount; ++i) {
         Patch& patch = out.patches[i];
         if (!readField(data, at, flag) || !readField(data, at, out.names[i]) || !readField(data, at, patch.directory)
-            || !readField(data, at, patch.library) || !readField(data, at, patch.basePath) || !readField(data, at, patch.text))
+            || !readField(data, at, patch.library) || !readField(data, at, patch.basePath) || !readField(data, at, patch.text)
+            || !readField(data, at, bus) || !parseBus(bus, patch.bus))
             return false;
         if ((flag != "1" && !flag.empty()) || (i == 0 && flag.empty()) || out.names[i].size() >= sizeof(Context::name))
             return false;
@@ -1030,6 +1123,7 @@ bool snapshotLoad(const clap_plugin_t* p, const clap_istream_t* stream)
         c.id = !used[i] || i == 0 ? 0 : s.nextId++;
         if (engines[i])
             engines[i]->id = c.id;
+        c.bus.store(used[i] ? patches[i].bus : 0, std::memory_order_relaxed);
         setEngine(c, std::move(engines[i]));
         c.prepared = used[i];
         std::snprintf(c.name, sizeof(c.name), "%s", used[i] ? names[i].c_str() : "");
@@ -1084,6 +1178,7 @@ bool snapshotPrepare(const clap_plugin_t* p, const clap_istream_t* stream, uint3
             continue;
         Context& c = s.contexts[slotFor[i]];
         engines[i]->id = s.nextId;
+        c.bus.store(parsed.patches[i].bus, std::memory_order_relaxed);
         setEngine(c, std::move(engines[i]));
         c.id = s.nextId++;
         std::snprintf(c.name, sizeof(c.name), "%s", parsed.names[i].c_str());
@@ -1196,6 +1291,82 @@ uint32_t budgetNotes(const clap_plugin_t* p, oscairn_voice_budget_note_t* out, u
 
 const oscairn_plugin_voice_budget_t voiceBudget { budgetHonorsVolume, budgetSetLimits, budgetActiveVoices, budgetNotes };
 
+// Parameters: Output bus, each sound's own. get_value shows the default context's.
+
+uint32_t paramCount(const clap_plugin_t*) { return 1; }
+
+bool paramInfo(const clap_plugin_t*, uint32_t index, clap_param_info_t* info)
+{
+    if (index != 0)
+        return false;
+    *info = {};
+    info->id = busParam;
+    info->flags = CLAP_PARAM_IS_STEPPED | CLAP_PARAM_IS_ENUM;
+    std::snprintf(info->name, sizeof(info->name), "%s", "Output bus");
+    info->min_value = 0;
+    info->max_value = busCount - 1;
+    info->default_value = 0;
+    return true;
+}
+
+bool paramValue(const clap_plugin_t* p, clap_id id, double* value)
+{
+    if (id != busParam || !value)
+        return false;
+    *value = self(p).contexts[0].bus.load(std::memory_order_relaxed);
+    return true;
+}
+
+bool paramToText(const clap_plugin_t*, clap_id id, double value, char* text, uint32_t capacity)
+{
+    if (id != busParam || !text || !capacity || !(value >= 0 && value <= busCount - 1))
+        return false;
+    const int bus = static_cast<int>(std::lround(value));
+    if (bus == 0)
+        std::snprintf(text, capacity, "%s", "Main");
+    else
+        std::snprintf(text, capacity, "Sound bus %d", bus);
+    return true;
+}
+
+bool paramFromText(const clap_plugin_t*, clap_id id, const char* text, double* value)
+{
+    if (id != busParam || !text || !value)
+        return false;
+    if (!std::strcmp(text, "Main")) {
+        *value = 0;
+        return true;
+    }
+    unsigned bus = 0;
+    char rest = 0;
+    if ((std::sscanf(text, "Sound bus %u%c", &bus, &rest) != 1 && std::sscanf(text, "%u%c", &bus, &rest) != 1) || bus >= busCount)
+        return false;
+    *value = bus;
+    return true;
+}
+
+// While not processing (the main thread when inactive, else the audio thread)
+void paramFlush(const clap_plugin_t* p, const clap_input_events_t* in, const clap_output_events_t*)
+{
+    for (uint32_t i = 0, n = in ? in->size(in) : 0; i < n; ++i)
+        applyParam(self(p), in->get(in, i));
+}
+
+const clap_plugin_params_t params { paramCount, paramInfo, paramValue, paramToText, paramFromText, paramFlush };
+
+bool paramHint(const clap_plugin_t*, clap_id id, oscairn_param_hint_t* hint)
+{
+    if (id != busParam || !hint)
+        return false;
+    *hint = {};
+    hint->widget = OSCAIRN_WIDGET_LIST;
+    hint->range_high = CLAP_INVALID_ID;
+    hint->role = OSCAIRN_ROLE_OUTPUT_BUS;
+    return true;
+}
+
+const oscairn_plugin_ui_t ui { paramHint };
+
 const void* getExtension(const clap_plugin_t*, const char* id)
 {
     if (!std::strcmp(id, CLAP_EXT_AUDIO_PORTS))
@@ -1212,6 +1383,10 @@ const void* getExtension(const clap_plugin_t*, const char* id)
         return &soundSnapshots;
     if (!std::strcmp(id, OSCAIRN_EXT_VOICE_BUDGET))
         return &voiceBudget;
+    if (!std::strcmp(id, CLAP_EXT_PARAMS))
+        return &params;
+    if (!std::strcmp(id, OSCAIRN_EXT_UI))
+        return &ui;
     return nullptr;
 }
 

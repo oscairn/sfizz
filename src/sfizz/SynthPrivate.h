@@ -323,6 +323,7 @@ struct Synth::Impl final: public Parser::Listener {
     int samplesPerBlock_ { config::defaultSamplesPerBlock };
     float sampleRate_ { config::defaultSampleRate };
     float volume_ { Default::globalVolume };
+    int hostBus_ { 0 }; // the bus new voices take (setHostBus)
     int numVoices_ { config::numVoices };
 
     // Distribution used to generate random value for the *rand opcodes

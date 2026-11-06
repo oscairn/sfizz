@@ -292,6 +292,7 @@ struct Voice::Impl
     int fadeLeft_ { 0 };
     int fadeLength_ { 0 };
     float lastGain_ { 0.0f }; // the amplitude stage's last gain, for a host's voice budget
+    int hostBus_ { 0 };
     std::unique_ptr<ADSREnvelope> egPitch_;
     std::unique_ptr<ADSREnvelope> egFilter_;
 
@@ -687,6 +688,16 @@ bool Voice::isFadingOut() const noexcept
 float Voice::getLastGain() const noexcept
 {
     return impl_->lastGain_;
+}
+
+void Voice::setHostBus(int bus) noexcept
+{
+    impl_->hostBus_ = bus;
+}
+
+int Voice::getHostBus() const noexcept
+{
+    return impl_->hostBus_;
 }
 
 void Voice::off(int delay, bool fast) noexcept
@@ -1887,6 +1898,7 @@ void Voice::reset() noexcept
     impl.hostGain_ = 1.0f;
     impl.fadeDelay_ = -1;
     impl.lastGain_ = 0.0f;
+    impl.hostBus_ = 0;
     impl.currentPromise_.reset();
     impl.sourcePosition_ = 0;
     impl.age_ = 0;

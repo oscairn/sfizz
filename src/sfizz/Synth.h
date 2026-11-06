@@ -550,6 +550,14 @@ public:
     void renderBlock(AudioSpan<float> buffer) noexcept;
 
     /**
+     * @brief renderBlock, for a host with several output buses: a voice on another host bus
+     *        than the synth's (setHostBus) adds its main bus send, at the master volume, into
+     *        busChannels[2 * bus] and busChannels[2 * bus + 1] instead of the buffer, for a bus
+     *        below numBuses. Its sends to effect buses, and the effects, stay in the buffer.
+     */
+    void renderBlock(AudioSpan<float> buffer, float* const* busChannels, int numBuses) noexcept;
+
+    /**
      * @brief Get the number of active voices
      *
      * @return int
@@ -699,6 +707,12 @@ public:
      * @brief A voice slot, to inspect or fade out one voice (a host's voice budget).
      */
     Voice* getVoiceSlot(int idx) noexcept;
+
+    /**
+     * @brief The host output bus the voices started from now on play on (0 at first); a voice
+     *        keeps the bus it started on (renderBlock with bus channels).
+     */
+    void setHostBus(int bus) noexcept;
 
     /**
      * @brief Add external definitions prior to loading.

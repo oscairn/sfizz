@@ -245,6 +245,54 @@ TEST_CASE("[Oscairn] Per-note voice count, gain and fade-out")
     REQUIRE(synth.getNumActiveVoicesForNote(60) == 1);
 }
 
+TEST_CASE("[Oscairn] A voice keeps the host bus it started on")
+{
+    // Two notes, the second after the synth moved to bus 2: rendered with bus channels, the first
+    // plays on bus 0 from then on and the second in the buffer; together they are the plain render.
+    auto render = [](bool buses, std::vector<float>& main, std::vector<float>& bus0) {
+        sfz::Synth synth;
+        synth.setSampleRate(48000);
+        synth.setSamplesPerBlock(256);
+        synth.loadSfzString(fs::current_path() / "tests/TestFiles/oscairn.sfz", "<region> sample=*sine ampeg_release=0.01");
+        sfz::AudioBuffer<float> buffer { 2, 256 };
+        std::vector<std::vector<float>> bus(6, std::vector<float>(256));
+        float* channels[6] = { bus[0].data(), bus[1].data(), bus[2].data(), bus[3].data(), bus[4].data(), bus[5].data() };
+        synth.noteOn(0, 60, 100);
+        for (int block = 0; block < 8; ++block) {
+            if (block == 2) {
+                synth.setHostBus(buses ? 2 : 0);
+                synth.noteOn(10, 67, 90);
+            }
+            if (block == 5)
+                synth.noteOff(0, 60, 0);
+            for (auto& c : bus)
+                std::fill(c.begin(), c.end(), 0.0f);
+            synth.renderBlock(buffer, buses ? channels : nullptr, buses ? 3 : 0);
+            main.insert(main.end(), buffer.getConstSpan(0).begin(), buffer.getConstSpan(0).end());
+            bus0.insert(bus0.end(), bus[0].begin(), bus[0].end());
+            for (size_t c = 2; c < 6; ++c) // nothing on the buses no voice is on
+                REQUIRE(*std::max_element(bus[c].begin(), bus[c].end()) == 0.0f);
+        }
+    };
+    std::vector<float> plain, none, main, bus0;
+    render(false, plain, none);
+    render(true, main, bus0);
+    REQUIRE(*std::max_element(none.begin(), none.end()) == 0.0f);
+    float before = 0, gap = 0, moved = 0, worst = 0;
+    for (size_t i = 0; i < plain.size(); ++i) {
+        if (i < 512)
+            before = std::max(before, std::fabs(bus0[i])); // on the synth's bus, in the buffer
+        else if (i < 512 + 10)
+            gap = std::max(gap, std::fabs(main[i])); // the first note left, the second not started
+        moved = std::max(moved, std::fabs(bus0[i]));
+        worst = std::max(worst, std::fabs(main[i] + bus0[i] - plain[i]));
+    }
+    REQUIRE(before == 0.0f);
+    REQUIRE(gap == 0.0f);
+    REQUIRE(moved > 0.1f);
+    REQUIRE(worst < 1e-6f);
+}
+
 TEST_CASE("[Oscairn] Element velocity response")
 {
     using sfz::oscairn::ElementVelocity;

@@ -398,6 +398,12 @@ public:
     float getLastGain() const noexcept;
 
     /**
+     * @brief The host output bus the voice plays on (Synth::setHostBus when it started).
+     */
+    void setHostBus(int bus) noexcept;
+    int getHostBus() const noexcept;
+
+    /**
      * @brief gets the age of the Voice
      *
      * @return

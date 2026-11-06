@@ -9,6 +9,7 @@
 #include "plugin.h"
 #include <oscairn-clap/assets.h>
 #include <oscairn-clap/sound-contexts.h>
+#include <oscairn-clap/ui.h>
 #include <oscairn-clap/voice-budget.h>
 #include <dlfcn.h>
 #include <atomic>
@@ -94,6 +95,21 @@ struct Events {
         x.expression_id = CLAP_NOTE_EXPRESSION_VOLUME; x.note_id = id; x.port_index = 0; x.channel = -1; x.key = -1; x.value = value;
         add(x);
     }
+    // The Output bus of the sound `channel` selects (-1: every selected sound)
+    void bus(uint32_t time, int16_t channel, double value)
+    {
+        clap_event_param_value_t e {};
+        e.header = { sizeof(e), time, CLAP_CORE_EVENT_SPACE_ID, CLAP_EVENT_PARAM_VALUE, 0 };
+        e.param_id = 1; e.note_id = -1; e.port_index = -1; e.channel = channel; e.key = -1; e.value = value;
+        add(e);
+    }
+    void midi(uint32_t time, uint8_t status, uint8_t a, uint8_t b)
+    {
+        clap_event_midi_t m {};
+        m.header = { sizeof(m), time, CLAP_CORE_EVENT_SPACE_ID, CLAP_EVENT_MIDI, 0 };
+        m.data[0] = status; m.data[1] = a; m.data[2] = b;
+        add(m);
+    }
     int ends(int32_t id) const
     {
         int count = 0;
@@ -129,6 +145,57 @@ struct Run {
     }
 };
 
+// A process() with Main and the eight sound buses, each filled with 1 first (the plugin must write
+// every one), keeping every bus's left channel over the blocks
+struct BusRun {
+    const clap_plugin_t* plugin;
+    std::vector<std::vector<float>> data = std::vector<std::vector<float>>(18);
+    std::vector<std::vector<float>> kept = std::vector<std::vector<float>>(9);
+    void block(Events& events, uint32_t frames)
+    {
+        float* channels[18];
+        clap_audio_buffer_t out[9] {};
+        for (int c = 0; c < 18; ++c) {
+            data[c].assign(frames, 1.0f);
+            channels[c] = data[c].data();
+        }
+        for (int b = 0; b < 9; ++b) {
+            out[b].data32 = channels + 2 * b;
+            out[b].channel_count = 2;
+        }
+        clap_process_t p {};
+        p.frames_count = frames; p.audio_outputs = out; p.audio_outputs_count = 9;
+        p.in_events = &events.input; p.out_events = &events.output; p.steady_time = -1;
+        guarded = true;
+        plugin->process(plugin, &p);
+        guarded = false;
+        for (int b = 0; b < 9; ++b)
+            kept[b].insert(kept[b].end(), data[2 * b].begin(), data[2 * b].end());
+        events.in.clear();
+    }
+    float peak(int bus, size_t from = 0, size_t to = SIZE_MAX) const
+    {
+        float m = 0;
+        for (size_t i = from; i < std::min(to, kept[bus].size()); ++i)
+            m = std::max(m, std::fabs(kept[bus][i]));
+        return m;
+    }
+};
+float largestStep(const std::vector<float>& v, size_t from = 0)
+{
+    float m = 0;
+    for (size_t i = std::max<size_t>(from, 1); i < v.size(); ++i)
+        m = std::max(m, std::fabs(v[i] - v[i - 1]));
+    return m;
+}
+float largestDifference(const std::vector<float>& a, const std::vector<float>& b)
+{
+    float m = a.size() == b.size() ? 0.0f : 1e9f;
+    for (size_t i = 0; i < std::min(a.size(), b.size()); ++i)
+        m = std::max(m, std::fabs(a[i] - b[i]));
+    return m;
+}
+
 struct Buffer {
     std::string data; size_t at = 0;
     clap_ostream_t out { this, write };
@@ -145,11 +212,12 @@ struct Buffer {
     }
 };
 
-// State version 2: directory, base library, base path, patch text
-std::string stateFor(const std::string& text, const std::string& library = "", const std::string& path = "", const std::string& directory = "")
+// State version 3: directory, base library, base path, patch text, output bus
+std::string stateFor(const std::string& text, const std::string& library = "", const std::string& path = "", const std::string& directory = "",
+                     const std::string& bus = "0")
 {
-    std::string s = "oscairn-sfizz-2\n";
-    for (const std::string* f : { &directory, &library, &path, &text })
+    std::string s = "oscairn-sfizz-3\n";
+    for (const std::string* f : { &directory, &library, &path, &text, &bus })
         s += std::to_string(f->size()) + "\n" + *f + "\n";
     return s;
 }
@@ -260,9 +328,12 @@ int main(int argc, char** argv)
               && plugin->stop_processing && plugin->reset && plugin->process && plugin->get_extension && plugin->on_main_thread);
         auto* audio = static_cast<const clap_plugin_audio_ports_t*>(plugin->get_extension(plugin, CLAP_EXT_AUDIO_PORTS));
         auto* notes = static_cast<const clap_plugin_note_ports_t*>(plugin->get_extension(plugin, CLAP_EXT_NOTE_PORTS));
-        CHECK(audio && audio->count(plugin, true) == 0 && audio->count(plugin, false) == 1);
+        CHECK(audio && audio->count(plugin, true) == 0 && audio->count(plugin, false) == 9); // Main and eight sound buses
         clap_audio_port_info_t a {};
-        CHECK(audio->get(plugin, 0, false, &a) && a.channel_count == 2);
+        CHECK(audio->get(plugin, 0, false, &a) && a.channel_count == 2 && a.id == 0 && (a.flags & CLAP_AUDIO_PORT_IS_MAIN));
+        CHECK(audio->get(plugin, 8, false, &a) && a.channel_count == 2 && a.id == 8 && !(a.flags & CLAP_AUDIO_PORT_IS_MAIN)
+              && !std::strcmp(a.name, "Sound bus 8"));
+        CHECK(!audio->get(plugin, 9, false, &a));
         CHECK(notes && notes->count(plugin, true) == 1 && notes->count(plugin, false) == 0);
         clap_note_port_info_t n {};
         CHECK(notes->get(plugin, 0, true, &n) && (n.supported_dialects & CLAP_NOTE_DIALECT_MIDI));
@@ -308,6 +379,11 @@ int main(int argc, char** argv)
         // version 1 (no base asset reference) still loads
         CHECK(load(plugin, "oscairn-sfizz-1\n0\n\n" + std::to_string(sine.size()) + "\n" + sine + "\n"));
         CHECK(save(plugin) == stateFor(sine));
+        // and version 2 (no bus), what converted libraries hold
+        CHECK(load(plugin, "oscairn-sfizz-2\n0\n\n0\n\n0\n\n" + std::to_string(sine.size()) + "\n" + sine + "\n"));
+        CHECK(save(plugin) == stateFor(sine));
+        CHECK(!load(plugin, stateFor(sine, "", "", "", "9"))); // no bus 9
+        CHECK(!load(plugin, stateFor(sine, "", "", "", "")));
         CHECK(!load(plugin, "oscairn-sfizz-1\n0\n\n999\nshort\n"));
         CHECK(!load(plugin, "something else\n"));
         CHECK(save(plugin) == stateFor(sine));
@@ -889,6 +965,234 @@ int main(int argc, char** argv)
         blocks(4);
         CHECK(events.ends(3) == 1 && events.ends(5) == 0 && events.ends(6) == 0 && events.ends(7) == 0);
         CHECK(activeVoices(plugin) == 3);
+        plugin->deactivate(plugin);
+        plugin->destroy(plugin);
+    }
+    { // parts sharing one instance (Oscairn RFC 0021): the Output bus parameter and its hint
+        auto* plugin = create();
+        auto* params = static_cast<const clap_plugin_params_t*>(plugin->get_extension(plugin, CLAP_EXT_PARAMS));
+        auto* ui = static_cast<const oscairn_plugin_ui_t*>(plugin->get_extension(plugin, OSCAIRN_EXT_UI));
+        CHECK(params && params->count(plugin) == 1);
+        clap_param_info_t info {};
+        CHECK(params->get_info(plugin, 0, &info) && info.id == 1 && (info.flags & CLAP_PARAM_IS_STEPPED)
+              && !(info.flags & CLAP_PARAM_IS_READONLY) && info.min_value == 0 && info.max_value == 8 && info.default_value == 0);
+        CHECK(!params->get_info(plugin, 1, &info));
+        oscairn_param_hint_t hint {};
+        CHECK(ui && ui->param_hint(plugin, 1, &hint) && hint.role == OSCAIRN_ROLE_OUTPUT_BUS && !ui->param_hint(plugin, 2, &hint));
+        char text[64] {};
+        double value = -1;
+        CHECK(params->value_to_text(plugin, 1, 0, text, sizeof(text)) && !std::strcmp(text, "Main"));
+        CHECK(params->value_to_text(plugin, 1, 3, text, sizeof(text)) && !std::strcmp(text, "Sound bus 3"));
+        CHECK(params->text_to_value(plugin, 1, "Sound bus 3", &value) && value == 3);
+        CHECK(params->text_to_value(plugin, 1, "Main", &value) && value == 0);
+        CHECK(!params->text_to_value(plugin, 1, "Sound bus 9", &value));
+        // set while inactive through flush, saved in the state, shown as the value
+        Events events;
+        events.bus(0, -1, 5);
+        params->flush(plugin, &events.input, &events.output);
+        CHECK(params->get_value(plugin, 1, &value) && value == 5);
+        CHECK(save(plugin) == stateFor("<region> sample=*sine\n", "", "", "", "5"));
+        auto* other = create();
+        CHECK(load(other, save(plugin)));
+        CHECK(params->get_value(other, 1, &value) && value == 5);
+        CHECK(other->activate(other, 48000, 1, 256));
+        BusRun run { other };
+        events.in.clear();
+        events.note(CLAP_EVENT_NOTE_ON, 0, 1, 69, 1.0);
+        run.block(events, 256);
+        CHECK(run.peak(5) > 0.1f && run.peak(0) == 0.0f && run.peak(1) == 0.0f && run.peak(8) == 0.0f);
+        other->deactivate(other);
+        other->destroy(other);
+        // a sound as Oscairn shares one: the plugin's own patch, the bus as its parameter
+        auto* ctx = static_cast<const oscairn_plugin_sound_contexts_t*>(plugin->get_extension(plugin, OSCAIRN_EXT_SOUND_CONTEXTS));
+        char message[256] {};
+        const oscairn_sound_parameter_t bus4 { 1, 4 }, bad { 1, 9 }, other2 { 2, 0 };
+        CHECK(ctx->prepare(plugin, "Bad", &bad, 1, nullptr, nullptr, message, sizeof(message)) == CLAP_INVALID_ID);
+        CHECK(ctx->prepare(plugin, "Bad", &other2, 1, nullptr, nullptr, message, sizeof(message)) == CLAP_INVALID_ID);
+        const uint32_t id = ctx->prepare(plugin, "Shared", &bus4, 1, nullptr, nullptr, message, sizeof(message));
+        CHECK(id != CLAP_INVALID_ID && ctx->select(plugin, id, 6));
+        CHECK(plugin->activate(plugin, 48000, 1, 256));
+        BusRun shared { plugin };
+        events.note(CLAP_EVENT_NOTE_ON, 0, 2, 69, 1.0, 6);
+        shared.block(events, 256);
+        CHECK(shared.peak(4) > 0.1f && shared.peak(5) == 0.0f && shared.peak(0) == 0.0f);
+        plugin->deactivate(plugin);
+        plugin->destroy(plugin);
+    }
+    { // two parts on one instance, each its own sound, channel and bus, render sample for sample
+      // what two instances render, with a pitch bend on one part's channel only
+        const std::string a = "<region> sample=*sine ampeg_attack=0.002 ampeg_release=0.05\n";
+        const std::string b = "<region> sample=*saw ampeg_attack=0.01 ampeg_release=0.1 bend_up=700\n";
+        auto events = [](int block, Events& e, int16_t only) { // only: the channel kept, -1 for all
+            auto note = [&](uint16_t type, uint32_t time, int32_t id, int16_t key, double velocity, int16_t channel) {
+                if (only < 0 || only == channel)
+                    e.note(type, time, id, key, velocity, channel);
+            };
+            if (block == 0)
+                note(CLAP_EVENT_NOTE_ON, 10, 1, 60, 0.8, 0);
+            if (block == 1)
+                note(CLAP_EVENT_NOTE_ON, 30, 2, 64, 0.7, 1);
+            if (block == 5 && (only < 0 || only == 1))
+                e.midi(100, 0xe1, 0, 96); // a bend up on channel 1
+            if (block == 10)
+                note(CLAP_EVENT_NOTE_ON, 0, 3, 67, 1.0, 0);
+            if (block == 15) {
+                note(CLAP_EVENT_NOTE_OFF, 5, 1, 60, 0.0, 0);
+                note(CLAP_EVENT_NOTE_OFF, 200, 2, 64, 0.0, 1);
+            }
+            if (block == 20)
+                note(CLAP_EVENT_NOTE_OFF, 0, 3, 67, 0.0, 0);
+        };
+        constexpr int blocks = 40;
+        std::vector<float> separate[2];
+        for (int part = 0; part < 2; ++part) {
+            auto* plugin = create();
+            CHECK(load(plugin, stateFor(part ? b : a)));
+            CHECK(plugin->activate(plugin, 48000, 1, 256));
+            BusRun run { plugin };
+            Events e;
+            for (int i = 0; i < blocks; ++i) {
+                events(i, e, static_cast<int16_t>(part));
+                run.block(e, 256);
+            }
+            separate[part] = run.kept[0];
+            plugin->deactivate(plugin);
+            plugin->destroy(plugin);
+        }
+        auto* plugin = create();
+        auto* ctx = static_cast<const oscairn_plugin_sound_contexts_t*>(plugin->get_extension(plugin, OSCAIRN_EXT_SOUND_CONTEXTS));
+        char message[256] {};
+        const oscairn_sound_parameter_t bus2 { 1, 2 };
+        const uint32_t ida = ctx->prepare(plugin, "A", nullptr, 0, a.c_str(), nullptr, message, sizeof(message));
+        const uint32_t idb = ctx->prepare(plugin, "B", &bus2, 1, b.c_str(), nullptr, message, sizeof(message));
+        CHECK(ida != CLAP_INVALID_ID && idb != CLAP_INVALID_ID && ctx->select(plugin, ida, 0) && ctx->select(plugin, idb, 1));
+        CHECK(plugin->activate(plugin, 48000, 1, 256));
+        BusRun run { plugin };
+        Events e;
+        e.bus(0, 0, 1); // A's bus, set as Oscairn does: on its channel, with the selection
+        for (int i = 0; i < blocks; ++i) {
+            events(i, e, -1);
+            run.block(e, 256);
+        }
+        const float da = largestDifference(run.kept[1], separate[0]), db = largestDifference(run.kept[2], separate[1]);
+        std::printf("shared instance: largest difference from two instances %g, %g\n", da, db);
+        CHECK(da == 0.0f && db == 0.0f);
+        CHECK(*std::max_element(separate[0].begin(), separate[0].end()) > 0.1f && *std::max_element(separate[1].begin(), separate[1].end()) > 0.1f);
+        for (int bus : { 0, 3, 4, 5, 6, 7, 8 })
+            CHECK(run.peak(bus) == 0.0f);
+        // the routing is saved with the sounds and restored: a fresh instance plays them on their buses
+        Buffer saved;
+        CHECK(ctx->state->save(plugin, &saved.out));
+        plugin->deactivate(plugin);
+        auto* restored = create();
+        auto* rctx = static_cast<const oscairn_plugin_sound_contexts_t*>(restored->get_extension(restored, OSCAIRN_EXT_SOUND_CONTEXTS));
+        Buffer in; in.data = saved.data;
+        CHECK(rctx->state->load(restored, &in.in));
+        Buffer again;
+        CHECK(rctx->state->save(restored, &again.out) && again.data == saved.data);
+        CHECK(restored->activate(restored, 48000, 1, 256));
+        {
+            BusRun r { restored };
+            Events re;
+            for (int i = 0; i < blocks; ++i) {
+                events(i, re, -1);
+                r.block(re, 256);
+            }
+            CHECK(largestDifference(r.kept[1], separate[0]) == 0.0f && largestDifference(r.kept[2], separate[1]) == 0.0f);
+            CHECK(r.peak(0) == 0.0f);
+        }
+        restored->deactivate(restored);
+        restored->destroy(restored);
+        plugin->destroy(plugin);
+        // and prepared beside, in another instance: the snapshot's sounds keep their buses
+        auto* beside = create();
+        auto* bctx = static_cast<const oscairn_plugin_sound_contexts_t*>(beside->get_extension(beside, OSCAIRN_EXT_SOUND_CONTEXTS));
+        auto* snaps = static_cast<const oscairn_plugin_sound_snapshots_t*>(beside->get_extension(beside, OSCAIRN_EXT_SOUND_SNAPSHOTS));
+        Buffer prepared; prepared.data = saved.data;
+        uint32_t selected[16] {};
+        CHECK(snaps->prepare(beside, &prepared.in, selected, message, sizeof(message)));
+        CHECK(bctx->select(beside, selected[0], 0) && bctx->select(beside, selected[1], 1));
+        CHECK(beside->activate(beside, 48000, 1, 256));
+        {
+            BusRun r { beside };
+            Events re;
+            re.note(CLAP_EVENT_NOTE_ON, 0, 1, 60, 0.8, 0);
+            re.note(CLAP_EVENT_NOTE_ON, 0, 2, 64, 0.8, 1);
+            r.block(re, 256);
+            r.block(re, 256);
+            CHECK(r.peak(1) > 0.1f && r.peak(2) > 0.1f && r.peak(0) == 0.0f);
+        }
+        beside->deactivate(beside);
+        beside->destroy(beside);
+    }
+    { // a change of bus at a block's start: the held note stays on its bus without a click, the
+      // next note plays on the new one, and nothing is lost or doubled
+        auto render = [](bool change) {
+            auto* plugin = create();
+            CHECK(load(plugin, stateFor("<region> sample=*sine amp_veltrack=0 ampeg_release=0.2\n")));
+            CHECK(plugin->activate(plugin, 48000, 1, 256));
+            BusRun run { plugin };
+            Events e;
+            for (int i = 0; i < 40; ++i) {
+                if (i == 0) {
+                    e.bus(0, -1, 1);
+                    e.note(CLAP_EVENT_NOTE_ON, 20, 1, 69, 1.0);
+                }
+                if (i == 10 && change)
+                    e.bus(100, -1, 2); // takes effect from the block's start
+                if (i == 12)
+                    e.note(CLAP_EVENT_NOTE_ON, 50, 2, 76, 1.0);
+                if (i == 20)
+                    e.note(CLAP_EVENT_NOTE_OFF, 0, 1, 69, 0.0);
+                if (i == 30)
+                    e.note(CLAP_EVENT_NOTE_OFF, 0, 2, 76, 0.0);
+                run.block(e, 256);
+            }
+            plugin->deactivate(plugin);
+            plugin->destroy(plugin);
+            return run.kept;
+        };
+        const auto same = render(false), changed = render(true);
+        std::vector<float> sum(changed[1].size());
+        for (size_t i = 0; i < sum.size(); ++i)
+            sum[i] = changed[1][i] + changed[2][i];
+        CHECK(largestDifference(sum, same[1]) < 1e-6f); // nothing lost or doubled
+        const size_t secondStarts = 12 * 256 + 50;
+        CHECK(*std::max_element(changed[2].begin(), changed[2].begin() + secondStarts) == 0.0f); // the held note stayed
+        CHECK(*std::max_element(changed[2].begin() + secondStarts, changed[2].end()) > 0.1f);
+        CHECK(*std::max_element(changed[1].begin() + secondStarts, changed[1].end()) > 0.1f);
+        // no click: no step on either bus larger than the unchanged render's largest
+        const float limit = largestStep(same[1]) * 1.001f;
+        std::printf("bus change: largest steps %g, %g against %g\n", largestStep(changed[1]), largestStep(changed[2]), limit);
+        CHECK(largestStep(changed[1]) <= limit && largestStep(changed[2]) <= limit);
+        CHECK(*std::max_element(same[2].begin(), same[2].end()) == 0.0f && *std::max_element(changed[0].begin(), changed[0].end()) == 0.0f);
+    }
+    { // ring-out carries only Main: a retiring sound on a sound bus keeps playing on that bus
+        auto* plugin = create();
+        auto* ctx = static_cast<const oscairn_plugin_sound_contexts_t*>(plugin->get_extension(plugin, OSCAIRN_EXT_SOUND_CONTEXTS));
+        auto* snaps = static_cast<const oscairn_plugin_sound_snapshots_t*>(plugin->get_extension(plugin, OSCAIRN_EXT_SOUND_SNAPSHOTS));
+        CHECK(load(plugin, stateFor(sine, "", "", "", "3")));
+        Buffer saved;
+        CHECK(ctx->state->save(plugin, &saved.out));
+        uint32_t selected[16] {};
+        char message[256] {};
+        CHECK(snaps->prepare(plugin, &saved.in, selected, message, sizeof(message)));
+        CHECK(plugin->activate(plugin, 48000, 1, 256));
+        BusRun run { plugin };
+        Events events;
+        events.note(CLAP_EVENT_NOTE_ON, 0, 1, 69, 1.0);
+        run.block(events, 256);
+        CHECK(run.peak(3) > 0.1f);
+        CHECK(ctx->select(plugin, selected[0], -1));
+        std::vector<std::vector<float>> ringData(4, std::vector<float>(256, 0.0f));
+        float* ringChannels[4] = { ringData[0].data(), ringData[1].data(), ringData[2].data(), ringData[3].data() };
+        clap_audio_buffer_t ring {};
+        ring.data32 = ringChannels;
+        ring.channel_count = 4;
+        snaps->ring_out(plugin, &ring);
+        run.block(events, 256);
+        CHECK(run.peak(3, 256) > 0.1f && run.peak(0, 256) == 0.0f);
+        CHECK(*std::max_element(ringData[0].begin(), ringData[0].end()) == 0.0f);
         plugin->deactivate(plugin);
         plugin->destroy(plugin);
     }
