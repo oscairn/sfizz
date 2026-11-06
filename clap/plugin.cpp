@@ -45,6 +45,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <bitset>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -72,12 +73,14 @@ struct Engine {
     Patch patch;
     sfz::Synth synth;
     std::vector<oscairn_asset_ref_t> assets; // resolved through the host, for dependencies
+    std::bitset<128> releaseKeys; // keys a release region may still play on at note-off
 };
 
 struct Note {
     int32_t id;
     int16_t channel, key;
     uint32_t context;
+    bool released; // note-off or choke seen
 };
 
 struct Context {
@@ -209,6 +212,12 @@ bool loadPatch(const Plugin& s, Engine& e, const oscairn_asset_ref_t* base, std:
         message = "the patch could not be loaded";
         return false;
     }
+    for (int i = 0, n = e.synth.getNumRegions(); i < n; ++i) {
+        const sfz::Region* r = e.synth.getRegionView(i);
+        if (r && r->isRelease())
+            for (int k = std::max(0, int(r->keyRange.getStart())); k <= std::min(127, int(r->keyRange.getEnd())); ++k)
+                e.releaseKeys.set(static_cast<size_t>(k));
+    }
     return true;
 }
 
@@ -242,7 +251,8 @@ void endFinishedNotes(Plugin& s, const clap_output_events_t* out, uint32_t time)
     for (size_t i = 0; i < s.noteCount; ++i) {
         const Note& n = s.notes[i];
         Engine* e = s.contexts[n.context].engine.get();
-        if (!e || e->synth.getNumActiveVoicesForNote(n.key) == 0)
+        // a held key with a release region keeps its note, so its note-off still arrives
+        if (!e || (e->synth.getNumActiveVoicesForNote(n.key) == 0 && (n.released || !e->releaseKeys[static_cast<size_t>(n.key)])))
             endNote(out, n, time);
         else
             s.notes[kept++] = n;
@@ -295,15 +305,16 @@ void applyEvent(Plugin& s, const clap_event_header_t* h, int delay)
             if (Engine* e = s.contexts[context].engine.get())
                 e->synth.hdNoteOn(delay, n->key, std::max(velocity, 1.0f / 127.0f));
             if (s.noteCount < maxNotes)
-                s.notes[s.noteCount++] = { n->note_id, n->channel, n->key, context };
+                s.notes[s.noteCount++] = { n->note_id, n->channel, n->key, context, false };
             return;
         }
         // Note-off and choke address the notes they match, in the context each started in
         for (size_t i = 0; i < s.noteCount; ++i) {
-            const Note& note = s.notes[i];
+            Note& note = s.notes[i];
             Engine* e = s.contexts[note.context].engine.get();
-            if (!e || !matches(note, n->note_id, n->channel, n->key))
+            if (!e || note.released || !matches(note, n->note_id, n->channel, n->key))
                 continue;
+            note.released = true;
             if (h->type == CLAP_EVENT_NOTE_OFF)
                 e->synth.hdNoteOff(delay, note.key, velocity);
             else

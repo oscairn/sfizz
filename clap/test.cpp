@@ -406,6 +406,36 @@ int main(int argc, char** argv)
         CHECK(!load(plugin, stateFor(kick, "lib", "sub")));
         plugin->destroy(plugin);
     }
+    { // a key-off element: a release region alone keeps its note until the note-off, plays then,
+      // and ends on its element envelope
+        auto* plugin = create();
+        CHECK(load(plugin, stateFor("<control> oscairn_profile=1 <region> sample=*sine trigger=release rt_dead=1 amp_veltrack=0 "
+                                    "oscairn_ampeg_decay1=40 oscairn_ampeg_decay1_level=0 oscairn_ampeg_decay2_level=0\n")));
+        CHECK(plugin->activate(plugin, 48000, 1, 256));
+        Run run { plugin };
+        Events events;
+        events.note(CLAP_EVENT_NOTE_ON, 0, 7, 60, 1.0);
+        for (int i = 0; i < 20; ++i)
+            run.block(events, 256);
+        CHECK(run.peak == 0.0f);
+        CHECK(events.ends(7) == 0); // no voice yet, but the note stays for its note-off
+        events.note(CLAP_EVENT_NOTE_OFF, 0, 7, 60, 0.0);
+        run.block(events, 256);
+        CHECK(run.peak > 0.1f);
+        CHECK(events.ends(7) == 0);
+        for (int i = 0; i < 400 && !events.ends(7); ++i)
+            run.block(events, 256);
+        CHECK(events.ends(7) == 1);
+        CHECK(run.peak < 1e-3f); // the -90 dB floor
+        // a key without release regions still ends its note when its voices end
+        CHECK(load(plugin, stateFor("<region> sample=*sine key=60 loop_mode=one_shot end=100\n")));
+        events.note(CLAP_EVENT_NOTE_ON, 0, 8, 60, 1.0);
+        for (int i = 0; i < 20 && !events.ends(8); ++i)
+            run.block(events, 256);
+        CHECK(events.ends(8) == 1);
+        plugin->deactivate(plugin);
+        plugin->destroy(plugin);
+    }
     { // a fresh instance plays a sine
         auto* plugin = create();
         CHECK(plugin->activate(plugin, 48000, 1, 256));
