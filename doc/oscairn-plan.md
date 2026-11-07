@@ -1703,7 +1703,20 @@ block, reset and a new patch, a prepared sound on its channel, `sound_values`), 
 delay at the transport's 240 BPM, a mono part's held note. Each fails without its change (seen;
 in the commits).
 
-GATES_PLACEHOLDER
+**Gates** (`gate.sh` on each committed tree, with the machine's load average below 40): on
+`8d00f407`, `7b8ee82c`, `9711cb7f`, `dc7fa3ec`, `6bdcb5c1` and `22c6bf44` Release, ASan+UBSan,
+TSan and the stock gate passed at the first run (159 renders bit-identical, 106 streaming renders
+bit-identical to stock's preloaded ones, 0 unstable, 0 failed). Before the three rebases the same
+changes passed every gate the same way, except that runs at load averages of 60-200 failed the
+CLAP reset test (2 to 9 of its 37 patches, none with element opcodes; since rendered offline,
+`863d3836`) and passed when run again at a lower load.
+
+**CI** on `22c6bf44` (run 42407498340): macOS, Linux x86_64, ASan+UBSan and TSan passed; Linux
+ARM64 failed "Each synth draws its own random numbers" (`SynthT.cpp`) twice, the first time and on
+a rerun. That test is flaky on Linux ARM64 without these commits: in an `ubuntu:24.04` ARM64
+container it failed 10 of 20 runs on `dc7fa3ec`'s code and 8 of 20 on `78227d86`'s. Two synths
+rendering its patch differ from sample 669 on about one run in four, only with all three of its
+regions together (each region alone always matched). Open (the test's commit is `9c7f3792`).
 
 ### Upstream merge test (2026-11-01)
 
