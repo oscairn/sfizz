@@ -599,6 +599,10 @@ Probe source: a sustained, steady waveform with a clear fundamental, filter Thru
 off, so the amplitude envelope is the render's level envelope. Times are measured between
 level crossings (attack: onset to within 1 dB of the attack level; decay and release: dB
 slope or crossing times), relative to the note-on/note-off markers found in the render.
+Segments of a few milliseconds are probed at note 105 (3.5 kHz) and measured on the level
+demodulated at the sine's frequency over four of its periods: the analytic signal's level has a
+long tail after an abrupt stop, which had read fast falls as bent and slow (K8). The test suite
+measures the engine the same way against committed reference statistics (`refstats.py`).
 
 ---
 
@@ -713,7 +717,14 @@ Decisions taken (for Jacob to confirm):
 9. **Profile scope:** the profile applies to the regions after its `<control>` header, not to
    the whole patch (sfizz builds regions while parsing).
 10. **Envelope tables in seconds**, generated into `ElementTables.cpp` by the measurement
-    repository's `fit_eg.py`; the 2.5 % tolerance for segment times is proposed.
+    repository's `fit_eg.py`. **Segment times within 2.5 %, proposed again with evidence
+    (2026-11-07):** the reference repeats exactly (ten probes rendered 4 to 10 times in five
+    recording sessions from 2026-11-01 to 2026-11-07 measure within 0.006 % of each other), the
+    engine measures the same at 44.1 and 96 kHz within 0.014 %, and the 66 segment checks in the
+    test suite (`OscairnReferenceT.cpp`, probes not used for fitting) are all within 1.9 %
+    (attack index 103, between measured indices) at 44.1, 48 and 96 kHz. So the tolerance covers
+    the tables' interpolation between measured indices, not measurement noise; 2 % would pass today
+    with 0.1 % to spare. For Jacob to confirm.
 11. **Level 0 of a decay or release is -90 dB**, then silence, fitted from the renders
     above; the attack keeps a constant rate for partial attacks until the rule is found.
 12. **Gate exclusions:** the include-loop fixtures and `newdrums_flat.sfz` are left out of
@@ -785,6 +796,19 @@ Taken in the sharing session (2026-11-06), for Jacob to confirm:
     on, while a sound's `<effect>` buses follow the sound (K46); `get_value` shows the default
     sound's bus; the snapshot's version 1 is no longer read (pre-release), plugin states 1 and 2
     still are (converted libraries hold version 2).
+
+Taken in the verify session (2026-11-07), for Jacob to confirm:
+
+29. **Loop continuity threshold 2 (K15).** The measure (`loops.py` in the measurement repository,
+    `OscairnLoopsT.cpp` here): at each pass through the loop point of a 30 s held note, the largest
+    third difference within 1 ms of the pass (an eighth of the loop if shorter) over the largest in
+    the 50 ms around it, the pass windows left out; passes under -80 dBFS count as continuous. A
+    pure tone looped seamlessly measures about 1. Across the 32,223 looped regions of the factory
+    library, end-padded as the providers now write them and rendered at 48 kHz: median 0.67, 99th
+    percentile 3.2, 99.9th 19; 604 above 2 (as extracted: 4,181). A
+    synthetic loop cut 40 frames short of a whole number of periods measures 3.3; reading past the
+    end of the file (as extracted) measured up to 293. Proposed with a listening set of the worst
+    cases (scratchpad `sampler-verify/listen-loops/`, README inside) for Jacob to judge.
 
 Risks and open questions:
 
@@ -1457,6 +1481,87 @@ not touch rendering; the reset test's sensitivity to load is the one noted in th
 **Converter.** It must write the new ID, bundle name, product name and formats (the version 4
 state with its bus field; the version 3 snapshot with a bus per slot).
 
+### Verify session (2026-11-07): RFC 0013 steps 1 and 2
+
+Commits: `24bf3d33` (velocity on a 0-2047 scale), `173589e5` (fast segments and the slowest decays),
+`28b66ec7` (reference statistics in the test suite), `42d01319` (compare-stock takes outside
+patches), `ad8340e0` (loop continuity test), then this entry. Measurement repository: `42c4fd4`,
+`ff78bb3`, `6e95530`, `53b6ce6`, `b7300e1`, `4eccf0b`, `ec234b1`, `fbcfd0a` (demodulated level, fit
+entries and the fast release, `refstats.py`, `loops.py` and its corrections, tolerances). Converter:
+`25ae28c` (user-wave loops padded past the loop end), `386742d` (loops moved later) reverted in
+`ed5ec74`.
+
+Reference batches `sv1` (447 renders: every attack index below 40, every decay and release index
+below 56 at note 105, decays 96-127 at note 45, velocity-shifted segments, repeats, 428 level probes)
+and `sv2` (56: fast releases and decays from and to other levels, attacks between levels at fast
+indices, repeats). Dropout checks: none (51 renders are silent where the probe is meant to be).
+
+**Step 2, velocity (K1, K3).** See K1: within 0.4 dB at -24 dB and above on all 263 new levels, at
+44.1, 48 and 96 kHz.
+
+**Step 2, envelope (K6-K8, K10).** See the register. The table generator's input is
+`measurements/awm2/eg_fit_input_c.json` (renders `sv1`, measured with `refstats.py`'s method; the
+earlier sweeps as before). Fast segments needed the demodulated level (section 6): on the analytic
+signal's level the earlier table had decay index 0 at 39 ms per 60 dB, where it is 1.95 ms.
+
+**Repeatability and the tolerance (decision 10).** Ten probes rendered 4-10 times in five sessions
+(`eg1`-`eg3` on 2026-11-01, `sv1`, `sv2`): largest spread 0.006 %.
+
+**Test suite (`28b66ec7`).** `OscairnReferenceT.cpp` renders 281 probes the engine was not fitted to
+at 44.1, 48 and 96 kHz and measures them as `refstats.py` measures the renders, against the numbers
+in `OscairnReferenceData.h` (no audio): 66 segment times (largest error 1.9 %), level probes at
+-24 dB and above (largest 0.37 dB) and silence where the reference is silent. Left out, with
+their reasons in the register: segments that are immediate on both sides (index 0: below what the
+analysis resolves), fast releases from lower levels (K49), levels below -24 dB (no accepted
+tolerance; curve 4, K2). On the engine render compared, the Python and C++ measurements agree
+(`att_0_n105` at 48 kHz: 0.628765 ms in both; `refstats.py --engine`). With the earlier velocity response the suite fails (first at
+`vc_0_112_0_120`: -9.0 dB against -7.15); with the earlier envelope it fails at `att_1_n105`
+(2.83 ms against 2.93).
+
+**Step 1, loops (K15, decision 29).** `loops.py` held every looped region of the factory library
+(7,647 files, 32,223 distinct loops) and of the user waves (32 files, 2,072 loops) for 30 s at
+48 kHz, and again at each sample's own rate. As extracted, every looped file ended on its loop end
+and the interpolator read nothing past it: 4,181 factory loops measured above 2. The converter's
+user-wave writer (`25ae28c`) and the factory extractor (`claude/tools/extract.py`, `extract_user.py`,
+with `pad_loops.py` to pad an existing folder; in the reverse-engineering workspace, not in a
+repository) now repeat the loop's start for 64 frames after the loop end, loop points unchanged.
+On padded copies: 604 factory loops and 19 user loops above 2 (K15). A second layout, the loop
+moved 64 frames later so that the frames before its start are the loop's own, was tried and
+reverted (converter `386742d`, reverted in `ed5ec74`): sfizz crossfades every loop over at least
+1 ms into the frames before the loop start, and moving the loop took the join out of that crossfade,
+which exposed joins that are not seamless in the data (K15). The CTest subset
+(`OscairnLoopsT.cpp`) plays generated loops and the flute fixture without an imported library. All
+7,647 factory files, as extracted and padded, load in the fork with no unknown opcodes and finite
+output (86,676 regions; all but two key-ranged files sound at 36, 60 or 84). The measure first left
+twice the pass window out of the signal around a pass, which made a loop whose sharpest moment sits
+just outside the window read as a click; the numbers here leave the window alone out (measurement
+`4eccf0b`).
+
+**Step 1, Salamander Grand Piano** (FreePats SFZ+FLAC V3+20200602, CC-BY 3.0, 641 regions; not in
+any repository). `compare-stock.sh` (`42d01319`) with both SFZ files (standard and retuned) on
+`42d01319`'s tree: each loads in stock and fork with the same report (641 regions, 12 groups, 7
+curves, 641 preloaded, no unknown opcode; no parse error on the sweep's stderr), renders the gate's event script
+bit-identically at the three preloaded settings and, streaming, bit-identically to stock's preloaded
+render at the two streaming settings; 165 renders bit-identical and 110 streaming renders in all, 0
+failed. A keyboard sweep (every key 21-108 at velocities 15, 50, 85, 127, sustain pedal in two of the
+four passes; a scratchpad tool, not committed) at the same five settings: bit-identical to stock,
+repeatable, finite; stock's own streaming renders differ between runs, as the stock gate already
+records (fixed in the fork, `ca69309e`).
+
+**Gates** (`gate.sh` on each committed tree: Release, ASan+UBSan and TSan builds of `sfizz_tests`
+and the CLAP tests, and the stock gate). `24bf3d33`, `28b66ec7` and `42d01319` passed all four (stock:
+159 renders bit-identical, 106 streaming renders bit-identical to stock's preloaded ones, 0 failed);
+`24bf3d33`'s first Release run failed the CLAP reset test once (`channels.sfz` after a reset) at a
+load average above 50 and passed when run again. `173589e5` and the loop test commit passed
+`sfizz_tests` in every Release run and failed only the CLAP reset test, with 1 to 19 native patches
+rendering differently after a reset while the machine's load average was between 100 and 200 (the
+load sensitivity noted in the reset and rename sessions); full runs at a lower load were pending
+when this entry was written. CI: `24bf3d33` (run 42359648614) passed all five jobs.
+
+**Concurrency.** The element-model work (box 3) shared the repository; this session's engine
+changes stayed in `oscairn/ElementLevel.*`, `ElementEnvelope.*` and `ElementTables.*`, with no change
+to `Voice.cpp`.
+
 ### Upstream merge test (2026-11-01)
 
 `upstream/develop` has no commits after `f5c6e29f`: merging it into `oscairn` is a no-op
@@ -1474,21 +1579,21 @@ repository, or the local scripts beside the renders).
 
 | # | What differs | Size and where | Cause | Status | Reproduce | Code |
 | --- | --- | --- | --- | --- | --- | --- |
-| K1 | Element level, velocity and pan levels | 381 levels above -24 dB: largest 0.77 dB, 371 within 0.4 dB, 349 within 0.2 dB, 341 within 0.1 dB; below -24 dB up to 1.26 dB. The largest sit where a steep velocity sensitivity maps to a small effective velocity | Levels are rounded to whole 0.375 dB steps (level L: round(40 log10(127/L) / 0.375); velocity: the same on a 2048-step scale; pan far side: the sine law on the grid), now modelled; the rest is the velocity-spread fit | Accepted tolerance 0.4 dB above -24 dB (decision 14); below -24 dB and the spread residual unresolved | `lv1`, `lv2`; `scripts/engine_lv.py` | `oscairn/ElementLevel.cpp`, `ElementEnvelope.cpp` `levelGain` |
-| K2 | Velocity curves 0, 1, 2, 4 between measured velocities | Now measured at velocity 1 and every fourth velocity (`fl3` `vk_*`, sensitivity +32) and interpolated linearly in dB between those; curve 4 rises 14 dB per 4 velocities between 60 and 68. The listening sweep (curve 4, sensitivity +32, velocities 8-127 in steps of 8) is within 0.16 dB per note (was +5.9 dB at 56 and -6.2 dB at 72). Those checks are against fitting renders where the sweep hits a knot; 56 and 72 are knots now | Linear in dB between knots 4 velocities apart | Resolved at the knots; between knots unverified | `fl3` (`vk_*`), `ls1` (`vsw_*`); `scripts/s4/vk.py`, `listen4.py` | `ElementLevel.cpp` `curveDb` |
-| K3 | Velocity response for curves other than 3 combined with offsets or negative sensitivity | Not measured | Order of offset, curve and sensitivity assumed | Unverified | none yet | `ElementLevel.cpp` |
+| K1 | Element level, velocity and pan levels | Velocity is now worked on a 0-2047 scale (`24bf3d33`): 451 lv1/lv2 levels within 0.16 dB above -24 dB and 0.18 dB below (were 0.77 and 1.26 dB); 428 new levels (sv1, none used for the model): all 263 at -24 dB and above within 0.4 dB (largest 0.37 dB, curve 4), 98 silent where the reference is, below -24 dB 63 of 67 within 0.4 dB, the four others curve 4 between knots (K2), at 44.1, 48 and 96 kHz | Velocity and offset on a 0-2047 scale (16 per step up to 64, 1023/63 above), sensitivity factor \|s\|/31.75 up to 31 and 31.75/(63.75-\|s\|) above (127 at +63 and -64), positive values scaling the distance of velocity + offset below the top, negative ones the distance of velocity - offset above 0, truncated; then the curve; levels on 0.375 dB steps | Within the accepted 0.4 dB above -24 dB (decision 14); checked in the test suite (`OscairnReferenceT.cpp`) | `lv1`, `lv2`, `sv1` (`vs_*`, `vo_*`, `vc_*`, `el_*`, `ep_*`); `scripts/engine_lv.py`, scratchpad `sv1_lv.py` | `oscairn/ElementLevel.cpp` `velocityScale`, `velocityGain` |
+| K2 | Velocity curves 0, 1, 2, 4 between measured velocities | Now measured at velocity 1 and every fourth velocity (`fl3` `vk_*`, sensitivity +32) and interpolated linearly in dB between those; curve 4 rises 14 dB per 4 velocities between 60 and 68. The listening sweep (curve 4, sensitivity +32, velocities 8-127 in steps of 8) is within 0.16 dB per note (was +5.9 dB at 56 and -6.2 dB at 72). Those checks are against fitting renders where the sweep hits a knot; 56 and 72 are knots now | Linear in dB between knots 4 velocities apart | Resolved at the knots; between knots: sv1 found curve 4 2.39 dB loud where the sensitivity lands between 60 and 64 (sensitivity -24, velocity 88: reference -42.14 dB, engine -39.75 dB) | `fl3` (`vk_*`), `ls1` (`vsw_*`); `scripts/s4/vk.py`, `listen4.py` | `ElementLevel.cpp` `curveDb` |
+| K3 | Velocity response for curves other than 3 combined with offsets or negative sensitivity | The curve now acts after the offset and sensitivity, on the 0-2047 scale (`24bf3d33`); sv1 checks of curves 0, 1, 2, 4 at sensitivities +48, -24 and +32 with offset 32: within 0.37 dB at -24 dB and above; below, curve 4 off by up to 2.39 dB (K2) | Order measured | Curves 0-2 checked; curve 4 between knots open (K2) | `sv1` (`vc_*`) | `ElementLevel.cpp` `velocityGain` |
 | K4 | Velocity sensitivity -64 | Reference gives a velocity of 1 about 86 dB down and silence otherwise; engine: velocity 1 at -84 dB, otherwise silent | Edge case approximated | Accepted approximation | `lv1` (`vs_0_*`) | `ElementLevel.cpp` |
-| K5 | Attack time between levels, level ratios 0 < smaller/larger < 1/16 | Not measured (larger levels with smaller level 1-7) | Factor interpolated between 1 (level 0) and 2.02 (ratio 1/16) | Unverified | `eg5`; `scripts/engine_att.py` | `ElementEnvelope.cpp` `attackDurationFactor` |
-| K6 | Attack times below index 40 | 2.7-7.8 ms in the table, unchecked | Measured knots only | Unverified | `eg2` | `ElementTables.cpp` |
-| K7 | Decay times above 103 | 105-117 fitted from three 40 s renders (ratios to the octave rule 0.974-0.979); 119-127 extrapolated with the 117 ratio; 16 s renders at 113/115 read 5-7 % shorter. Those renders use filter code 18, whose late low-pass (K27) lowers a 440 Hz sine by about 1 dB from about 10.5 s on: the long-decay fits may carry that bias (not re-measured) | Long decays need long holds | Fitted only, no checks | `eg4` (`decl_*`), `eg3`; `collect.py` | `ElementTables.cpp` |
-| K8 | Decay and release below index 56 | Measured knots, and the falls are not straight lines in dB; engine renders measured the same way differ from 4 % (index 50) to 3.9 times (release index 4) | Fast segments not modelled | Unresolved | `eg2`; `compare_eg.py` | `ElementTables.cpp` |
+| K5 | Attack time between levels | Ratios between 0 and 1/16 not measured (larger levels with smaller level 1-7). At fast indices (sv2, note 105) the factor fitted at 80 and 96 carries over within 4.4 %: from initial level 64 to 127 the reference takes 22.9 ms at index 8 and 30.3 ms at 24, the engine 23.7 and 28.9 ms (+3.5 and -4.4 %); from 0 to level 64, 0.95 and 1.09 ms against 0.94 and 1.09 | Factor interpolated between 1 (level 0) and 2.02 (ratio 1/16); fitted at indices 80 and 96 | Unverified below 1/16; at fast indices outside 2.5 % by up to 4.4 % | `eg5`, `sv2` (`ai_*`, `al_*`); `scripts/engine_att.py` | `ElementEnvelope.cpp` `attackDurationFactor` |
+| K6 | Attack times below index 40 | Resolved: every index measured at note 105 (sv1, demodulated level): 0 is immediate, 1-8 take 2.93 ms, 39 takes 7.1 ms. Fitted at the even indices; the odd ones are checks, all within 1.0 % at 44.1, 48 and 96 kHz | - | Resolved (`173589e5`); checked in the test suite | `sv1` (`att_*_n105`); `refstats.py` | `ElementTables.cpp` |
+| K7 | Decay times above 103 | Resolved: the octave rule holds to 124 (renders at note 45, below the late low-pass of K27: 104-124 within 1.6 %, checks); the earlier long renders at note 69 read 1.7-2.8 % short. 125-127 all take 104.5-104.8 s per 60 dB (the slowest rate), measured and set | - | Resolved (`173589e5`); 104-124 checked in the test suite | `sv1` (`decl_*_n45`) | `ElementTables.cpp` |
+| K8 | Decay and release below index 56 | Resolved: with the level demodulated at the sine's frequency (the analytic signal's tail had bent them), decays below 56 are straight lines in dB, 1.95 ms per 60 dB at 0-7; releases 32-55 likewise; releases below 32 are straight lines in amplitude to silence at the index's rate (2.16 ms from level 127 at 1, 12.2 ms at 31) and 0 is immediate. Every index measured and fitted (adjacent indices share times in steps, so they cannot check each other); checks are the velocity-shifted probes (K10) | Fast segments not modelled before | Resolved (`173589e5`) | `sv1` (`dec_*_n105`, `rel_*_n105`); `refstats.py` | `ElementTables.cpp`; `ElementEnvelope.cpp` `enter` (`ramp_`) |
 | K9 | Release 77-95 | Measured directly (0.6-4.1 % below the octave rule); the curve deviates from a straight dB line by 0.3-0.8 dB here | Unknown | Table follows the measurements; shape difference unresolved | `eg2`, `eg4` (`rel_*`) | `ElementTables.cpp` |
-| K10 | Envelope velocity/key shifts that move an index below 56 | Up to 10 % (decay index 55) | Outside the decay table's valid span | Unresolved | `eg6` (`tvd_127_66/67`) | `ElementEnvelope.cpp` |
+| K10 | Envelope velocity/key shifts that move an index below 56 | Resolved: decay 80 at sensitivity +63 shifted to indices 53-17 (nine velocities), attack 48 to 28 and 12, release 72 to 40, 22 and 9: all within 0.04 % at 44.1, 48 and 96 kHz (shifts to index 0 are immediate on both sides, below what the analysis resolves) | - | Resolved; checked in the test suite | `sv1` (`tvd_*`, `tva_*`, `tvr_*`) | `ElementEnvelope.cpp` |
 | K11 | Pitch ceiling | Reference: +4800 cents at full depth gave 4573 cents (note 60, sine waveform); Oscairn: 4800 | Reference clamps pitch shift | Deliberate (decision 16) | `pf1` (`pl_255_127`); `scripts/engine_peg.py` | none (no clamp) |
 | K12 | Pitch envelope hold times | Measured at 16, 32, 64, 80 only; between knots log-interpolated, above 80 extrapolated | Four knots | Above 80 accepted (decision 15); between knots unverified | `pf2` (`ph_*`) | `oscairn/ElementPitch.cpp` |
-| K13 | Pitch envelope depth and time sensitivity to velocity and key | Built (`8f92e7df`). Time velocity sensitivity and key follow use the amplitude envelope's law: 14 glides (sensitivities +-32, +63; velocities 32, 64, 127; notes 36, 60, 84) within one 10 ms analysis step at 44.1, 48 and 96 kHz, except a shift to index 0 (+63 at velocity 127): the reference glides within 15 ms, the engine takes 65 ms (the table's time at index 0). Depth velocity sensitivity uses the filter envelope's curves (K34): 17 static probes on a 1200-cent depth within 61 cents (curves 0, 1 and 4 at velocity 100 and 32 the largest). The release adjustment is not a parameter here; the release gets the whole key shift (not measured) | Shared laws | Built; checks against fitting renders | `ks2`; `scratchpad eng_peg.py` | `ElementPitch.cpp` `start`, `filterDepthVelocityFactor` |
+| K13 | Pitch envelope depth and time sensitivity to velocity and key | Built (`8f92e7df`). Time velocity sensitivity and key follow use the amplitude envelope's law: 14 glides (sensitivities +-32, +63; velocities 32, 64, 127; notes 36, 60, 84) within one 10 ms analysis step at 44.1, 48 and 96 kHz, except a shift to index 0 (+63 at velocity 127): the reference glides within 15 ms (one analysis step); the engine took 65 ms with the old decay table and takes 2.9 ms since `173589e5` (not re-measured). Depth velocity sensitivity uses the filter envelope's curves (K34): 17 static probes on a 1200-cent depth within 61 cents (curves 0, 1 and 4 at velocity 100 and 32 the largest). The release adjustment is not a parameter here; the release gets the whole key shift (not measured) | Shared laws | Built; checks against fitting renders | `ks2`; `scratchpad eng_peg.py` | `ElementPitch.cpp` `start`, `filterDepthVelocityFactor` |
 | K14 | Note ends, chokes and per-note volume in the CLAP plugin | Per key, not per note: notes sharing a key in one context end, choke and scale together | sfizz voices know their key, not a note ID | Accepted limitation | `clap/test.cpp` | `clap/plugin.cpp` |
-| K15 | Loop continuity | 40 waveforms checked; largest click metric 1.62 (Clarinet3 ff St at 8.05 s), criterion proposed, not listened to | - | Unverified | `loops.py` (scratchpad) | - |
+| K15 | Loop continuity | Every looped region of the factory library (32,223) and the user waves (2,072), held 30 s at 48 kHz (`loops.py`, decision 29). As extracted, each looped file ended on its loop end and the interpolator read nothing past it: 4,181 factory loops and 127 user loops measured above 2. With 64 frames repeating the loop's start after the loop end (converter `25ae28c`; the factory extractor and `pad_loops.py` beside it, outside these repositories): 604 factory loops and 19 user loops above 2. Of the 604, 187 are above 2 at the samples' own rate as well (54 loops under 20 ms, 133 longer), and 417 only at 48 kHz: 124 of those start within the first 44 frames, where sfizz's crossfade has no frames before the loop start and the interpolator reads before the start of the file; the other 293 measure 3.0 at the median, their third difference at -55 dBFS at the median. Of the 19 user loops, 13 are above 2 at their own rate (the KS Organ Bass loops). sfizz crossfades every loop over at least 1 ms (`loop_crossfade`'s lower bound) into the frames before the loop start, which covers a join that is not seamless in the data, and some are not: factory wave 046741's loop end continues seamlessly 16 frames before its stated loop start (a jump of about 8,000 steps at the stated join), so the extractor may place some loop starts one 16-sample frame late (not checked against the reference). Moving each loop 64 frames later in a file that goes on with it (tried, reverted in the converter as `ed5ec74`) took the join out of the crossfade: 3,037 factory loops then measured above 2 at the join, 2,431 of them not above 2 as extracted | Files ending on the loop end; joins not seamless in the data, covered by sfizz's crossfade | End padding in the providers; 604 factory and 19 user loops above the proposed threshold, reported (loops starting near the file start not fixed); the loop-start placement open; not listened to by Jacob | `loops.py`; scratchpad `sampler-verify/loops/f2-factory.json`, `f3-*-pad.json`, `f3-factory-moved.json`, `listen-loops/` | wave providers; `OscairnLoopsT.cpp` |
 | K16 | Factory waveform playback | Loads and sounds; level and timbre against the reference not compared per waveform | - | Unverified | `loadcheck` | - |
 | K17 | Element EQ, Part LFO | Not in the engine. (The filter envelope and the element LFO are, from `531e2214` and `b1946dca`: K33-K36) | Not built | Open | none yet | - |
 | K18 | Element LFO parameters | In the reference renders the element's LFO speed (0-63), wave, delay, fade-in, key-on reset and pitch depth change nothing; the LFO driven through a controller set ("E.LFO PMD"/"AMD") runs at 4.848 Hz as a triangle from note-on, and the extended speed range gives no modulation at all; the Part LFO's settings do not set the rate either (`lf4`) | Not known | Modelled as the reference mode (decision 21); the settings mode makes them act by definition (K35) | `lf2`, `lf3`, `lf4`; `scripts/lfo.py` | `oscairn/ElementLfo.cpp` |
@@ -1522,3 +1627,5 @@ repository, or the local scripts beside the renders).
 | K46 | A sound's output bus changed while it sounds | The change applies at a block's start, not at its event's frame. Voices sounding then stay on their old bus until they end; a patch's own `<effect>` buses (none in converted sounds) move with the sound at once, so a held voice's effect tail moves to the new bus and that voice reaches its old bus dry, bypassing a `<effect>` on the main bus | Effects are per synth, voices per bus | Deliberate (decision 28) | `clap/test.cpp` "a change of bus"; `OscairnT.cpp` "A voice keeps the host bus" | `Synth.cpp` `renderBlock`; `clap/plugin.cpp` `process` |
 | K47 | Ring-out of a sound on a sound bus | Across a Performance change only Main rings out through the outgoing chain; a retiring sound on a sound bus keeps playing on that port, through the incoming Performance's chain there | The host contract (`oscairn.sound-snapshots` drafts 3 and 4, "Main output only") | Deliberate | `clap/test.cpp` "ring-out carries only Main" | `clap/plugin.cpp` `process` |
 | K48 | Element connection (Thru, InsA, InsB) and drum-key outputs | Not routed: every region plays on its sound's bus (sfizz's `output` opcode folds onto that pair). The plan's element outputs A/B were to be ports 1 and 2; from 0.4.0 the ports beside Main are the sound buses, so element outputs would need further ports per sound | Not built | Open | none | `clap/plugin.cpp` `audioPortGet` |
+| K49 | Fast releases from levels below 127 | Releases below index 32 from levels 96, 64 and 32 (indices 4, 12, 20, 28): the engine, a straight line in amplitude at the index's rate, ends 5-14 % sooner than the reference; the reference's time grows less than in proportion to the start amplitude (the shortest of these are near what the analysis resolves) | Not known | Open; left out of the test suite | `sv2` (`rl_*`); `refstats.py --engine` | `ElementEnvelope.cpp` `enter` |
+| K50 | Decays below index 56 to levels above 0 | Decays to level 32 at indices 4, 20, 40 reach -20 dB 14 % later, 4.5 % sooner and 9 % sooner than the time rule (a segment takes the full-scale time whatever the distance) | Probably the reference picks the nearest of its rates for each distance; not modelled | Open | `sv2` (`dl_*`) | `ElementEnvelope.cpp` `enter` |
