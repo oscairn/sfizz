@@ -294,14 +294,14 @@ before the row is done. Factory usage counts are from RFC 0013.
 | Alternate pan depth | – | engine (`oscairn_pan_alternate`): alternates left/right per note; counter scope: measure |
 | Scaling pan depth | – | engine (`oscairn_pan_keyscale`, centre note fixed): measure |
 | Velocity cross fade | `xfin_lovel`/`xfout_hivel`, `xf_velcurve` gain or power | engine curve (`oscairn_xfvel`) unless the reference matches power or gain (measure) |
-| Key On Delay time / tempo-synced length | `delay` (seconds); no `delay_beats` | mapping for time (table: measure); engine for tempo sync (`oscairn_delay_beats`) |
+| Key On Delay time / tempo-synced length | `delay` (seconds); no `delay_beats` | engine (milestone 3): `oscairn_delay` (time length 0-127, a fitted law, K52) and `oscairn_delay_note` (note length 5-21 at the host tempo) |
 | XA Normal | plain region | opcode |
-| XA Legato | `trigger=legato` | opcode; selection in mono and poly, and what a legato element does with the first note: measure |
+| XA Legato | `trigger=legato` | engine (milestone 3): `oscairn_xa=1` under the element selection (`oscairn/Elements.cpp`): mono parts only, with `oscairn_mono=1`; measured (`xa1`) |
 | XA Key Off | `trigger=release` (+ `rt_decay`) | opcode; level and envelope at release: measure |
-| XA Cycle | `seq_length`/`seq_position`, counted **per region within its key range** | engine: one counter per element group shared by all its regions (`oscairn_cycle`) |
-| XA Random | `lorand`/`hirand` with one value per note | opcode if the reference picks uniformly among the group's random elements; measure |
-| XA A.SW Off / 1 On / 2 On | `loccN`/`hiccN` on a controller | mapping onto two reserved switch controllers, set by the Performance's assignable switches (decision) |
-| Element Group number (1-8) | – | engine: scope of Cycle/Random (`oscairn_element_group`); measure the rules |
+| XA Cycle | `seq_length`/`seq_position`, counted **per region within its key range** | engine (milestone 3): `oscairn_xa=3`, one position per element group shared by every key; measured (`xa1`) |
+| XA Random | `lorand`/`hirand` with one value per note | engine (milestone 3): `oscairn_xa=4`, one draw per group among its covering elements, each alike (K51) |
+| XA A.SW Off / 1 On / 2 On | `loccN`/`hiccN` on a controller | engine (milestone 3): `oscairn_xa=5`-`7`, read at note-on from the extended controllers 300 and 301, which the CLAP plugin's Assign Switch 1 and 2 parameters set (decision 6) |
+| Element Group number (1-8) | – | engine (milestone 3): `oscairn_element_group`, the scope of Cycle, Random and Legato; with `oscairn_element` (number) and `oscairn_element_lokey`/`_hikey`/`_lovel`/`_hivel` (limits) |
 | Element connection Thru/InsA/InsB | `output` (multi-output) | mapping to outputs 0/1/2 of the CLAP plugin; routing is RFC 0007 |
 | Half Damper switch and time | sustain is a switch | engine (`oscairn_half_damper`, `oscairn_damper_time`): measure |
 | Controller sets 1-32, key controller sets 1-4 (switches) | `_onccN` modifiers | Performance (assignments) plus engine destinations; the switches decide which element a controller set reaches |
@@ -347,7 +347,7 @@ before the row is done. Factory usage counts are from RFC 0013.
 
 | Parameter | sfizz | Disposition |
 | --- | --- | --- |
-| Mono/poly, key assign single/multi | `polyphony`, `note_polyphony`, `group` | mapping where it matches; mono legato behaviour: measure, likely engine (`oscairn_mono`) |
+| Mono/poly, key assign single/multi | `polyphony`, `note_polyphony`, `group` | mono: engine (milestone 3), `oscairn_mono=1` on the elements: a note cuts the other notes' element voices, the newest held key starts again when the sounding note ends, legato elements play (measured, `xa1`, `xa2`); key assign not built |
 | Portamento switch, time, mode (fingered/full-time), time mode (rate/time 1-2), legato slope | – | engine (`oscairn_portamento_*`): measure |
 | Pitch bend range up/down, detune (Hz), note shift | `bend_up`/`bend_down`, `transpose` | mapping; detune in Hz is engine |
 | Part AEG/FEG/filter offsets (−64..+63), velocity sensitivity depth/offset | – | engine destinations the Performance drives (parameters of the CLAP plugin) |
@@ -407,7 +407,7 @@ the wrapper implements the extension directly.
 | --- | --- |
 | Factory, complete plugin interface | Written in `clap/`; a test loads the bundle through `clap_entry` and checks every function pointer |
 | Audio/note ports | Stereo outputs: Main and, from 0.4.0, eight sound buses (one per sound, for parts sharing the instance; element outputs A/B are not built, K48), no input; one note port, CLAP preferred, MIDI accepted |
-| Parameters | From 0.4.0 one, Output bus, each sound's own (parts sharing one instance, below); later the Part-level offsets and switches, with real units and module paths |
+| Parameters | From 0.4.0 one, Output bus, each sound's own (parts sharing one instance, below); from 0.6.0 Assign Switch 1 and 2 (IDs 2 and 3, 0 or 1, each sound's own, at their event's frame, kept through a reset and a new patch, not saved in the state; decision 6); later the Part-level offsets, with real units and module paths |
 | State | Version 4 (0.5.0): text `oscairn-sampler-4\n`, then five length-prefixed fields (decimal byte length, `\n`, bytes, `\n`): local directory, base asset library, base asset path, SFZ text, output bus (one digit). With a base, every `sample=` path (relative, no `..`) resolves through `oscairn.assets` as `<library>/<path>/<sample>` and is listed in `oscairn.asset-dependencies`; an unresolvable sample fails the load; without the host extension a base falls back to the directory and fails if it is empty. Version 4 has the fields of version 3 (`oscairn-sfizz-3\n`, 0.4.0); the `oscairn-sfizz` versions 1 to 3 are no longer read (nothing was released). Documented at the top of `clap/plugin.cpp` |
 | Activation | Any rate and maximum block; `sfz::Synth::setSampleRate`/`setSamplesPerBlock` on activate |
 | Linux ARM64 | CI job on `ubuntu-24.04-arm` |
@@ -444,7 +444,8 @@ the wrapper implements the extension directly.
   of a process call after the selections and before any event. Activation restarts every sound.
   The notes reset ended get no `NOTE_END` (as Oscairn Analog). Reset keeps the parameters (each
   sound's Output bus), the prepared sounds and channel selections and the voice budget's limits;
-  sfizz gets no host tempo or transport from the plugin, so it keeps its own default.
+  from 0.6.0 the plugin passes the host's tempo (CLAP transport) to every rendered sound, for
+  tempo-synced key-on delays; without one sfizz keeps its default of 120 BPM.
 - **Offline rendering** (0.5.1). CLAP's `clap.render`: in `CLAP_RENDER_OFFLINE` every sound's
   synth freewheels (sfizz's `enableFreeWheeling`, set on the audio thread at each render from an
   atomic the main thread writes), so each block waits for the samples its notes stream and uses
@@ -630,6 +631,10 @@ passes its cross-rate check at 44.1, 48 and 96 kHz (section 6).
 | 6 | Drum keys, element outputs A/B; native sound contexts and assets in the CLAP plugin | Drum fixtures; routing tests; Oscairn's sound-context and asset tests against this checkout |
 | 7 | Converter coverage support: every element and drum-key parameter has an opcode | The converter's report shows no engine-parameter loss over the factory set |
 
+Milestone 3 status (2026-11-07, plugin 0.6.0): built, and its gate passes on hold-out probes
+recorded after the implementation was frozen (section 11, element model session), with the
+random sequences compared by distribution (K51). Open within it: K52-K57.
+
 ---
 
 ## 8. Upstreamability
@@ -715,7 +720,10 @@ Decisions taken (for Jacob to confirm):
 5. **Sound contexts** are one `sfz::Synth` each; sample sharing between contexts is a later,
    measured change.
 6. **Assignable switches** map to two reserved switch controllers (CC numbers above 127,
-   which sfizz supports as extended CCs) that the CLAP plugin exposes as parameters.
+   which sfizz supports as extended CCs) that the CLAP plugin exposes as parameters: from 0.6.0
+   the extended controllers 300 and 301, set by the parameters Assign Switch 1 and 2 (IDs 2 and
+   3, each sound's own, on from 0.5), which Oscairn's `button:1` and `button:2` controls drive
+   as parameter targets.
 7. **The old Oscairn Sampler** was deprecated by Oscairn in favour of this engine and renamed
    the Oscairn Legacy Sampler (`org.oscairn.legacy-sampler`, 2026-11-06).
 8. **CLAP identity:** ID `org.oscairn.sampler`, name "Oscairn Sampler", vendor "Oscairn", from
@@ -816,6 +824,26 @@ Taken in the verify session (2026-11-07), for Jacob to confirm:
     synthetic loop cut 40 frames short of a whole number of periods measures 3.3; reading past the
     end of the file (as extracted) measured up to 293. Proposed with a listening set of the worst
     cases (scratchpad `sampler-verify/listen-loops/`, README inside) for Jacob to judge.
+
+Taken in the element model session (2026-11-07), for Jacob to confirm:
+
+30. **Element selection** (milestone 3) lives in the engine (`oscairn/Elements.cpp`), driven by
+    per-region opcodes the converter writes on each element's group: `oscairn_element`,
+    `oscairn_xa`, `oscairn_element_group`, `oscairn_element_lokey`/`_hikey`/`_lovel`/`_hivel`,
+    `oscairn_mono`. Regions without an element number are not selected, so native SFZ is
+    unchanged. The converter writes them for every element of a Part with a Legato, Cycle,
+    Random or A.SW element, and for every element of a mono Part.
+31. **Random draws** come from one 8-bit generator per sound, restarted at a load and a reset, so
+    a sound plays the same sequence after each load (Oscairn's deterministic state); the
+    reference's generator is shared by the whole instrument and runs on across loads (K51).
+32. **Mono parts** are handled by the element selection under `oscairn_mono` (cut, start the
+    newest held key again, legato elements), as the legato rules need it; portamento and key
+    assign stay with the Part voicing row.
+33. **Assign Switch parameters keep their values** through a CLAP reset and a new patch (CLAP
+    keeps parameter values), are not saved in the plugin state (a converted Performance starts
+    them off, as its controls are at rest), and a snapshot's sounds start with them off.
+34. **Key On Delay time lengths** take 28 measured knots, linear between them (K52); note lengths
+    use the host's tempo from the CLAP transport.
 
 Risks and open questions:
 
@@ -1600,6 +1628,83 @@ not make `d88a8f9a` fail in 20 runs on this machine.
 
 **Gates and CI** on both commits are in the session report.
 
+### Element model session (2026-11-07): milestone 3, plugin 0.6.0
+
+RFC 0013's step 3: element-scoped cycle and random, element groups, the assignable switches,
+the legato rules (with a mono part's cut and restart), key-on delay with tempo sync, and XA
+Control as a whole (key-off elements were built in the sixth session, K42).
+
+Commits: `8d00f407` (element selection), `7b8ee82c` (CLAP: Assign Switch 1 and 2), `9711cb7f` (Key
+On Delay), `dc7fa3ec` (triplet note lengths, found by the hold-outs), then the version and this
+entry; written on `46799204` as `25edfadc`, `201583ae`, `9d557c85` and `a5c2beaf`, then rebased onto
+the verify and flaky reset test sessions' commits (`24bf3d33` to `78227d86`), which touch none of
+their code apart from the CLAP test's `Run` (the transport beside the offline flag). Converter
+(`performance-converter`): `2a2ebc7` (Oscairn Sampler's id and formats), `53c098b` (inverted
+limits), `dff0f3c` (Key On Delay), `fb72783` (XA Control, groups, mono and A.SW). Measurement:
+`f177a5d` (`awm2/xa.py`, which elements sounded).
+
+**Engine** (`oscairn/Elements.cpp`; decisions 30-34). Each region names its element
+(`oscairn_element`), XA Control (`oscairn_xa`), element group, limits and the part's mono mode;
+at each note-on the synth decides which elements start: Cycle, one position per group shared by
+every key, the next covering element in element order, a note no Cycle element of the group
+covers starting the group over; Random, one 8-bit draw per group among its covering elements
+(K51); A.SW Off, 1 On, 2 On by the switches at note-on (on from 64 of 127); Legato only in a mono
+part, on a note while another key is held, in a group with a plain element (Normal, Cycle, Random
+or an A.SW element whose switch is on, whatever its limits), the group's Normal and A.SW elements
+giving way, Cycle and Random playing on; a mono part's note cuts the other notes' element voices,
+and when its sounding note ends the newest held key starts again as a legato note. Key On Delay:
+28 measured knots (K52), note lengths at the host's tempo (K53). The hooks: `noteOnDispatch`
+(select, skip unselected element regions), `hdNoteOff` (mono restart), `clear`,
+`finalizeSfzLoad`, `restart`, `Voice::startVoice` (delay). Native regions carry no element
+number and take none of these paths.
+
+**CLAP.** Parameters Assign Switch 1 and 2 (IDs 2 and 3, each sound's own, at their event's
+frame, kept through a reset and a new patch, accepted by `prepare` and reported by
+`sound_values`; decision 33), setting the extended controllers 300 and 301 the selection reads;
+the host's tempo from the transport; a mono part's notes kept until their note-off.
+
+**What Oscairn needs.** Nothing new found: the converter gives each part with A.SW elements its
+`button:1`/`button:2` controls (at rest, off) with parameter targets on the sampler node's
+parameters 2 and 3 (0 to 1), which Oscairn sends as parameter events (with the sound's channel on
+a shared instance). Not run in Oscairn in this session (unverified); Oscairn applies them at a
+block's start (K57).
+
+**Reference measurements** (renders stay on the measuring machine; each element a sine at its own
+pitch offset, `measurement/awm2/xa.py`). Design batches, before the implementation: `xa1` (cycle in
+one and two groups, with limits and held notes, the position after a reload; random with one, three
+and grouped elements; legato in mono and poly, across groups, with cycle elements; A.SW thresholds,
+a switch during a held note, A.SW with legato; key-on delay at 17 time lengths, tempo sync at 120
+BPM), `xa1b` (key-on delay knots, a mono cut). Hold-outs, recorded after `9d557c85` (now `9711cb7f`)
+was frozen: `xa2` (a group starting over, velocity limits, an inverted limit, interleaved groups
+with random elements, random distributions with velocity limits, three-note legato chains in mono
+and poly in every release order, legato with A.SW Off and random elements, switches with cycle
+elements over three groups, key-on delay at five unmeasured time lengths and nine note lengths);
+after `a5c2beaf` (now `dc7fa3ec`), `xa3` (the four triplet lengths).
+
+**Gate (milestone 3): passes.** Each probe's `.pfm` converted by the converter (its sine wave as
+sfizz's `*sine`) and rendered through the engine with the probe's events, analysed as the
+recording: on the hold-outs, 905 stretches with keys held compared, the same elements in every
+one except three, all random draws (two where the engine's draw of 255 played none of a group
+without the sound's first element, K51, and one where the recorder delayed a note past the
+analysis window). Random distributions are in K51. Key-on delay hold-outs: time lengths within
+9.8 ms (0.37 %), note lengths within 7 ms (3.7 % for the dotted 1/16) after the triplet fix
+(triplets 0.05-0.78 %); the triplets were half their length at `9711cb7f` (hold-out `xa2`, fixed
+in `dc7fa3ec`, checked on `xa3`). The design probes match too (1305 stretches, all the
+same but one rand1 note the analysis found no window for), except `rand2grp`, whose notes 0.1 s
+apart the stretch analysis splits badly on both sides; per note its selections agree in
+distribution. Every mismatch found is in
+K51-K57.
+
+**Tests.** `sfizz_tests`: the opcodes; Cycle, Random (distribution, a restart repeats the
+sequence), Legato and A.SW sequences taken from `xa1`; Key On Delay at knots, between them, at
+three rates, note lengths at two tempos, triplets, a release during the delay.
+`oscairn_sampler_clap_tests`: the switch parameters (info, text, an event before a note in one
+block, reset and a new patch, a prepared sound on its channel, `sound_values`), a tempo-synced
+delay at the transport's 240 BPM, a mono part's held note. Each fails without its change (seen;
+in the commits).
+
+GATES_PLACEHOLDER
+
 ### Upstream merge test (2026-11-01)
 
 `upstream/develop` has no commits after `f5c6e29f`: merging it into `oscairn` is a no-op
@@ -1667,3 +1772,10 @@ repository, or the local scripts beside the renders).
 | K48 | Element connection (Thru, InsA, InsB) and drum-key outputs | Not routed: every region plays on its sound's bus (sfizz's `output` opcode folds onto that pair). The plan's element outputs A/B were to be ports 1 and 2; from 0.4.0 the ports beside Main are the sound buses, so element outputs would need further ports per sound | Not built | Open | none | `clap/plugin.cpp` `audioPortGet` |
 | K49 | Fast releases from levels below 127 | Releases below index 32 from levels 96, 64 and 32 (indices 4, 12, 20, 28): the engine, a straight line in amplitude at the index's rate, ends 5-14 % sooner than the reference; the reference's time grows less than in proportion to the start amplitude (the shortest of these are near what the analysis resolves) | Not known | Open; left out of the test suite | `sv2` (`rl_*`); `refstats.py --engine` | `ElementEnvelope.cpp` `enter` |
 | K50 | Decays below index 56 to levels above 0 | Decays to level 32 at indices 4, 20, 40 reach -20 dB 14 % later, 4.5 % sooner and 9 % sooner than the time rule (a segment takes the full-scale time whatever the distance) | Probably the reference picks the nearest of its rates for each distance; not modelled | Open | `sv2` (`dl_*`) | `ElementEnvelope.cpp` `enter` |
+| K51 | XA Random sequences | Distribution matches (hold-outs, 120 notes of two elements: reference 61/59, engine 62/58; 400 notes of two: 219/200 against 211/187; with a velocity-limited third element at velocity 120: 59/42/49 against 49/48/53), but the sequences differ: the reference draws from a generator the whole instrument shares (every voice it starts draws too) and that runs on across Performance loads (`xa1` rand3 and rand3b, the same probe loaded twice, gave different sequences); the engine draws one 8-bit value per group with random elements per note from a generator per sound, restarted at a load and a reset. As on the reference, one draw in 256 picks none of the group's elements unless the sound's first element is one of them, then that one (so a single random element always plays: `xa1` rand1, 599 of 599 notes) | Deterministic per sound by design | Deliberate (decision 31) | `xa1` (`rand*`), `xa2` (`h_rand2`, `h_randvel`, `h_cycmix`); `scratchpad engine_xa.py`, `compare_xa.py` | `oscairn/Elements.cpp` `select` |
+| K52 | Key On Delay time lengths between the measured knots | Knots at 0-8, every 4 to 32, every 8 to 112, then 116, 120, 124, 127; linear between. Hold-outs at 10, 36, 60, 100, 108: within 0.2, 0.4, 9.8, 1.2 and 5.9 ms (largest 0.37 % at 60) | Interpolation | Accepted unless Jacob sets a tighter tolerance | `xa1`, `xa1b` (`kod_*`), `xa2` (`h_kod_*`); `measurement/awm2/xa.py --onsets` | `oscairn/Elements.cpp` `keyOnDelaySeconds` |
+| K53 | Tempo-synced Key On Delay | Measured at 120 BPM only: the recorder passes no host tempo and the Performance's tempo (90) did not change the delays; within 7 ms of the note length (an 1/8 read 0.257 s, a dotted 1/16 0.181 s); the engine takes the CLAP transport's tempo | The recorder | Other tempos unverified | `xa1` (`kods_*`), `xa2` (`h_kods_*`), `xa3` (`t_kods_*`) | `clap/plugin.cpp` `process` |
+| K54 | A mono part's cut voices | The reference's earlier note falls more than 10 dB within about 6 ms of the new note (`xa1b` mono_fade; the 2 ms analysis cannot resolve it further); the engine fades it over sfizz's off time (6 ms). Key-off elements are not cut in the engine (not measured on the reference); sustain pedal and key assign with mono not measured | Not measured further | Unverified | `xa1b` (`mono_fade`) | `Synth.cpp` `oscairnSelect` |
+| K55 | Element limits and velocity cross fade | The element's velocity limits decide its selection; on the reference a velocity cross fade widens them for the selection too (not measured), and the engine has no velocity cross fade (dropped by the converter) | Velocity cross fade not built | Open | none | `oscairn/Elements.cpp` |
+| K56 | Elements the converter leaves out | An element with level 0, or whose wave the converter cannot find, has no regions, so it takes no part in the selection; on the reference it still takes a Cycle step, counts as a plain element for Legato and can be a Random pick | Converter | Open, for the converter | none | converter `awm2.py` |
+| K57 | Assign switches from Oscairn | The reference reads the switches from controllers (86 and 87 by default) at the event's time; Oscairn sets the plugin's parameters at the start of a block (its queued parameter values), so a switch and a note in one block may swap order; within a block the plugin keeps the event's frame | Host's parameter timing | Unverified in Oscairn | `clap/test.cpp` "the assignable switches" | `clap/plugin.cpp` `applySwitch` |
