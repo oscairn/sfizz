@@ -1455,7 +1455,7 @@ const clap_plugin_descriptor_t descriptor {
     "https://github.com/oscairn/sfizz",
     "",
     "",
-    "0.4.1",
+    "0.5.0",
     "SFZ and AWM2-class sample player, based on sfizz",
     features,
 };

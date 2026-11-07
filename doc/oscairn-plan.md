@@ -33,7 +33,7 @@ from rendered audio (section 6).
 
 ## 1. Goal, scope and relation to RFC 0013
 
-**Goal.** One CLAP instrument, built from this fork, that
+**Goal.** One CLAP instrument, built from this fork (Oscairn Sampler, from 0.5.0), that
 
 - plays any AWM2 Part (Normal or Drum) converted from a MONTAGE M / MODX M Performance, with
   every element and drum-key engine parameter represented with the same range, unit and
@@ -50,8 +50,8 @@ destinations those systems drive (element switches, assignable switches, the Par
 offsets).
 
 **What RFC 0013 said.** RFC 0013 describes the engine as a new implementation written for
-Oscairn, growing the Oscairn Sampler (one-region SFZ, AGPL, `oscairn/sampler`) through RFC
-0008's step 3 (multisample) and then the element model, filters, envelopes and drum Parts.
+Oscairn, growing the old Oscairn Sampler (one-region SFZ, AGPL, `oscairn/sampler`, now the
+Oscairn Legacy Sampler) through RFC 0008's step 3 (multisample) and then the element model, filters, envelopes and drum Parts.
 
 **What forking sfizz changes.**
 
@@ -71,9 +71,10 @@ Oscairn, growing the Oscairn Sampler (one-region SFZ, AGPL, `oscairn/sampler`) t
   per-voice element state RFC 0013 asks for. An AWM2 element becomes a `<group>` of regions,
   one region per key bank; element settings sit on the group and every voice of that element
   gets its own copy of the DSP state.
-- **The Oscairn Sampler and this engine.** The Sampler stays as it is (AGPL, Oscairn's own
-  baseline profile and test harness). Whether Oscairn keeps both or replaces the Sampler's
-  engine with this one is a decision for Jacob (section 10).
+- **The old Oscairn Sampler and this engine.** Oscairn deprecated the old Sampler in favour of
+  this engine: it is now the Oscairn Legacy Sampler (`org.oscairn.legacy-sampler`,
+  `oscairn/sampler` `5c7c420`), and this plugin took the Oscairn Sampler name in 0.5.0
+  (section 9).
 
 **Recommendation: keep sfizz's engine, add an opt-in element layer.** Native opcodes keep
 their sfizz meaning in every patch. The reference behaviour arrives through new opcodes with
@@ -394,8 +395,9 @@ Checked against `oscairn/docs/plugin-porting.md` at Oscairn `9de5aad`.
 ### CLAP target
 
 sfizz has no CLAP build in either repository. The fork adds one in `clap/`
-(`oscairn-sfizz.clap`, target `sfizz_clap`, option `SFIZZ_CLAP`, off by default so upstream
-builds are unchanged). It vendors the CLAP headers (MIT) and Oscairn's plugin SDK headers
+(`oscairn-sampler.clap`, target `oscairn_sampler_clap`, option `SFIZZ_CLAP`, off by default so
+upstream builds are unchanged; the bundle was `oscairn-sfizz.clap`, target `sfizz_clap`, before
+0.5.0). It vendors the CLAP headers (MIT) and Oscairn's plugin SDK headers
 (MIT: `sound-contexts.h`, `assets.h`, from 0.3.0 `voice-budget.h` and the helper
 `voice-budget-plugin.hpp`, and from 0.4.0 `ui.h`) with their commits. The SDK's
 `sound-contexts-plugin.hpp` owns voices itself, which does not fit sfizz's voice manager, so
@@ -406,7 +408,7 @@ the wrapper implements the extension directly.
 | Factory, complete plugin interface | Written in `clap/`; a test loads the bundle through `clap_entry` and checks every function pointer |
 | Audio/note ports | Stereo outputs: Main and, from 0.4.0, eight sound buses (one per sound, for parts sharing the instance; element outputs A/B are not built, K48), no input; one note port, CLAP preferred, MIDI accepted |
 | Parameters | From 0.4.0 one, Output bus, each sound's own (parts sharing one instance, below); later the Part-level offsets and switches, with real units and module paths |
-| State | Version 3 (0.4.0): text `oscairn-sfizz-3\n`, then five length-prefixed fields (decimal byte length, `\n`, bytes, `\n`): local directory, base asset library, base asset path, SFZ text, output bus (one digit). Version 2 (`69fe1f5f`) is the same without the bus. With a base, every `sample=` path (relative, no `..`) resolves through `oscairn.assets` as `<library>/<path>/<sample>` and is listed in `oscairn.asset-dependencies`; an unresolvable sample fails the load; without the host extension a base falls back to the directory and fails if it is empty. Versions 1 (directory and text only) and 2 still load, on Main. Documented at the top of `clap/plugin.cpp` |
+| State | Version 4 (0.5.0): text `oscairn-sampler-4\n`, then five length-prefixed fields (decimal byte length, `\n`, bytes, `\n`): local directory, base asset library, base asset path, SFZ text, output bus (one digit). With a base, every `sample=` path (relative, no `..`) resolves through `oscairn.assets` as `<library>/<path>/<sample>` and is listed in `oscairn.asset-dependencies`; an unresolvable sample fails the load; without the host extension a base falls back to the directory and fails if it is empty. Version 4 has the fields of version 3 (`oscairn-sfizz-3\n`, 0.4.0); the `oscairn-sfizz` versions 1 to 3 are no longer read (nothing was released). Documented at the top of `clap/plugin.cpp` |
 | Activation | Any rate and maximum block; `sfz::Synth::setSampleRate`/`setSamplesPerBlock` on activate |
 | Linux ARM64 | CI job on `ubuntu-24.04-arm` |
 
@@ -459,7 +461,9 @@ null. Oscairn saves a Performance through the contexts' own snapshot interface a
 without it, so the plugin has one (`a5e93e55`, format at `snapshotSave` in `clap/plugin.cpp`):
 every prepared context's name and patch and each channel's context, queued selections applied;
 loading builds every engine first and gives contexts other than the default fresh IDs; a
-version 1 or 2 plugin state (what converted libraries hold) loads as the default context. A
+plugin state loads as the default context. From 0.5.0 the snapshot is
+`oscairn-sampler-contexts-3`, with the fields of `oscairn-sfizz-contexts-2` (0.4.0), which is no
+longer read. A
 fresh instance plays a sine (`fae08c7e`), so a new part sounds. Checked with Oscairn's
 `oscairn-plugin-check` at Oscairn `66a16e5`, built outside the repository, in the engine and
 with `OSCAIRN_PLUGIN_WORKER`: PASSED both ways (plays, saves, reopens identically, exports,
@@ -667,6 +671,14 @@ passes its cross-rate check at 44.1, 48 and 96 kHz (section 6).
   Oscairn's SDK headers are MIT, vendored with their commits.
 - Oscairn loads the plugin through CLAP as a separate work (RFC 0001), so the BSD licence
   has no effect on Oscairn's AGPL and vice versa.
+- Naming (Jacob, 2026-11-06): the plugin is **Oscairn Sampler**, CLAP ID
+  `org.oscairn.sampler`, bundle `oscairn-sampler.clap`, described as "SFZ and AWM2-class sample
+  player, based on sfizz", from 0.5.0; it was "Oscairn sfizz" (`org.oscairn.sfizz`,
+  `oscairn-sfizz.clap`). The name was free once Oscairn's deprecated sampler became the Oscairn
+  Legacy Sampler (`org.oscairn.legacy-sampler`, `oscairn/sampler` `5c7c420`, pinned by Oscairn
+  `7d325f2`). Only the Oscairn product is renamed: the repository (`oscairn/sfizz`), sfizz's
+  library, its standalone, LV2 and VST targets and its other names, the `SFIZZ_CLAP` option,
+  the BSD-2 notice and native SFZ behaviour stay sfizz's.
 - RFC 0013 IP rules: no manufacturer code, tables or audio; fixtures are generated; renders
   stay on the measuring machine. Names: no manufacturer or product names (or their engine and
   feature names) in identifiers, opcodes, parameters, UI or committed code; this plan names
@@ -693,10 +705,11 @@ Decisions taken (for Jacob to confirm):
    measured change.
 6. **Assignable switches** map to two reserved switch controllers (CC numbers above 127,
    which sfizz supports as extended CCs) that the CLAP plugin exposes as parameters.
-7. **The Oscairn Sampler** stays unchanged; whether Oscairn retires it in favour of this
-   engine is open.
-8. **CLAP identity:** ID `org.oscairn.sfizz`, name "Oscairn sfizz", vendor "Oscairn",
-   version 0.1.0.
+7. **The old Oscairn Sampler** was deprecated by Oscairn in favour of this engine and renamed
+   the Oscairn Legacy Sampler (`org.oscairn.legacy-sampler`, 2026-11-06).
+8. **CLAP identity:** ID `org.oscairn.sampler`, name "Oscairn Sampler", vendor "Oscairn", from
+   0.5.0 (Jacob, 2026-11-06; section 9); ID `org.oscairn.sfizz`, name "Oscairn sfizz" from
+   0.1.0 to 0.4.1.
 9. **Profile scope:** the profile applies to the regions after its `<control>` header, not to
    the whole patch (sfizz builds regions while parsing).
 10. **Envelope tables in seconds**, generated into `ElementTables.cpp` by the measurement
@@ -1409,6 +1422,40 @@ runs after; its samples stream, and sfizz's loader can fall behind in a live ren
 The test now renders a differing comparison again, both sides, once, and that commit was amended
 before it was pushed. The gates on the CLAP commit as pushed and on the version commit are in the
 session report.
+
+### Rename session (2026-11-06): Oscairn Sampler, plugin 0.5.0
+
+Jacob named the plugin Oscairn Sampler once Oscairn's deprecated sampler became the Oscairn Legacy
+Sampler (`oscairn/sampler` `5c7c420`, pinned by Oscairn `7d325f2`). Section 9 records the names,
+section 5 the bundle, target, state and snapshot, and decisions 7 and 8 the change.
+
+Commits: `6c4a6109` (the plugin is Oscairn Sampler), then the version and this entry.
+
+**Renamed.** CLAP ID `org.oscairn.sfizz` -> `org.oscairn.sampler`; name "Oscairn sfizz" -> "Oscairn
+Sampler"; description -> "SFZ and AWM2-class sample player, based on sfizz"; bundle
+`oscairn-sfizz.clap` -> `oscairn-sampler.clap`; CMake targets `sfizz_clap`, `sfizz_clap_tests`,
+`sfizz_clap_headers`, `sfizz_clap_budget`, `sfizz_clap_plugin` -> `oscairn_sampler_clap...`; the
+plugin's C++ names (namespace `oscairn_sampler`, `OSCAIRN_SAMPLER_EXPORT`,
+`oscairnSamplerFileOpens`, `oscairn_sampler_keep_entry`); CI's targets and bundle path. State
+`oscairn-sfizz-3` -> `oscairn-sampler-4` and snapshot `oscairn-sfizz-contexts-2` ->
+`oscairn-sampler-contexts-3`, the same fields; the `oscairn-sfizz` states and snapshots are no
+longer read. Kept: the repository, sfizz's names, the `SFIZZ_CLAP` option, the BSD-2 notice.
+
+**Tests.** `oscairn_sampler_clap_tests`: the built bundle's descriptor has the new ID and name;
+states and snapshots carry the new headers; `oscairn-sfizz-3` and `-2` states and an
+`oscairn-sfizz-contexts-2` snapshot are refused. On `3b6270ca`'s plugin the descriptor check, the
+snapshot header check, every state load and the two state refusals fail.
+
+**Gates** (`gate.sh`, on `6c4a6109`'s committed tree): Release passed (522 test cases). The first
+ASan+UBSan run failed one check, the reset test (`off_by.sfz` rendering differently from a fresh
+instance after a reset) while the machine's load average was above 50; the same binary rerun
+failed once more (`articulations.sfz`) and then passed seven times as the load fell, and a fresh
+ASan+UBSan build then passed, as did TSan and the stock gate (159 renders bit-identical, 106
+streaming renders bit-identical to stock's preloaded ones, 0 unstable, 0 failed). The rename does
+not touch rendering; the reset test's sensitivity to load is the one noted in the reset session.
+
+**Converter.** It must write the new ID, bundle name, product name and formats (the version 4
+state with its bus field; the version 3 snapshot with a bus per slot).
 
 ### Upstream merge test (2026-11-01)
 
