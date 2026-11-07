@@ -5,7 +5,10 @@
 # sfizz and through this tree with the same event script, and requires bit-identical
 # 32-bit float output.
 #
-# usage: scripts/oscairn/compare-stock.sh <work dir> [fork source dir]
+# usage: scripts/oscairn/compare-stock.sh <work dir> [fork source dir] [patch.sfz...]
+#
+# Patches given after the fork source dir go through the same checks as the repository's: SFZ
+# instruments too large to keep here, such as the Salamander Grand Piano (RFC 0013 step 1).
 #
 # The stock tree is upstream sfizz at STOCK_COMMIT, unmodified. Both trees are built as
 # shared libraries with the same compiler and flags; the flag below only lets current
@@ -34,6 +37,7 @@ STOCK_URL=https://github.com/sfztools/sfizz.git
 
 work=$(mkdir -p "$1" && cd "$1" && pwd)
 fork=$(cd "${2:-$(dirname "$0")/../..}" && pwd)
+extra=("${@:3}")
 here=$(cd "$(dirname "$0")" && pwd)
 cxx=${CXX:-c++}
 flags="-Wno-unknown-warning-option -Wno-missing-template-arg-list-after-template-kw"
@@ -84,6 +88,7 @@ while IFS= read -r p; do patches+=("$p"); done < <(
     find "$fork/tests/TestFiles" "$here/patches" -name '*.sfz' \
         ! -name 'included_loop*.sfz' ! -name 'root_loop.sfz' ! -name 'newdrums_flat.sfz' \
         ! -name 'included_subdir.sfz' ! -name 'table_embedded.sfz' | LC_ALL=C sort)
+patches+=(${extra[@]+"${extra[@]}"})
 
 # Silent on purpose, so only loaded and compared: the hierarchy fixtures' group delays (36 to
 # 67 s) outlast the render; scripts/oscairn/patches/hierarchy.sfz plays the same hierarchy.
