@@ -30,6 +30,9 @@
 // Draft 4 saves one sound alone (on Main) and reads an unselected sound's bus, which Oscairn needs
 // to form shared instances on its own.
 //
+// Rendering: CLAP's render extension; offline, every block waits for the samples its notes
+// stream (sfizz's freewheeling), so a render does not depend on how far the loader has got.
+//
 // Files: with the host's oscairn.assets, every sample a patch uses is resolved through the
 // host, and oscairn.asset-dependencies lists them; without it, paths resolve from the
 // patch's directory.
@@ -148,6 +151,7 @@ struct Plugin {
     uint32_t maxFrames { 1024 };
     bool active { false };
     uint32_t chokeFrames { 144 };
+    std::atomic<bool> offline { false }; // main thread -> audio: CLAP_RENDER_OFFLINE
 
     // main thread: preloaded samples the contexts share, so a sound prepared beside another
     // that uses the same files does not read them again
@@ -719,6 +723,10 @@ clap_process_status process(const clap_plugin_t* p, const clap_process_t* proces
                 to[1] = ringOut->data32[pair + 1] + start;
             }
             float* buffers[2] = { s.left.data(), s.right.data() };
+            if (s.offline.load(std::memory_order_relaxed))
+                e->synth.enableFreeWheeling();
+            else
+                e->synth.disableFreeWheeling();
             // voices on an older bus than the context's play into it (only buses in busesInUse)
             e->synth.renderBlock(sfz::AudioSpan<float>(buffers, 2, 0, n), to, static_cast<int>(busCount));
             float* toLeft = to[2 * hostBus[i]];
@@ -1409,6 +1417,16 @@ bool paramHint(const clap_plugin_t*, clap_id id, oscairn_param_hint_t* hint)
 
 const oscairn_plugin_ui_t ui { paramHint };
 
+bool renderSet(const clap_plugin_t* p, clap_plugin_render_mode mode)
+{
+    if (mode != CLAP_RENDER_REALTIME && mode != CLAP_RENDER_OFFLINE)
+        return false;
+    self(p).offline = mode == CLAP_RENDER_OFFLINE;
+    return true;
+}
+
+const clap_plugin_render_t render { [](const clap_plugin_t*) { return false; }, renderSet };
+
 const void* getExtension(const clap_plugin_t*, const char* id)
 {
     if (!std::strcmp(id, CLAP_EXT_AUDIO_PORTS))
@@ -1429,6 +1447,8 @@ const void* getExtension(const clap_plugin_t*, const char* id)
         return &params;
     if (!std::strcmp(id, OSCAIRN_EXT_UI))
         return &ui;
+    if (!std::strcmp(id, CLAP_EXT_RENDER))
+        return &render;
     return nullptr;
 }
 

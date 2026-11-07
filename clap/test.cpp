@@ -36,6 +36,7 @@ int callbacks = 0;
 // own loader threads may allocate meanwhile)
 thread_local bool guarded = false;
 std::atomic<int> guardedAllocations { 0 };
+bool offlineRenders = false; // set while the plugins process offline, which may allocate
 
 // Assets: the test library "lib" maps to the sfizz test files folder; "missing" fails
 bool resolveAsset(const clap_host_t*, oscairn_asset_ref_t* ref, char* path, uint32_t capacity, char* message, uint32_t messageCapacity)
@@ -138,7 +139,7 @@ struct Run {
         clap_process_t p {};
         p.frames_count = frames; p.audio_outputs = &out; p.audio_outputs_count = 1;
         p.in_events = &events.input; p.out_events = &events.output; p.steady_time = -1;
-        guarded = true;
+        guarded = !offlineRenders;
         status = plugin->process(plugin, &p);
         guarded = false;
         peak = 0;
@@ -785,6 +786,21 @@ int main(int argc, char** argv)
         plugin->deactivate(plugin);
         plugin->destroy(plugin);
     }
+    { // offline (clap.render): each block waits for the samples its notes stream, so a note in a
+      // block longer than sfizz's preload (8192 frames) plays past it
+        auto* plugin = create();
+        auto* r = static_cast<const clap_plugin_render_t*>(plugin->get_extension(plugin, CLAP_EXT_RENDER));
+        CHECK(r && !r->has_hard_realtime_requirement(plugin) && !r->set(plugin, 2) && r->set(plugin, CLAP_RENDER_OFFLINE));
+        CHECK(load(plugin, stateFor("<region> sample=stereo_sample.wav", "", "", OSCAIRN_TEST_FILES)));
+        CHECK(plugin->activate(plugin, 48000, 1, 32768));
+        Events in;
+        in.note(CLAP_EVENT_NOTE_ON, 0, 1, 60, 1.0);
+        offlineRenders = true;
+        const auto out = play(plugin, in, 32768, nullptr, 32768);
+        offlineRenders = false;
+        CHECK(rms(out, 0, 8192) > 1e-3 && rms(out, 9000, 32768) > 1e-4);
+        plugin->destroy(plugin);
+    }
     { // sound-context snapshot: every context, queued selections applied, fresh IDs on load
         auto contexts = [](const clap_plugin_t* p) {
             return static_cast<const oscairn_plugin_sound_contexts_t*>(p->get_extension(p, OSCAIRN_EXT_SOUND_CONTEXTS));
@@ -975,16 +991,21 @@ int main(int argc, char** argv)
         for (const std::string& path : paths)
             patches.push_back({ path, stateFor(readFile(path), "", "", path.substr(0, path.rfind('/'))) });
         int compared = 0, failed = 0;
-        // A patch whose samples stream can render differently when sfizz's loader falls behind
-        // (section 3 of the plan), as on a loaded machine; a gap left by reset differs every time,
-        // so a render differing from a fresh one is rendered again, both of them, once.
+        // Rendered offline: in real time, a patch whose samples stream renders what the loader has
+        // read so far (section 3 of the plan), and two fresh instances differ on a loaded machine
+        auto offline = [](const clap_plugin_t* p) {
+            auto* r = static_cast<const clap_plugin_render_t*>(p->get_extension(p, CLAP_EXT_RENDER));
+            CHECK(r && !r->has_hard_realtime_requirement(p) && r->set(p, CLAP_RENDER_OFFLINE));
+            return p;
+        };
+        offlineRenders = true; // sfizz queues a block's loads itself when freewheeling
         for (size_t i = 0; i < patches.size(); ++i) {
             const std::string& state = patches[i].second;
             const std::string& other = patches[(i * 7 + 3) % patches.size()].second;
             Events in;
             incoming(in, 0, 0);
             auto renderFresh = [&](std::vector<float>& out) {
-                auto* f = create();
+                auto* f = offline(create());
                 const bool ok = load(f, state) && f->activate(f, 48000, 1, 256);
                 if (ok)
                     out = play(f, in, frames);
@@ -995,36 +1016,32 @@ int main(int argc, char** argv)
             if (!renderFresh(fresh))
                 continue;
             for (int way = 0; way < 4; ++way) {
-                bool same = false;
-                for (int attempt = 0; attempt < 2 && !same; ++attempt) {
-                    if (attempt)
-                        renderFresh(fresh);
-                    auto* a = create();
-                    CHECK(load(a, way == 1 ? other : state) || load(a, state));
+                auto* a = offline(create());
+                CHECK(load(a, way == 1 ? other : state) || load(a, state));
+                CHECK(a->activate(a, 48000, 1, 256));
+                Events before;
+                busy(before, 0);
+                play(a, before, 25600);
+                const std::string saved = save(a);
+                reset(a);
+                if (way == 3)
+                    a->deactivate(a);
+                if (way != 2)
+                    CHECK(load(a, state));
+                if (way == 3)
                     CHECK(a->activate(a, 48000, 1, 256));
-                    Events before;
-                    busy(before, 0);
-                    play(a, before, 25600);
-                    const std::string saved = save(a);
-                    reset(a);
-                    if (way == 3)
-                        a->deactivate(a);
-                    if (way != 2)
-                        CHECK(load(a, state));
-                    if (way == 3)
-                        CHECK(a->activate(a, 48000, 1, 256));
-                    if (way == 2)
-                        CHECK(save(a) == saved);
-                    same = play(a, in, frames) == fresh;
-                    a->on_main_thread(a);
-                    a->destroy(a);
-                }
+                if (way == 2)
+                    CHECK(save(a) == saved);
+                const bool same = play(a, in, frames) == fresh;
+                a->on_main_thread(a);
+                a->destroy(a);
                 if (!same)
                     std::printf("after a reset (way %d) it renders differently from a fresh instance: %s\n", way, patches[i].first.c_str());
                 failed += !same;
             }
             ++compared;
         }
+        offlineRenders = false;
         std::printf("reset: %d patches compared, %d renders differ from a fresh instance's\n", compared, failed);
         CHECK(compared > 30 && failed == 0);
 
