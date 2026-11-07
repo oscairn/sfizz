@@ -290,6 +290,10 @@ struct Synth::Impl final: public Parser::Listener {
 
     // Set as sw_default if present in the file
     absl::optional<uint8_t> currentSwitch_;
+    // The keyswitch as the last load left it, and the random generators as the voices'
+    // construction did (loading draws none), for Synth::restart
+    absl::optional<uint8_t> loadedSwitch_;
+    Random::Streams loadedRandom_;
     std::vector<std::string> unknownOpcodes_;
     bool oscairnProfile_ { false }; // <control> oscairn_profile=1 seen in this patch
     using RegionViewVector = std::vector<Region*>;

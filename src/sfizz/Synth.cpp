@@ -983,6 +983,8 @@ void Synth::Impl::finalizeSfzLoad()
                 swLastSlots_.set(key);
         }
     }
+
+    loadedSwitch_ = currentSwitch_;
 }
 
 bool Synth::loadScalaFile(const fs::path& path)
@@ -2030,6 +2032,7 @@ void Synth::Impl::resetVoices(int numVoices)
         set->removeAllVoices();
 
     voiceManager_.requireNumVoices(numVoices_, resources_);
+    loadedRandom_ = resources_.getMidiState().random();
 
     for (auto& voice : voiceManager_) {
         voice.setSampleRate(this->sampleRate_);
@@ -2248,6 +2251,40 @@ void Synth::allSoundOff() noexcept
             if (effectBus)
                 effectBus->clear();
     }
+}
+
+void Synth::restart() noexcept
+{
+    Impl& impl = *impl_;
+    allSoundOff();
+    MidiState& midiState = impl.resources_.getMidiState();
+    midiState.random() = impl.loadedRandom_;
+    for (auto& voice : impl.voiceManager_)
+        voice.restartNoise();
+    midiState.resetEventStates(); // pitch bend, aftertouch and poly aftertouch to 0
+    midiState.resetNoteStates();
+    midiState.programChangeEvent(0, 0);
+    impl.resetAllControllers(0);
+    impl.currentSwitch_ = impl.loadedSwitch_;
+    // each layer's switches and pedals as finalizeSfzLoad sets them up
+    for (const Impl::LayerPtr& layerPtr : impl.layers_) {
+        Layer& layer = *layerPtr;
+        const Region& region = layer.getRegion();
+        layer.initializeActivations();
+        layer.sequenceCounter_ = 0;
+        layer.delayedSustainReleases_.clear();
+        if (region.lastKeyswitch && impl.currentSwitch_)
+            layer.keySwitched_ = (*impl.currentSwitch_ == *region.lastKeyswitch);
+        if (region.lastKeyswitchRange && impl.currentSwitch_)
+            layer.keySwitched_ = region.lastKeyswitchRange->containsWithEnd(*impl.currentSwitch_);
+        for (int cc = 0; cc < config::numCCs; cc++)
+            layer.updateCCState(cc, midiState.getCCValue(cc));
+        layer.registerPitchWheel(midiState.getPitchBend());
+        layer.registerAftertouch(midiState.getChannelAftertouch());
+        layer.registerTempo(static_cast<float>(impl.resources_.getBeatClock().getBeatsPerSecond()));
+        layer.registerProgramChange(midiState.getProgram());
+    }
+    impl.genController_->resetSmoothers();
 }
 
 void Synth::addExternalDefinition(const std::string& id, const std::string& value)

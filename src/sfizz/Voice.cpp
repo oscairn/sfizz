@@ -310,7 +310,8 @@ struct Voice::Impl
     double filterDuration_;
 
     fast_real_distribution<float> uniformNoiseDist_ { -config::uniformNoiseBounds, config::uniformNoiseBounds };
-    fast_gaussian_generator<float> gaussianNoiseDist_ { 0.0f, config::noiseVariance, resources_.getMidiState().random().voice() };
+    uint32_t noiseSeed_ { resources_.getMidiState().random().voice() };
+    fast_gaussian_generator<float> gaussianNoiseDist_ { 0.0f, config::noiseVariance, noiseSeed_ };
 
     Smoother gainSmoother_;
     Smoother bendSmoother_;
@@ -1919,6 +1920,12 @@ void Voice::reset() noexcept
         eq.reset();
 
     removeVoiceFromRing();
+}
+
+void Voice::restartNoise() noexcept
+{
+    Impl& impl = *impl_;
+    impl.gaussianNoiseDist_.seed(impl.noiseSeed_);
 }
 
 void Voice::Impl::resetLoopInformation() noexcept

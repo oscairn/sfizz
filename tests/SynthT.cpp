@@ -2298,3 +2298,84 @@ TEST_CASE("[Synth] Each synth draws its own random numbers")
     // a second synth in the same process draws the same numbers
     REQUIRE(render() == first);
 }
+
+TEST_CASE("[Synth] After restart a synth plays as it did after loading")
+{
+    // What restart puts back would show here: the keyswitches (sw_default, a range, the previous
+    // note), round robins, lorand and the random generators, the notes held (trigger=first),
+    // aftertouch, poly aftertouch, a controller, the bend, the program and the tempo as switches,
+    // a release region under the pedal, a random LFO and controller, the volume controller's
+    // smoothing and an effect's tail
+    const std::string patch = R"(
+        <control> set_cc20=10
+        <global> ampeg_release=0.03
+        <group> sw_lokey=24 sw_hikey=25 sw_default=24
+        <region> sw_last=24 lokey=60 hikey=72 sample=*sine
+        <region> sw_last=25 lokey=60 hikey=72 sample=*saw
+        <group>
+        <region> key=48 seq_length=3 seq_position=1 sample=*sine
+        <region> key=48 seq_length=3 seq_position=2 sample=*triangle
+        <region> key=48 seq_length=3 seq_position=3 sample=*square
+        <region> key=50 hirand=0.5 sample=*noise pitch_random=50 amp_random=3 delay_random=0.002
+        <region> key=50 lorand=0.5 sample=*gnoise fil_type=lpf_2p cutoff=2000 fil_random=1000
+        <region> key=52 lochanaft=64 sample=*saw
+        <region> key=53 lopolyaft=64 sample=*square
+        <region> key=54 locc20=64 sample=*triangle
+        <region> key=55 lobend=4000 sample=*saw
+        <region> key=56 loprog=1 hiprog=127 sample=*sine
+        <region> key=45 lobpm=200 sample=*triangle
+        <region> key=46 sw_lolast=23 sw_hilast=24 sample=*saw
+        <region> key=58 sw_previous=84 sample=*triangle
+        <region> key=58 trigger=first sample=*square
+        <region> key=57 sample=*sine
+        <region> key=57 trigger=release sample=*saw
+        <region> key=59 sample=*saw oscillator_phase=-1 lfo1_wave=12 lfo1_freq=20 lfo1_pitch=100 pitch_oncc135=200
+        <effect> type=lofi bitred=90 decim=50
+    )";
+    auto load = [&](sfz::Synth& synth) {
+        synth.loadSfzString(fs::current_path() / "tests/TestFiles/restart.sfz", patch);
+        synth.setNumVoices(48); // voices made after the load draw their noise seeds then
+    };
+    sfz::AudioBuffer<float> buffer { 2, 256 };
+    auto render = [&](sfz::Synth& synth, int blocks) {
+        std::vector<float> out;
+        for (int b = 0; b < blocks; ++b) {
+            synth.renderBlock(buffer);
+            out.insert(out.end(), buffer.getConstSpan(0).begin(), buffer.getConstSpan(0).end());
+        }
+        return out;
+    };
+    auto play = [&](sfz::Synth& synth) {
+        int k = 0;
+        for (int key : { 58, 46, 60, 48, 50, 52, 53, 54, 55, 56, 45, 57, 59, 50, 48, 64 })
+            synth.noteOn(10 * k++, key, 100);
+        synth.noteOff(200, 57, 0);
+        synth.cc(210, 64, 127);
+        synth.noteOff(220, 48, 0);
+        synth.cc(240, 64, 0); // releases what the pedal holds
+        return render(synth, 40);
+    };
+    sfz::Synth used, fresh;
+    load(used);
+    load(fresh);
+    used.cc(0, 66, 127);
+    used.noteOn(0, 25, 100); // keyswitch
+    used.noteOff(1, 25, 0);
+    int k = 0;
+    for (int key : { 48, 50, 48, 50, 57, 59, 60, 64, 36, 67, 72, 84 })
+        used.noteOn(k++, key, 50 + 5 * k);
+    used.cc(20, 64, 127);
+    used.noteOff(21, 57, 0); // its release waits for the pedal
+    used.pitchWheel(30, 8191);
+    used.channelAftertouch(31, 127);
+    used.polyAftertouch(32, 53, 127);
+    used.programChange(33, 5);
+    for (int cc : { 1, 7, 10, 11, 20, 74 })
+        used.cc(40 + cc, cc, 127 - cc);
+    render(used, 30);
+    used.restart();
+    REQUIRE(used.getNumActiveVoices() == 0);
+    const std::vector<float> expected = play(fresh);
+    REQUIRE(std::any_of(expected.begin(), expected.end(), [](float x) { return x != 0.0f; }));
+    REQUIRE(play(used) == expected);
+}

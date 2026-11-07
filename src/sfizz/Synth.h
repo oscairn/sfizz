@@ -715,6 +715,13 @@ public:
     void setHostBus(int bus) noexcept;
 
     /**
+     * @brief Puts the synth back as its last load left it (a host's reset): no voice, the
+     *        effects cleared, and the controllers, keyswitch, round robins, switches and random
+     *        generators as after the load. Allocation-free; call it from the rendering thread.
+     */
+    void restart() noexcept;
+
+    /**
      * @brief Add external definitions prior to loading.
      *
      */

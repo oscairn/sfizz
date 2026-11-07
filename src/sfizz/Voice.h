@@ -233,6 +233,11 @@ public:
     void reset() noexcept;
 
     /**
+     * @brief Restart the voice's Gaussian noise from the seed it drew when constructed
+     */
+    void restartNoise() noexcept;
+
+    /**
      * @brief Set the next voice in the "sister voice" ring
      * The sister voices are voices that started on the same event.
      * This has to be set by the synth. A voice will remove itself from
