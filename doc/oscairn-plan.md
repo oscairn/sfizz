@@ -732,14 +732,14 @@ Decisions taken (for Jacob to confirm):
 9. **Profile scope:** the profile applies to the regions after its `<control>` header, not to
    the whole patch (sfizz builds regions while parsing).
 10. **Envelope tables in seconds**, generated into `ElementTables.cpp` by the measurement
-    repository's `fit_eg.py`. **Segment times within 2.5 %, proposed again with evidence
+    repository's `fit_eg.py`. **Segment times within 2.5 %, confirmed by Jacob 2026-11-07, proposed with evidence
     (2026-11-07):** the reference repeats exactly (ten probes rendered 4 to 10 times in five
     recording sessions from 2026-11-01 to 2026-11-07 measure within 0.006 % of each other), the
     engine measures the same at 44.1 and 96 kHz within 0.014 %, and the 66 segment checks in the
     test suite (`OscairnReferenceT.cpp`, probes not used for fitting) are all within 1.9 %
     (attack index 103, between measured indices) at 44.1, 48 and 96 kHz. So the tolerance covers
     the tables' interpolation between measured indices, not measurement noise; 2 % would pass today
-    with 0.1 % to spare. For Jacob to confirm.
+    with 0.1 % to spare. Confirmed by Jacob 2026-11-07.
 11. **Level 0 of a decay or release is -90 dB**, then silence, fitted from the renders
     above; the attack keeps a constant rate for partial attacks until the rule is found.
 12. **Gate exclusions:** the include-loop fixtures and `newdrums_flat.sfz` are left out of
@@ -796,7 +796,7 @@ Taken in the fourth session; Jacob accepted 22-24 and 26 and decided 25 (2026-11
     (Jacob sometimes finds the reference too quiet).
 26. **Filter code 18's late low-pass (K27)** is not modelled: factory elements use code 21.
 
-Taken in the voice budget session (2026-11-06), for Jacob to confirm:
+Taken in the voice budget session (2026-11-06), confirmed by Jacob 2026-11-07:
 
 27. **Voice budget** (section 5, K43): one pool across the instance's contexts, a voice per
     region; the SDK's order only while the host has set limits, at block start and after note
@@ -804,7 +804,7 @@ Taken in the voice budget session (2026-11-06), for Jacob to confirm:
     counts as ending; loudness is the last rendered gain (the level and velocity gain before the
     first block); no cost estimate; `honors_volume` true.
 
-Taken in the sharing session (2026-11-06), for Jacob to confirm:
+Taken in the sharing session (2026-11-06), confirmed by Jacob 2026-11-07:
 
 28. **Sound buses** (section 5): eight beside Main, one per sound, as the Basic Synth; a bus change
     applies from the start of the block its event arrives in; a voice keeps the bus it started
@@ -944,7 +944,7 @@ Engine (`23630bee`): `oscairn_ampeg_*` with those shapes and tables in seconds
 time between measured indices. Decay: the octave rule from 56 (measured values below).
 Release: the octave rule from 56 except 77-91, interpolated between measured indices.
 
-Gate (tolerance 2.5 %, **proposed**): the engine rendered with the same probes and measured
+Gate (tolerance 2.5 %, confirmed by Jacob 2026-11-07): the engine rendered with the same probes and measured
 with the same code as the reference, at 44.1, 48 and 96 kHz.
 
 | Table | Valid span | Checks (indices not used for fitting) | Largest error | Outside the span |
@@ -1764,7 +1764,7 @@ repository, or the local scripts beside the renders).
 | K40 | Element level scaling | Offset law (128 + offset) / 128 on the element level, at most level 127, 0.375 dB grid; offsets linear in key between break points, rounded; key follow sensitivity x (key - 60) / 32 steps, summed with the offset (the sum is assumed, not measured with both set). 50 sine probes: 44 within 0.2 dB; at notes 12, 30, 100, 105 and 110 the reference's sine waveform is itself up to 0.95 dB off its note-60 level (`ks3` `sine_*`); after removing that, 105 and 110 still read 0.45 dB below the engine. How it combines with velocity is assumed multiplicative | Fitted law | Built (`93d8e6eb`) | `ks1`, `ks3`; `scratchpad eng_ls.py` | `ElementLevel.cpp` `levelScalingGain` |
 | K41 | Calling After Me 2, Parts 2 and 3 at note 84 | Element 2 of each, isolated, flat (velocity sensitivity 0, flat envelope, filter code 18): Part 3 about 12 dB lower in the engine than the reference (after the 1.84 dB staging), the same on every harmonic; Part 2 about 4.5 dB higher, different by harmonic. Envelope, velocity and level scaling agree. The converted regions for those key banks (sample and `volume`) are the suspects: converter side | Converter (key bank choice or level) | Open, for the converter | `ks1` (`p2only`, `p3only`), `ks3`; `scratchpad eng_ks3.py`, `spec.py` | converter |
 | K42 | Key-off elements | The reference plays a key-off element from the note-off without any other voice of the key, and releases it 2.0 s after it starts (measured once, release time 40, sustain held); a decay to level 0 ends it. Engine: `rt_dead=1` (stock opcode) plus `oscairn_keyoff=1` (release 2.0 s after the start); the CLAP wrapper keeps the note until its note-off; an envelope holding level 0 ends its voice. Whether the 2.0 s depends on any parameter is not measured | Measured at one setting | Built (`a2c16d82`, `ad43ddac`, `4c38842e`) | `ks4` | `Voice.cpp` `startVoice`; `clap/plugin.cpp` `endFinishedNotes` |
-| K43 | Voice stealing under a voice budget | While Oscairn sets voice limits (`oscairn.voice-budget`), voices past them go in the SDK's order (released before held, the new voice's own sound, lower priority, quieter, older; never a held voice within its sound's reserve or of a part marked mono or legato), a region at a time, at a block's start and after note events, faded over 3 ms. sfizz's own limits (the engine's voices, 64 a context by default; `polyphony`; `note_polyphony`; `off_by`) still steal first, in sfizz's order, and a voice they off counts as ending though it still renders its off-time release (a converted 13-element sound, eight notes: up to 39 such voices for about 100 ms). A voice in its attack counts as quiet as it is then. The reference's own stealing order is not measured | Oscairn RFC 0018's order, so the host and the plugin agree on what is least audible | Deliberate (decision 27, proposed) | `clap/test.cpp` voice budget cases | `clap/plugin.cpp` `keepWithinLimits`; `clap/budget.cpp` |
+| K43 | Voice stealing under a voice budget | While Oscairn sets voice limits (`oscairn.voice-budget`), voices past them go in the SDK's order (released before held, the new voice's own sound, lower priority, quieter, older; never a held voice within its sound's reserve or of a part marked mono or legato), a region at a time, at a block's start and after note events, faded over 3 ms. sfizz's own limits (the engine's voices, 64 a context by default; `polyphony`; `note_polyphony`; `off_by`) still steal first, in sfizz's order, and a voice they off counts as ending though it still renders its off-time release (a converted 13-element sound, eight notes: up to 39 such voices for about 100 ms). A voice in its attack counts as quiet as it is then. The reference's own stealing order is not measured | Oscairn RFC 0018's order, so the host and the plugin agree on what is least audible | Deliberate (decision 27, confirmed by Jacob 2026-11-07) | `clap/test.cpp` voice budget cases | `clap/plugin.cpp` `keepWithinLimits`; `clap/budget.cpp` |
 | K44 | Level held after a decay to level 0 | After a decay segment reaches level 0 (a straight line in dB to -90 dB), the reference keeps sounding the tone at about -95 dB below level 127 (`eg7` `dn_*`, held 1 s and more, the same in every probe); the engine is silent from -90 dB on, and a voice whose envelope holds level 0 ends there (test "Element envelope ends once it holds level 0") | Inaudible floor | Not modelled (not decided by Jacob) | `eg7` (`dn_*`); `scripts/eg7/rl.py` | `ElementEnvelope.cpp` `floorDb` |
 | K45 | Release from a low level | One probe: a release (index 64) from a decay still rising from level 0, at -47 dB below level 127, falls at 60.5 dB/s on the reference and 57.2 dB/s in the engine (5.5 %), which takes the full-scale release time whatever the distance. Releases from other levels below 127 were not compared | Not known: the reference's segments are neither a fixed time nor a fixed rate here | Unresolved, one measurement | `eg7` (`uprel`); `scripts/eg7/rl.py` | `ElementEnvelope.cpp` `enter` |
 | K46 | A sound's output bus changed while it sounds | The change applies at a block's start, not at its event's frame. Voices sounding then stay on their old bus until they end; a patch's own `<effect>` buses (none in converted sounds) move with the sound at once, so a held voice's effect tail moves to the new bus and that voice reaches its old bus dry, bypassing a `<effect>` on the main bus | Effects are per synth, voices per bus | Deliberate (decision 28) | `clap/test.cpp` "a change of bus"; `OscairnT.cpp` "A voice keeps the host bus" | `Synth.cpp` `renderBlock`; `clap/plugin.cpp` `process` |
