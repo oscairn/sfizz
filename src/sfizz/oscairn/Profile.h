@@ -43,6 +43,9 @@ struct RegionData {
     // mono/poly mode
     ElementParameters element;
     bool mono { false };
+    // Key On Delay: time length 0-127, or a tempo-synced note length 5-21 (0: none)
+    int32_t keyOnDelay { 0 };
+    int32_t keyOnDelayNote { 0 };
     // Balance-law pan, after sfizz's pan stage
     bool panEnabled { false };
     int32_t pan { 64 };

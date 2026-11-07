@@ -5,12 +5,22 @@
 // If not, contact the sfizz maintainers at https://github.com/sfztools/sfizz
 
 #include "Elements.h"
+#include <algorithm>
 
 namespace sfz {
 namespace oscairn {
 
 namespace {
 constexpr uint32_t kRandomSeed = 0x2545f491u;
+// Key On Delay time lengths measured on the reference (batches xa1, xa1b: the onset of a delayed
+// sine element after an undelayed one), index and seconds; linear between them
+constexpr int kDelayKnots = 29;
+constexpr int kDelayIndex[kDelayKnots] = { 0, 1, 2, 3, 4, 5, 6, 7, 8, 12, 16, 20, 24, 28, 32, 40, 48, 56, 64, 72,
+                                           80, 88, 96, 104, 112, 116, 120, 124, 127 };
+constexpr double kDelaySeconds[kDelayKnots] = { 0.0, 0.0096, 0.0199, 0.0301, 0.0488, 0.0589, 0.0792, 0.1010,
+                                                0.1304, 0.2388, 0.3651, 0.5089, 0.6670, 0.8382, 1.0226, 1.4259,
+                                                1.8773, 2.3709, 2.8961, 3.4594, 4.0444, 4.6681, 5.3127, 5.9875,
+                                                6.7014, 7.0541, 7.4254, 7.7998, 8.0847 };
 
 // A note or velocity limit; a low limit above the high one selects what lies outside
 bool within(int value, int lo, int hi)
@@ -28,6 +38,21 @@ bool switchedOn(int32_t mode, bool switch1, bool switch2)
     }
 }
 } // namespace
+
+double keyOnDelaySeconds(int32_t timeLength, int32_t noteLength, double beatsPerSecond) noexcept
+{
+    // quarter notes per note length 5-21
+    static constexpr double quarters[17] = { 1.0 / 4, 1.0 / 6, 3.0 / 8, 1.0 / 2, 1.0 / 3, 3.0 / 4, 1.0, 2.0 / 3,
+                                             3.0 / 2, 2.0, 4.0 / 3, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0 };
+    if (noteLength >= 5 && noteLength <= 21)
+        return beatsPerSecond > 0.0 ? quarters[noteLength - 5] / beatsPerSecond : 0.0;
+    const int i = std::min(127, std::max(0, timeLength));
+    int k = 1;
+    while (kDelayIndex[k] < i)
+        ++k;
+    const double f = static_cast<double>(i - kDelayIndex[k - 1]) / (kDelayIndex[k] - kDelayIndex[k - 1]);
+    return kDelaySeconds[k - 1] + f * (kDelaySeconds[k] - kDelaySeconds[k - 1]);
+}
 
 void ElementSelection::clear() noexcept
 {

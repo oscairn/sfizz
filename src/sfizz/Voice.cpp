@@ -10,6 +10,7 @@
 #include "oscairn/ElementLevel.h"
 #include "oscairn/ElementLfo.h"
 #include "oscairn/ElementPitch.h"
+#include "BeatClock.h"
 #include "Layer.h"
 #include "AudioBuffer.h"
 #include "Config.h"
@@ -454,6 +455,9 @@ bool Voice::startVoice(Layer* layer, int delay, const TriggerEvent& event) noexc
 
     impl.triggerDelay_ = delay;
     impl.initialDelay_ = delay + static_cast<int>(regionDelay(region, midiState) * impl.sampleRate_);
+    if (region.oscairn.keyOnDelay > 0 || region.oscairn.keyOnDelayNote > 0)
+        impl.initialDelay_ += static_cast<int>(impl.sampleRate_ * oscairn::keyOnDelaySeconds(
+            region.oscairn.keyOnDelay, region.oscairn.keyOnDelayNote, impl.resources_.getBeatClock().getBeatsPerSecond()));
     impl.startTimestamp_ = midiState.getInternalClock() + impl.initialDelay_; // need to set this before switchState
 
     impl.switchState(State::playing);

@@ -138,6 +138,7 @@ struct Run {
     std::vector<float> left, right;
     clap_process_status status = CLAP_PROCESS_CONTINUE;
     float peak = 0;
+    const clap_event_transport_t* transport = nullptr;
     void block(Events& events, uint32_t frames)
     {
         left.assign(frames, 1.0f); right.assign(frames, 1.0f);
@@ -146,7 +147,7 @@ struct Run {
         out.data32 = channels; out.channel_count = 2;
         clap_process_t p {};
         p.frames_count = frames; p.audio_outputs = &out; p.audio_outputs_count = 1;
-        p.in_events = &events.input; p.out_events = &events.output; p.steady_time = -1;
+        p.in_events = &events.input; p.out_events = &events.output; p.steady_time = -1; p.transport = transport;
         guarded = !offlineRenders;
         status = plugin->process(plugin, &p);
         guarded = false;
@@ -1684,6 +1685,29 @@ int main(int argc, char** argv)
         events.note(CLAP_EVENT_NOTE_ON, 0, 7, 69, 1.0, 3);
         shared.block(events, 256);
         CHECK(shared.peak(2, 1280) < 1e-3f); // note 6's release tail only
+        plugin->deactivate(plugin);
+        plugin->destroy(plugin);
+    }
+    { // a tempo-synced key-on delay follows the host's tempo
+        auto* plugin = create();
+        CHECK(load(plugin, stateFor("<control> oscairn_profile=1 <region> sample=*sine oscairn_delay_note=11\n")));
+        CHECK(plugin->activate(plugin, 48000, 1, 480));
+        clap_event_transport_t transport {};
+        transport.header = { sizeof(transport), 0, CLAP_CORE_EVENT_SPACE_ID, CLAP_EVENT_TRANSPORT, 0 };
+        transport.flags = CLAP_TRANSPORT_HAS_TEMPO;
+        transport.tempo = 240.0; // a quarter: 0.25 s
+        Run run { plugin };
+        run.transport = &transport;
+        Events events;
+        int first = -1;
+        events.note(CLAP_EVENT_NOTE_ON, 0, 1, 69, 1.0);
+        for (int b = 0; b < 40 && first < 0; ++b) {
+            run.block(events, 480);
+            for (int i = 0; i < 480 && first < 0; ++i)
+                if (run.left[i] != 0.0f)
+                    first = b * 480 + i;
+        }
+        CHECK(std::abs(first - 12000) <= 2);
         plugin->deactivate(plugin);
         plugin->destroy(plugin);
     }

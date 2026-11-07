@@ -718,6 +718,12 @@ clap_process_status process(const clap_plugin_t* p, const clap_process_t* proces
     // Output buses change at the block's start: the voices started from then on take the new one
     for (uint32_t i = 0; i < count; ++i)
         applyParam(s, process->in_events->get(process->in_events, i));
+    // The host's tempo, for tempo-synced key-on delays
+    const clap_event_transport_t* transport = process->transport;
+    if (transport && (transport->flags & CLAP_TRANSPORT_HAS_TEMPO) && transport->tempo > 0.0)
+        for (uint32_t i = 0; i < contextCount; ++i)
+            if (Engine* e = rendered(s, i))
+                e->synth.bpmTempo(0, static_cast<float>(transport->tempo));
     uint32_t hostBus[contextCount] {}, used = 1; // buses something may play on; Main always written
     for (uint32_t i = 0; i < contextCount; ++i)
         if (Engine* e = rendered(s, i)) {

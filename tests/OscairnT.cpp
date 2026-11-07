@@ -1840,3 +1840,46 @@ TEST_CASE("[Oscairn] XA A.SW: the assignable switches at note-on")
     leg.on(62);
     REQUIRE(leg.sounding(62) == Elements { 2 });
 }
+
+TEST_CASE("[Oscairn] Key On Delay: time length and tempo-synced note length")
+{
+    // First sounding sample of a note, in seconds; -1 if none within `seconds`
+    auto onset = [](const std::string& opcodes, double rate, double seconds, float bpm = 0.0f, double noteOff = -1.0) {
+        sfz::Synth synth;
+        synth.setSampleRate(static_cast<float>(rate));
+        synth.setSamplesPerBlock(256);
+        synth.loadSfzString(fs::current_path() / "tests/TestFiles/oscairn.sfz", "<control> oscairn_profile=1 <region> sample=*sine " + opcodes);
+        if (bpm > 0.0f)
+            synth.bpmTempo(0, bpm);
+        sfz::AudioBuffer<float> buffer { 2, 256 };
+        synth.noteOn(0, 60, 100);
+        const long off = noteOff < 0 ? -1 : static_cast<long>(noteOff * rate);
+        for (long start = 0; start < static_cast<long>(seconds * rate); start += 256) {
+            if (off >= start && off < start + 256)
+                synth.noteOff(static_cast<int>(off - start), 60, 0);
+            synth.renderBlock(buffer);
+            const auto left = buffer.getConstSpan(0);
+            for (size_t i = 0; i < left.size(); ++i)
+                if (left[i] != 0.0f)
+                    return static_cast<double>(start + static_cast<long>(i)) / rate;
+        }
+        return -1.0;
+    };
+    // Reference delays (xa1, xa1b kod_*): onset of the delayed element after the plain one
+    for (double rate : { 44100.0, 48000.0, 96000.0 }) {
+        REQUIRE(onset("", rate, 0.1) < 1e-4); // a sine's first sample is 0
+        REQUIRE(onset("oscairn_delay=1", rate, 1.0) == Approx(0.0096).margin(0.0002));
+        REQUIRE(onset("oscairn_delay=16", rate, 1.0) == Approx(0.3651).margin(0.0002));
+        REQUIRE(onset("oscairn_delay=64", rate, 4.0) == Approx(2.8961).margin(0.0002));
+        REQUIRE(onset("oscairn_delay=127", rate, 9.0) == Approx(8.0847).margin(0.0002));
+        REQUIRE(onset("oscairn_delay=10", rate, 1.0) == Approx((0.1304 + 0.2388) / 2).margin(0.0002)); // between knots
+        // note lengths at the default 120 BPM (measured: a 1/16 0.124 s, a 1/4 0.499 s, a 1/2 1.004 s)
+        REQUIRE(onset("oscairn_delay_note=5", rate, 1.0) == Approx(0.125).margin(0.001));
+        REQUIRE(onset("oscairn_delay_note=11", rate, 1.0) == Approx(0.5).margin(0.001));
+        REQUIRE(onset("oscairn_delay_note=14", rate, 2.0) == Approx(1.0).margin(0.001));
+    }
+    // the tempo sets the note length; the note length wins over a time length
+    REQUIRE(onset("oscairn_delay_note=11 oscairn_delay=100", 48000.0, 2.0, 60.0f) == Approx(1.0).margin(0.001));
+    // released before the delay ends, it never sounds (xa1 kod_short)
+    REQUIRE(onset("oscairn_delay=80", 48000.0, 5.0, 0.0f, 0.1) < 0.0);
+}

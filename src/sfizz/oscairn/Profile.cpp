@@ -34,6 +34,7 @@ const OpcodeSpec<int32_t> elementNumber { 0, Range<int32_t>(1, kMaxElements), kE
 const OpcodeSpec<int32_t> elementMode { 0, Range<int32_t>(0, 7), kEnforceBounds };
 const OpcodeSpec<int32_t> elementGroup { 1, Range<int32_t>(1, kElementGroups), kEnforceBounds };
 const OpcodeSpec<int32_t> velocity127 { 1, Range<int32_t>(1, 127), kEnforceBounds };
+const OpcodeSpec<int32_t> noteLength { 0, Range<int32_t>(5, 21), kEnforceBounds };
 }
 
 bool parseControlOpcode(const Opcode& opcode, bool& profileEnabled)
@@ -156,6 +157,8 @@ bool parseRegionOpcode(const Opcode& opcode, RegionData& data)
     case hash("oscairn_element_hikey"): data.element.hiKey = opcode.read(note); return true;
     case hash("oscairn_element_lovel"): data.element.loVel = opcode.read(velocity127); return true;
     case hash("oscairn_element_hivel"): data.element.hiVel = opcode.read(velocity127); return true;
+    case hash("oscairn_delay"): data.keyOnDelay = opcode.read(index127); return true;
+    case hash("oscairn_delay_note"): data.keyOnDelayNote = opcode.read(noteLength); return true;
     case hash("oscairn_mono"): data.mono = opcode.read(switchSpec) == 1; return true;
     case hash("oscairn_ref_level"): data.referenceLevel = opcode.read(switchSpec) == 1; return true;
     case hash("oscairn_elfo_mode"): data.lfo.mode = opcode.read(switchSpec); data.lfoEnabled = true; return true;

@@ -43,6 +43,13 @@ struct ElementParameters {
     int32_t loVel { 1 }, hiVel { 127 };
 };
 
+/**
+ * @brief An element's Key On Delay in seconds: the time length (0-127), or with a note length
+ * (5-21: 1/16, 1/8 triplet, dotted 1/16, 1/8, 1/4 triplet, dotted 1/8, 1/4, 1/2 triplet,
+ * dotted 1/4, 1/2, whole triplet, dotted 1/2, 4 to 8 quarters) that length at the tempo.
+ */
+double keyOnDelaySeconds(int32_t timeLength, int32_t noteLength, double beatsPerSecond) noexcept;
+
 class ElementSelection {
 public:
     // No elements, as before a load
