@@ -164,6 +164,15 @@ process rendering the same events gives the same output; two synths in one proce
 the generators. That is good enough for the stock-vs-fork comparison (one process per
 render) but not for Oscairn's per-context determinism (section 5).
 
+From the reset session (2026-11-06, `9c7f3792`) each synth draws from its own generators:
+`Random::Streams` holds one `fast_rand` for each file that drew from its own copy (voice, region,
+regional state, filters, LFOs, MIDI state, synth), each starting at seed 0 as that copy did, and
+the synth's `MidiState` owns one set (`random()`; the regional state functions already take the
+MIDI state). A lone synth in a fresh process draws exactly what it drew before, which the stock
+gate renders; two synths in one process now draw the same numbers instead of sharing the
+sequences (section 3). `Random::randomGenerator` stays for anything outside a synth (one test
+seeds its own copy).
+
 ---
 
 ## 3. The rule: native SFZ stays stock
@@ -219,6 +228,12 @@ What it took to make stock renders reproducible, found while building the gate (
   quality 10): 159 renders.
 - A one-character change in the amp EG's decay coefficient made 125 of the 159 renders
   fail, so the gate does see small changes.
+- **One synth per process** (reset session, 2026-11-06). From `9c7f3792` each synth has its own
+  random generators (section 2). A render of one synth in a fresh process, which is what the gate
+  makes, draws what stock draws; with several synths in one process stock's output depends on
+  what the others drew before, and the fork's does not. That is a deliberate difference from
+  stock which the gate cannot see; the fork's test "Each synth draws its own random numbers"
+  (`SynthT.cpp`) covers it.
 
 Added in the decay session (2026-11-06):
 
@@ -412,7 +427,22 @@ the wrapper implements the extension directly.
   hook).
 - **Sleep.** `CLAP_PROCESS_SLEEP` when no voice is active in any context.
 - **Deterministic rendering.** Seed sfizz's random generators per instance and per context
-  (a hook replacing the TU-static generators by one owned by `Resources`; upstreamable).
+  (a hook replacing the TU-static generators by one owned by `Resources`; upstreamable). Done in
+  0.4.1 (section 2): each synth's MIDI state owns them, one per former copy, so native output
+  stays stock.
+- **Reset** (0.4.1). Oscairn resets an instance it takes over at a Performance change and then
+  gives it the incoming state; it must then play exactly as a fresh instance with that state,
+  and a note in the next block must sound. `reset` restarts the synth of every sound the audio
+  thread renders at once (`Synth::restart`: no voice, effects cleared, the MIDI state, the
+  controllers at the patch's defaults, the keyswitch the load set, each region's switches, round
+  robin counter and held-back sustain releases as `finalizeSfzLoad` sets them up, the controller
+  smoothers, the random generators where the voices' construction left them and each voice's
+  Gaussian noise at its seed) and marks it not sounding; the other sounds, which the main thread
+  may be preparing or freeing, are marked stale and restarted when next rendered, at the start
+  of a process call after the selections and before any event. Activation restarts every sound.
+  The notes reset ended get no `NOTE_END` (as Oscairn Analog). Reset keeps the parameters (each
+  sound's Output bus), the prepared sounds and channel selections and the voice budget's limits;
+  sfizz gets no host tempo or transport from the plugin, so it keeps its own default.
 
 ### Native sound contexts (RFC 0005, `oscairn.sound-contexts/draft-5`)
 
@@ -612,6 +642,12 @@ passes its cross-rate check at 44.1, 48 and 96 kHz (section 6).
     each voice in `Impl::startVoice`), and a `Synth::renderBlock` overload with bus channels, which
     the plain `renderBlock` calls with none; the one branch in its voice loop is taken only for a
     voice on another bus than the synth's.
+  - Reset (0.4.1): `Random::Streams` (`MathHelpers.h`), owned by `MidiState` (`random()`), which
+    every former `Random::randomGenerator` call in `Voice.cpp`, `Region.cpp`
+    (`getPhase(fast_rand&)`), `RegionStateful.cpp`, `FilterPool.cpp`, `LFO.cpp`, `MidiState.cpp`
+    and `Synth.cpp` draws from; `Synth::restart` with the keyswitch and generator state it puts
+    back (`SynthPrivate.h`, set at the end of `finalizeSfzLoad` and `resetVoices`); and
+    `Voice::restartNoise` with the seed the voice's Gaussian noise drew.
   Upstream-style fixes that are not Oscairn-specific are separate commits (section 11).
 - **Candidates for upstream as they are:** the streaming fix `ab0e878c` (interpolator taps
   kept within the frames streamed in so far; `Voice.cpp`, `tests/SynthT.cpp`), the toolchain
@@ -1313,6 +1349,66 @@ them) and spilling to more instances past that; per part, its channel and bus (P
 format 12: each node's `sound` with channel and bus, the engine's snapshot in its first node's
 folder, `engine/`); the snapshot in this plugin's version 2 format, each slot's patch and bus,
 channels to slots; and no part saved as a Sound when it shares its instance (RFC 0021).
+
+### Reset session (2026-11-06): reset as a fresh instance, plugin 0.4.1
+
+Oscairn main `11ca03a` reuses a running instance at a Performance change: it calls CLAP `reset`
+on the audio thread, then loads the incoming state, and the instance must then render as a fresh
+instance with that state, sample for sample, with a note in the next block at full level
+(`docs/plugin-porting.md`, "Expect a second life"). An audit of `fb2292c5` found reset immediate
+but partial: channel and poly aftertouch, the keyswitch, round robin counters, the random
+generators (shared by the whole process) and idle prepared sounds were left as they were. Section
+5 ("Reset"), the hooks in section 8, and section 3's note on one synth per process.
+
+Commits: `9c7f3792` (each synth draws its own random numbers), `ca52675f` (`Synth::restart`),
+`cd89e2bb` (CLAP reset and activation restart every sound; the idle ones when next rendered),
+then the version and this entry.
+
+**Random generators.** sfizz's `Random::randomGenerator` is a static in a header, so each file had
+its own copy and every synth in the process shared them: two synths in one process rendered a
+random patch differently, and a reset could not make a played instance draw what a fresh one
+draws.
+Each synth's MIDI state now owns one generator per former copy, each starting at seed 0, so a lone
+synth in a fresh process (what the stock gate renders) draws exactly what stock draws. Moving to a
+single generator per synth would have changed the order of draws between files, and so native
+output; seeding one generator per synth from a per-instance seed would have too.
+
+**What restart puts back** and how each was shown needed: every item was undone in turn in a
+scratch build and the library test ("After restart a synth plays as it did after loading") or the
+CLAP reset test failed (seen): the random generators, each voice's Gaussian noise seed (CLAP test
+only), the MIDI event state (bend, aftertouch, poly aftertouch), the note state (held notes, for
+`trigger=first`), the program (library test only), the controllers at the patch's defaults, the
+keyswitch the load set, each region's switches (`sw_previous` among them), its round robin counter, its held-back sustain releases, its last-key and range keyswitch, its controller,
+bend, aftertouch, tempo and program switches, the controller smoothers, and the generator state
+taken when voices are made (`setNumVoices` after a load). In the plugin: the stale marking, the
+notes dropped at reset, and marking a restarted sound not sounding. Four steps tried first changed
+no test and were left out because each is already done by another: flushing the MIDI events
+(`resetAllControllers` leaves one event per controller), clearing the pedal flags and the held-back
+sostenuto releases (both follow from the sustain and sostenuto controllers at their defaults), and
+taking the generator state at the end of a load (loading draws none).
+
+**Tests.** `sfizz_tests`: "Each synth draws its own random numbers" (a patch drawing from every
+generator, rendered in two synths in turn; fails on `6ea0c5dc`) and "After restart a synth plays
+as it did after loading". `sfizz_clap_tests`: notes in the block after a reset sound at full level
+and no `NOTE_END` comes for the notes it ended; after a reset an instance renders bit-identically
+to a fresh one with the same state loaded again, another state loaded, no load, and deactivated,
+loaded and activated, for a patch where everything restart puts back shows, the stock gate's own
+patches and sfizz's test files (37 patches; `newdrums_flat.sfz` is left out as the stock gate
+leaves it out); three prepared sounds, one taken off its channel while it sounds and one idle at
+the reset, play as in an instance that never played and report no voices at once; reset runs
+under the allocation guard. On `ca52675f`'s library with the old plugin, the `NOTE_END` check, 29
+renders with no load (the other three ways load a new engine), the prepared sounds and their voice
+reports fail.
+
+**Gates** (`gate.sh`, on each committed tree): the stock gate passed on `9c7f3792` and `ca52675f`
+(159 renders bit-identical, 106 streaming renders bit-identical to stock's preloaded ones, 0
+unstable, 0 failed), and Release on `ca52675f` (522 test cases). A first Release run of the CLAP
+commit, made while other builds loaded the machine, failed: `looped_regions.sfz` rendered
+differently from a fresh instance twice (with a state loaded after the reset), and passed in eight
+runs after; its samples stream, and sfizz's loader can fall behind in a live render (section 3).
+The test now renders a differing comparison again, both sides, once, and that commit was amended
+before it was pushed. The gates on the CLAP commit as pushed and on the version commit are in the
+session report.
 
 ### Upstream merge test (2026-11-01)
 
