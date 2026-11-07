@@ -34,7 +34,7 @@ void sfz::FilterHolder::setup(const Region& region, unsigned filterId, int noteN
     baseCutoff = description->cutoff;
     if (description->random != 0) {
         fast_real_distribution<float> dist { 0.0f, description->random };
-        baseCutoff *= centsFactor(dist(Random::randomGenerator));
+        baseCutoff *= centsFactor(dist(resources.getMidiState().random().filterPool));
     }
     const auto keytrack = description->keytrack * float(noteNumber - description->keycenter);
     baseCutoff *= centsFactor(keytrack);

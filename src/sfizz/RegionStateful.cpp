@@ -12,7 +12,7 @@ namespace sfz {
 float baseVolumedB(const Region& region, const MidiState& midiState, int noteNumber) noexcept
 {
     fast_real_distribution<float> volumeDistribution { 0.0f, region.ampRandom };
-    auto baseVolumedB = region.volume + volumeDistribution(Random::randomGenerator);
+    auto baseVolumedB = region.volume + volumeDistribution(midiState.random().regionStateful);
     baseVolumedB += region.globalVolume;
     baseVolumedB += region.masterVolume;
     baseVolumedB += region.groupVolume;
@@ -25,7 +25,7 @@ float baseVolumedB(const Region& region, const MidiState& midiState, int noteNum
 uint64_t sampleOffset(const Region& region, const MidiState& midiState) noexcept
 {
     std::uniform_int_distribution<int64_t> offsetDistribution { 0, region.offsetRandom };
-    int64_t finalOffset = region.offset + offsetDistribution(Random::randomGenerator);
+    int64_t finalOffset = region.offset + offsetDistribution(midiState.random().regionStateful);
     for (const auto& mod: region.offsetCC)
         finalOffset += static_cast<int64_t>(mod.data * midiState.getCCValue(mod.cc));
     return Default::offset.bounds.clamp(finalOffset);
@@ -35,7 +35,7 @@ float regionDelay(const Region& region, const MidiState& midiState) noexcept
 {
     fast_real_distribution<float> delayDistribution { 0, region.delayRandom };
     float finalDelay { region.delay };
-    finalDelay += delayDistribution(Random::randomGenerator);
+    finalDelay += delayDistribution(midiState.random().regionStateful);
     for (const auto& mod: region.delayCC)
         finalDelay += mod.data * midiState.getCCValue(mod.cc);
 
@@ -157,7 +157,7 @@ float basePitchVariation(const Region& region, float noteNumber, float velocity,
     }
 
     pitchVariationInCents += velocity * veltrack; // track velocity
-    pitchVariationInCents += pitchDistribution(Random::randomGenerator); // random pitch changes
+    pitchVariationInCents += pitchDistribution(midiState.random().regionStateful); // random pitch changes
     return centsFactor(pitchVariationInCents);
 }
 

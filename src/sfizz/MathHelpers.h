@@ -719,6 +719,15 @@ private:
  */
 namespace Random {
 static fast_rand randomGenerator;
+
+/**
+ * @brief A synth's own generators: one for each file that drew from its own copy of
+ * randomGenerator, starting where that copy did. A synth then draws what a lone synth in
+ * a fresh process drew, whatever the process's other synths play.
+ */
+struct Streams {
+    fast_rand voice, region, regionStateful, filterPool, lfo, midiState, synth;
+};
 } // namespace Random
 
 /**

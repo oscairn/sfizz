@@ -219,7 +219,13 @@ public:
      */
     void resetEventStates() noexcept;
 
+    /**
+     * @brief The synth's random generators
+     */
+    Random::Streams& random() const noexcept { return random_; }
+
 private:
+    mutable Random::Streams random_;
 
     /**
      * @brief Insert events in a sorted event vector.

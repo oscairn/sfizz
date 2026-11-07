@@ -111,7 +111,7 @@ struct Region {
      *
      * @return float
      */
-    float getPhase() const noexcept;
+    float getPhase(fast_rand& random) const noexcept;
     /**
      * @brief Get the detuning in cents for a given bend value between -1 and 1
      *

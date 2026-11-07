@@ -33,8 +33,8 @@ void sfz::MidiState::noteOnEvent(int delay, int noteNumber, float velocity) noex
         noteStates[noteNumber] = true;
         ccEvent(delay, ExtendedCCs::noteOnVelocity, velocity);
         ccEvent(delay, ExtendedCCs::keyboardNoteNumber, normalize7Bits(noteNumber));
-        ccEvent(delay, ExtendedCCs::unipolarRandom, unipolarDist(Random::randomGenerator));
-        ccEvent(delay, ExtendedCCs::bipolarRandom, bipolarDist(Random::randomGenerator));
+        ccEvent(delay, ExtendedCCs::unipolarRandom, unipolarDist(random_.midiState));
+        ccEvent(delay, ExtendedCCs::bipolarRandom, bipolarDist(random_.midiState));
         ccEvent(delay, ExtendedCCs::keyboardNoteGate, activeNotes > 0 ? 1.0f : 0.0f);
         ccEvent(delay, AriaExtendedCCs::keydelta, keydelta);
         ccEvent(delay, AriaExtendedCCs::absoluteKeydelta, std::abs(keydelta));
@@ -56,8 +56,8 @@ void sfz::MidiState::noteOffEvent(int delay, int noteNumber, float velocity) noe
         noteOffTimes[noteNumber] = internalClock + static_cast<unsigned>(delay);
         ccEvent(delay, ExtendedCCs::noteOffVelocity, velocity);
         ccEvent(delay, ExtendedCCs::keyboardNoteNumber, normalize7Bits(noteNumber));
-        ccEvent(delay, ExtendedCCs::unipolarRandom, unipolarDist(Random::randomGenerator));
-        ccEvent(delay, ExtendedCCs::bipolarRandom, bipolarDist(Random::randomGenerator));
+        ccEvent(delay, ExtendedCCs::unipolarRandom, unipolarDist(random_.midiState));
+        ccEvent(delay, ExtendedCCs::bipolarRandom, bipolarDist(random_.midiState));
         if (activeNotes > 0)
             activeNotes--;
         noteStates[noteNumber] = false;

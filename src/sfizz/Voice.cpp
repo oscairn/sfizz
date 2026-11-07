@@ -310,7 +310,7 @@ struct Voice::Impl
     double filterDuration_;
 
     fast_real_distribution<float> uniformNoiseDist_ { -config::uniformNoiseBounds, config::uniformNoiseBounds };
-    fast_gaussian_generator<float> gaussianNoiseDist_ { 0.0f, config::noiseVariance };
+    fast_gaussian_generator<float> gaussianNoiseDist_ { 0.0f, config::noiseVariance, resources_.getMidiState().random().voice() };
 
     Smoother gainSmoother_;
     Smoother bendSmoother_;
@@ -484,7 +484,7 @@ bool Voice::startVoice(Layer* layer, int delay, const TriggerEvent& event) noexc
                 break;
             }
         }
-        const float phase = region.getPhase();
+        const float phase = region.getPhase(midiState.random().region);
         const int quality =
             region.oscillatorQuality.value_or(Default::oscillatorQuality);
         for (WavetableOscillator& osc : impl.waveOscillators_) {
@@ -1691,7 +1691,7 @@ void Voice::Impl::fillWithGenerator(AudioSpan<float> buffer) noexcept
 
     if (region_->sampleId->filename() == "*noise") {
         auto gen = [&]() {
-            return uniformNoiseDist_(Random::randomGenerator);
+            return uniformNoiseDist_(resources_.getMidiState().random().voice);
         };
         absl::c_generate(leftSpan, gen);
         absl::c_generate(rightSpan, gen);

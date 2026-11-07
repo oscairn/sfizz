@@ -1788,14 +1788,14 @@ float sfz::Region::getBaseGain() const noexcept
     return baseGain;
 }
 
-float sfz::Region::getPhase() const noexcept
+float sfz::Region::getPhase(fast_rand& random) const noexcept
 {
     float phase;
     if (oscillatorPhase >= 0)
         phase = oscillatorPhase;
     else {
         fast_real_distribution<float> phaseDist { 0.0001f, 0.9999f };
-        phase = phaseDist(Random::randomGenerator);
+        phase = phaseDist(random);
     }
     return phase;
 }

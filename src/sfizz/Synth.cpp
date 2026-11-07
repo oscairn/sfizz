@@ -1341,7 +1341,7 @@ void Synth::Impl::checkOffGroups(const Region* region, int delay, int number, bo
 
 void Synth::Impl::noteOffDispatch(int delay, int noteNumber, float velocity) noexcept
 {
-    const auto randValue = randNoteDistribution_(Random::randomGenerator);
+    const auto randValue = randNoteDistribution_(resources_.getMidiState().random().synth);
     SisterVoiceRingBuilder ring;
     const TriggerEvent triggerEvent { TriggerEventType::NoteOff, noteNumber, velocity };
 
@@ -1365,7 +1365,7 @@ void Synth::Impl::noteOffDispatch(int delay, int noteNumber, float velocity) noe
 
 void Synth::Impl::noteOnDispatch(int delay, int noteNumber, float velocity) noexcept
 {
-    const auto randValue = randNoteDistribution_(Random::randomGenerator);
+    const auto randValue = randNoteDistribution_(resources_.getMidiState().random().synth);
     SisterVoiceRingBuilder ring;
     MidiState& midiState = resources_.getMidiState();
 
@@ -1447,7 +1447,7 @@ void Synth::Impl::ccDispatch(int delay, int ccNumber, float value, int extendedA
 {
     SisterVoiceRingBuilder ring;
     TriggerEvent triggerEvent { TriggerEventType::CC, ccNumber, value };
-    const auto randValue = randNoteDistribution_(Random::randomGenerator);
+    const auto randValue = randNoteDistribution_(resources_.getMidiState().random().synth);
     MidiState& midiState = resources_.getMidiState();
     for (Layer* layer : ccActivationLists_[ccNumber]) {
         const Region& region = layer->getRegion();

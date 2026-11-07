@@ -2268,3 +2268,33 @@ TEST_CASE("[Synth] Rendering restores the thread's floating-point control regist
     synth.renderBlock(buffer);
     REQUIRE(fpControl() == before);
 }
+
+TEST_CASE("[Synth] Each synth draws its own random numbers")
+{
+    // What notes draw: noise and Gaussian noise, a random pitch, volume, delay and cutoff, the
+    // region lorand/hirand chooses, an oscillator's phase, a random LFO and a random controller
+    const std::string patch = R"(
+        <region> sample=*noise hirand=0.5 pitch_random=100 amp_random=3 delay_random=0.001
+            fil_type=lpf_2p cutoff=3000 fil_random=1200
+        <region> sample=*gnoise lorand=0.5
+        <region> sample=*saw oscillator_phase=-1 lfo1_wave=12 lfo1_freq=40 lfo1_pitch=200 pitch_oncc135=300
+    )";
+    auto render = [&]() {
+        sfz::Synth synth;
+        synth.loadSfzString(fs::current_path() / "tests/TestFiles/random.sfz", patch);
+        sfz::AudioBuffer<float> buffer { 2, 256 };
+        std::vector<float> out;
+        for (int note = 60; note < 68; ++note) {
+            synth.noteOn(0, note, 100);
+            for (int b = 0; b < 4; ++b) {
+                synth.renderBlock(buffer);
+                out.insert(out.end(), buffer.getConstSpan(0).begin(), buffer.getConstSpan(0).end());
+            }
+        }
+        return out;
+    };
+    const std::vector<float> first = render();
+    REQUIRE(std::any_of(first.begin(), first.end(), [](float x) { return x != 0.0f; }));
+    // a second synth in the same process draws the same numbers
+    REQUIRE(render() == first);
+}

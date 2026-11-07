@@ -197,7 +197,7 @@ void LFO::processSH(unsigned nth, absl::Span<float> out, const float* phaseIn)
         // value updates twice every period
         if (sampleHoldState != oldState) {
             std::uniform_real_distribution<float> dist(-1.0f, +1.0f);
-            sampleHoldValue = dist(Random::randomGenerator);
+            sampleHoldValue = dist(impl.resources_.getMidiState().random().lfo);
         }
     }
 
