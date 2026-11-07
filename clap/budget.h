@@ -15,7 +15,7 @@
 #include <cstdint>
 #include <memory>
 
-namespace oscairn_sfizz {
+namespace oscairn_sampler {
 
 constexpr size_t maxBudgetVoices = 8 * 256; // candidates: eight contexts of 256 voice slots
 constexpr uint32_t maxBudgetNotes = 256;
@@ -58,4 +58,4 @@ private:
     std::unique_ptr<Impl> impl_;
 };
 
-} // namespace oscairn_sfizz
+} // namespace oscairn_sampler

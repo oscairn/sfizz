@@ -215,11 +215,11 @@ struct Buffer {
     }
 };
 
-// State version 3: directory, base library, base path, patch text, output bus
+// State version 4: directory, base library, base path, patch text, output bus
 std::string stateFor(const std::string& text, const std::string& library = "", const std::string& path = "", const std::string& directory = "",
                      const std::string& bus = "0")
 {
-    std::string s = "oscairn-sfizz-3\n";
+    std::string s = "oscairn-sampler-4\n";
     for (const std::string* f : { &directory, &library, &path, &text, &bus })
         s += std::to_string(f->size()) + "\n" + *f + "\n";
     return s;
@@ -392,6 +392,8 @@ int main(int argc, char** argv)
         if (entry) {
             auto* factory = static_cast<const clap_plugin_factory_t*>(entry->get_factory(CLAP_PLUGIN_FACTORY_ID));
             CHECK(factory && factory->get_plugin_count(factory) == 1);
+            auto* desc = factory ? factory->get_plugin_descriptor(factory, 0) : nullptr;
+            CHECK(desc && !std::strcmp(desc->id, "org.oscairn.sampler") && !std::strcmp(desc->name, "Oscairn Sampler"));
             entry->deinit();
         }
     }
@@ -449,15 +451,13 @@ int main(int argc, char** argv)
         auto* plugin = create();
         CHECK(load(plugin, stateFor(sine)));
         CHECK(save(plugin) == stateFor(sine));
-        // version 1 (no base asset reference) still loads
-        CHECK(load(plugin, "oscairn-sfizz-1\n0\n\n" + std::to_string(sine.size()) + "\n" + sine + "\n"));
-        CHECK(save(plugin) == stateFor(sine));
-        // and version 2 (no bus), what converted libraries hold
-        CHECK(load(plugin, "oscairn-sfizz-2\n0\n\n0\n\n0\n\n" + std::to_string(sine.size()) + "\n" + sine + "\n"));
-        CHECK(save(plugin) == stateFor(sine));
+        // the states the plugin wrote as Oscairn sfizz are not read
+        std::string old = stateFor(sine);
+        CHECK(!load(plugin, old.replace(0, std::strlen("oscairn-sampler-4"), "oscairn-sfizz-3")));
+        CHECK(!load(plugin, "oscairn-sfizz-2\n0\n\n0\n\n0\n\n" + std::to_string(sine.size()) + "\n" + sine + "\n"));
         CHECK(!load(plugin, stateFor(sine, "", "", "", "9"))); // no bus 9
         CHECK(!load(plugin, stateFor(sine, "", "", "", "")));
-        CHECK(!load(plugin, "oscairn-sfizz-1\n0\n\n999\nshort\n"));
+        CHECK(!load(plugin, "oscairn-sampler-4\n0\n\n999\nshort\n"));
         CHECK(!load(plugin, "something else\n"));
         CHECK(save(plugin) == stateFor(sine));
         CHECK(plugin->activate(plugin, 44100, 1, 256));
@@ -656,15 +656,19 @@ int main(int argc, char** argv)
         CHECK(!plugin->get_extension(plugin, "oscairn.sound-snapshots/draft-3"));
         const std::string kick = "<region> sample=kick.wav loop_mode=one_shot";
         CHECK(load(plugin, stateFor(kick, "", "", OSCAIRN_TEST_FILES)));
-        const size_t opened = oscairnSfizzFileOpens(plugin);
+        const size_t opened = oscairnSamplerFileOpens(plugin);
         CHECK(opened > 0);
         Buffer saved;
         CHECK(ctx->state->save(plugin, &saved.out));
+        CHECK(saved.data.compare(0, 27, "oscairn-sampler-contexts-3\n") == 0);
         Buffer in; in.data = saved.data;
         uint32_t selected[16] {};
         char message[256] {};
         CHECK(snaps->prepare(plugin, &in.in, selected, message, sizeof(message)));
-        CHECK(oscairnSfizzFileOpens(plugin) == opened); // nothing read from disk
+        CHECK(oscairnSamplerFileOpens(plugin) == opened); // nothing read from disk
+        Buffer old; old.data = "oscairn-sfizz-contexts-2" + saved.data.substr(26); // as Oscairn sfizz wrote it
+        uint32_t unused[16] {};
+        CHECK(!snaps->prepare(plugin, &old.in, unused, message, sizeof(message)));
         oscairn_sound_context_info_t info {};
         CHECK(ctx->get(plugin, 1, &info) && info.id != 0 && !std::strcmp(info.name, "Default") && info.selected_channels == 0);
         for (uint32_t id : selected)
@@ -716,7 +720,7 @@ int main(int argc, char** argv)
         Buffer full; full.data = saved.data;
         CHECK(!snaps->prepare(plugin, &full.in, selected, message, sizeof(message)));
         CHECK(std::strstr(message, "free") != nullptr);
-        Buffer bad; bad.data = "oscairn-sfizz-contexts-1\nnonsense";
+        Buffer bad; bad.data = "oscairn-sampler-contexts-3\nnonsense";
         CHECK(!snaps->prepare(plugin, &bad.in, selected, message, sizeof(message)));
         plugin->destroy(plugin);
     }
@@ -794,6 +798,7 @@ int main(int argc, char** argv)
         CHECK(sineId != CLAP_INVALID_ID && ctx->select(plugin, sineId, 3)); // queued, not yet applied
         Buffer saved;
         CHECK(ctx->state->save(plugin, &saved.out));
+        CHECK(saved.data.compare(0, 27, "oscairn-sampler-contexts-3\n") == 0);
         Buffer in; in.data = saved.data;
         CHECK(ctx->state->load(plugin, &in.in));
         oscairn_sound_context_info_t info {};

@@ -34,9 +34,8 @@
 // host, and oscairn.asset-dependencies lists them; without it, paths resolve from the
 // patch's directory.
 //
-// State (version 3; versions 1 and 2, without the bus or the two base fields, still load): UTF-8
-// text,
-//   oscairn-sfizz-3\n
+// State (version 4): UTF-8 text,
+//   oscairn-sampler-4\n
 // then five fields, each its byte length in decimal, \n, the bytes, \n:
 //   directory   - local folder relative sample paths resolve from when no base is given
 //                 (or when the host offers no oscairn.assets); may be empty
@@ -77,9 +76,7 @@
 
 namespace {
 
-constexpr const char* stateVersion = "oscairn-sfizz-3";
-constexpr const char* stateVersion2 = "oscairn-sfizz-2";
-constexpr const char* stateVersion1 = "oscairn-sfizz-1";
+constexpr const char* stateVersion = "oscairn-sampler-4";
 constexpr size_t maxStateBytes = 64 << 20;
 constexpr size_t maxNotes = 256;
 constexpr uint32_t contextCount = 8;
@@ -90,7 +87,7 @@ constexpr uint32_t selectionCapacity = 32;
 constexpr int16_t chokeMark = -2; // a queued choke_retiring, in place of a channel
 constexpr size_t maxSlots = sfz::config::maxVoices; // voice slots a synth has at most
 static_assert(busCount <= 10, "a bus is saved as one digit");
-static_assert(contextCount * maxSlots <= oscairn_sfizz::maxBudgetVoices && maxNotes <= oscairn_sfizz::maxBudgetNotes, "budget.h");
+static_assert(contextCount * maxSlots <= oscairn_sampler::maxBudgetVoices && maxNotes <= oscairn_sampler::maxBudgetNotes, "budget.h");
 
 struct Patch {
     std::string directory; // where relative sample and include paths resolve
@@ -174,7 +171,7 @@ struct Plugin {
     Note notes[maxNotes];
     size_t noteCount { 0 };
     std::vector<float> left, right, mix[2 * busCount];
-    oscairn_sfizz::VoiceBudget budget; // the host's limits, as set_limits last gave them
+    oscairn_sampler::VoiceBudget budget; // the host's limits, as set_limits last gave them
     // Contexts a reset found idle, which the main thread may be replacing: each is cleared when
     // next rendered, at the start of a process call, before any event
     uint32_t stale { 0 };
@@ -373,7 +370,7 @@ Engine* rendered(Plugin& s, uint32_t i)
 // from `delay` frames into the block.
 void keepWithinLimits(Plugin& s, uint32_t incoming, int delay)
 {
-    using oscairn_sfizz::VoiceBudget;
+    using oscairn_sampler::VoiceBudget;
     VoiceBudget& budget = s.budget;
     if (!budget.limited())
         return;
@@ -394,10 +391,10 @@ void keepWithinLimits(Plugin& s, uint32_t incoming, int delay)
             if (v.isFree())
                 continue;
             const sfz::TriggerEvent& trigger = v.getTriggerEvent();
-            if (count == oscairn_sfizz::maxBudgetVoices)
+            if (count == oscairn_sampler::maxBudgetVoices)
                 break;
             s.budgetVoices[count++] = { e, i, k };
-            oscairn_sfizz::BudgetCandidate c;
+            oscairn_sampler::BudgetCandidate c;
             c.context = e->id;
             c.selected = selected;
             // a key up is released, pedal or not
@@ -871,20 +868,16 @@ bool readAll(const clap_istream_t* stream, std::string& data)
     }
 }
 
-// A version 1, 2 or 3 state: context 0's patch
+// A state: context 0's patch
 bool parsePatchState(const std::string& data, Patch& patch)
 {
-    auto starts = [&](const char* version) { return data.compare(0, std::strlen(version) + 1, std::string(version) + "\n") == 0; };
-    const int version = starts(stateVersion) ? 3 : starts(stateVersion2) ? 2 : starts(stateVersion1) ? 1 : 0;
-    if (!version)
+    const std::string header = std::string(stateVersion) + "\n";
+    if (data.compare(0, header.size(), header) != 0)
         return false;
-    size_t at = std::strlen(stateVersion) + 1; // the three are the same length
+    size_t at = header.size();
     std::string bus;
-    if (!readField(data, at, patch.directory))
-        return false;
-    if (version > 1 && (!readField(data, at, patch.library) || !readField(data, at, patch.basePath)))
-        return false;
-    if (!readField(data, at, patch.text) || (version > 2 && (!readField(data, at, bus) || !parseBus(bus, patch.bus))))
+    if (!readField(data, at, patch.directory) || !readField(data, at, patch.library) || !readField(data, at, patch.basePath)
+        || !readField(data, at, patch.text) || !readField(data, at, bus) || !parseBus(bus, patch.bus))
         return false;
     return at == data.size();
 }
@@ -1035,13 +1028,13 @@ bool contextDiscard(const clap_plugin_t* p, uint32_t id)
 
 // Sound-context snapshot (the host stops processing first): every prepared context's name, patch
 // and bus, and each channel's context with the queued selections applied. Text, like the state:
-//   oscairn-sfizz-contexts-2\n
+//   oscairn-sampler-contexts-3\n
 // then for each of the eight slots seven fields (as in the state: decimal length, \n, bytes, \n):
 // "1" or empty for a free slot, name, directory, library, path, patch, output bus (one digit; 0
 // for a free slot); then one field of 16 digits, the slot each MIDI channel plays. Slot 0 is the
 // default context (the state's patch). Loading builds every engine before replacing any; contexts
-// other than 0 get fresh IDs. A version 1, 2 or 3 state loads too, as context 0 alone.
-constexpr const char* snapshotVersion = "oscairn-sfizz-contexts-2";
+// other than 0 get fresh IDs. A state loads too, as context 0 alone.
+constexpr const char* snapshotVersion = "oscairn-sampler-contexts-3";
 
 // The snapshot of every context, or (alone < contextCount) of that slot alone as the default on
 // every channel and on Main (save_sound)
@@ -1087,7 +1080,7 @@ struct ParsedSnapshot {
     uint32_t channels[16] {};
 };
 
-// A snapshot, or a version 1 or 2 state as the default context alone
+// A snapshot, or a state as the default context alone
 bool parseSnapshot(const std::string& data, ParsedSnapshot& out)
 {
     out.used[0] = true;
@@ -1311,7 +1304,7 @@ uint32_t budgetActiveVoices(const clap_plugin_t* p, double* voiceCost)
 uint32_t budgetNotes(const clap_plugin_t* p, oscairn_voice_budget_note_t* out, uint32_t capacity)
 {
     auto& s = self(p);
-    oscairn_sfizz::VoiceBudget& report = s.budget;
+    oscairn_sampler::VoiceBudget& report = s.budget;
     report.clearReport();
     for (uint32_t i = 0; i < contextCount; ++i) {
         Engine* e = rendered(s, i);
@@ -1441,7 +1434,7 @@ const void* getExtension(const clap_plugin_t*, const char* id)
 
 } // namespace
 
-size_t oscairnSfizzFileOpens(const clap_plugin_t* p)
+size_t oscairnSamplerFileOpens(const clap_plugin_t* p)
 {
     size_t n = 0;
     for (auto& c : self(p).contexts)
@@ -1456,14 +1449,14 @@ const char* features[] = { CLAP_PLUGIN_FEATURE_INSTRUMENT, CLAP_PLUGIN_FEATURE_S
 
 const clap_plugin_descriptor_t descriptor {
     CLAP_VERSION_INIT,
-    "org.oscairn.sfizz",
-    "Oscairn sfizz",
+    "org.oscairn.sampler",
+    "Oscairn Sampler",
     "Oscairn",
     "https://github.com/oscairn/sfizz",
     "",
     "",
     "0.4.1",
-    "SFZ sample player, sfizz with Oscairn's extensions",
+    "SFZ and AWM2-class sample player, based on sfizz",
     features,
 };
 
@@ -1506,5 +1499,5 @@ const void* entryFactory(const char* id)
 } // namespace
 
 extern "C" {
-OSCAIRN_SFIZZ_EXPORT const clap_plugin_entry_t clap_entry { CLAP_VERSION_INIT, entryInit, entryDeinit, entryFactory };
+OSCAIRN_SAMPLER_EXPORT const clap_plugin_entry_t clap_entry { CLAP_VERSION_INIT, entryInit, entryDeinit, entryFactory };
 }

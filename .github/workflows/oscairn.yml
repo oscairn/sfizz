@@ -57,7 +57,7 @@ jobs:
             -DCMAKE_EXE_LINKER_FLAGS="${{ matrix.flags }}" -DCMAKE_SHARED_LINKER_FLAGS="${{ matrix.flags }}" \
             -DCMAKE_MODULE_LINKER_FLAGS="${{ matrix.flags }}"
       - name: Build
-        run: cmake --build build --target sfizz_tests sfizz_clap sfizz_clap_tests
+        run: cmake --build build --target sfizz_tests oscairn_sampler_clap oscairn_sampler_clap_tests
       - name: Test
         env:
           UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
@@ -65,7 +65,7 @@ jobs:
           ASAN_OPTIONS: detect_leaks=1
         run: |
           ./build/library/bin/sfizz_tests
-          ./build/library/bin/sfizz_clap_tests build/library/lib/oscairn-sfizz.clap
+          ./build/library/bin/oscairn_sampler_clap_tests build/library/lib/oscairn-sampler.clap
       - name: Stock vs fork
         if: matrix.gate
         run: scripts/oscairn/compare-stock.sh "$RUNNER_TEMP/gate"

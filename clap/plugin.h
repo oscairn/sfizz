@@ -8,13 +8,13 @@
 #include <clap/clap.h>
 
 #if defined(_WIN32)
-#define OSCAIRN_SFIZZ_EXPORT __declspec(dllexport)
+#define OSCAIRN_SAMPLER_EXPORT __declspec(dllexport)
 #else
-#define OSCAIRN_SFIZZ_EXPORT __attribute__((visibility("default")))
+#define OSCAIRN_SAMPLER_EXPORT __attribute__((visibility("default")))
 #endif
 
-extern "C" OSCAIRN_SFIZZ_EXPORT const clap_plugin_entry_t clap_entry;
+extern "C" OSCAIRN_SAMPLER_EXPORT const clap_plugin_entry_t clap_entry;
 
 // For tests: how many times the instance's contexts opened a sample file
 #include <cstddef>
-size_t oscairnSfizzFileOpens(const clap_plugin_t* plugin);
+size_t oscairnSamplerFileOpens(const clap_plugin_t* plugin);

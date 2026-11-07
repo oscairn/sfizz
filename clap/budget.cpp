@@ -7,7 +7,7 @@
 #include "budget.h"
 #include <oscairn-clap/voice-budget-plugin.hpp>
 
-namespace oscairn_sfizz {
+namespace oscairn_sampler {
 
 struct VoiceBudget::Impl {
     oscairn::voices::Limits limits;
@@ -75,4 +75,4 @@ uint32_t VoiceBudget::writeReport(oscairn_voice_budget_note_t* out, uint32_t cap
     return impl_->report.write(out, capacity);
 }
 
-} // namespace oscairn_sfizz
+} // namespace oscairn_sampler

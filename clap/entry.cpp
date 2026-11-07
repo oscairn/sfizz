@@ -7,4 +7,4 @@
 // The module's exported symbol; the plugin itself is in plugin.cpp.
 #include "plugin.h"
 
-extern "C" OSCAIRN_SFIZZ_EXPORT const void* oscairn_sfizz_keep_entry = &clap_entry;
+extern "C" OSCAIRN_SAMPLER_EXPORT const void* oscairn_sampler_keep_entry = &clap_entry;
