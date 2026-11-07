@@ -209,6 +209,7 @@ list(APPEND SFIZZ_SOURCES
     sfizz/oscairn/ElementLevel.cpp
     sfizz/oscairn/ElementLfo.cpp
     sfizz/oscairn/ElementPitch.cpp
+    sfizz/oscairn/Elements.cpp
     sfizz/oscairn/ElementTables.cpp)
 
 # Parser core library

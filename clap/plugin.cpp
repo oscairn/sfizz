@@ -269,7 +269,8 @@ bool loadPatch(const Plugin& s, Engine& e, const oscairn_asset_ref_t* base, std:
     }
     for (int i = 0, n = e.synth.getNumRegions(); i < n; ++i) {
         const sfz::Region* r = e.synth.getRegionView(i);
-        if (r && r->isRelease())
+        // a mono part may start a held key again when a newer note ends
+        if (r && (r->isRelease() || r->oscairn.mono))
             for (int k = std::max(0, int(r->keyRange.getStart())); k <= std::min(127, int(r->keyRange.getEnd())); ++k)
                 e.releaseKeys.set(static_cast<size_t>(k));
     }

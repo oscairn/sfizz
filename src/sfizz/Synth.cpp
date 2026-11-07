@@ -312,6 +312,8 @@ void Synth::Impl::clear()
     groupOpcodes_.clear();
     unknownOpcodes_.clear();
     oscairnProfile_ = false;
+    elements_.clear();
+    oscairnSounding_ = -1;
     modificationTime_ = absl::nullopt;
     playheadMoved_ = false;
 
@@ -910,6 +912,8 @@ void Synth::Impl::finalizeSfzLoad()
             << " out of " << layers_.size() << " regions");
     }
     layers_.resize(currentRegionCount);
+    for (const LayerPtr& layerPtr : layers_)
+        elements_.add(layerPtr->getRegion().oscairn.element, layerPtr->getRegion().oscairn.mono);
 
     // collect all CCs used in regions, with matrix not yet connected
     BitArray<config::numCCs> usedCCs;
@@ -1313,6 +1317,7 @@ void Synth::hdNoteOff(int delay, int noteNumber, float normalizedVelocity) noexc
         voice.registerNoteOff(delay, noteNumber, replacedVelocity);
 
     impl.noteOffDispatch(delay, noteNumber, replacedVelocity);
+    impl.oscairnMonoNoteOff(delay, noteNumber);
 }
 
 void Synth::Impl::startVoice(Layer* layer, int delay, const TriggerEvent& triggerEvent, SisterVoiceRingBuilder& ring) noexcept
@@ -1388,7 +1393,10 @@ void Synth::Impl::noteOnDispatch(int delay, int noteNumber, float velocity) noex
     for (Layer* layer : downKeyswitchLists_[noteNumber])
         layer->keySwitched_ = true;
 
+    oscairnSelect(delay, noteNumber, velocity);
     for (Layer* layer : noteActivationLists_[noteNumber]) {
+        if (!elements_.plays(layer->getRegion().oscairn.element.number))
+            continue;
         if (layer->registerNoteOn(noteNumber, velocity, randValue)) {
             const Region& region = layer->getRegion();
             if (region.useTimerRange && !voiceManager_.withinValidTimerRange(&region, midiState.getInternalClock() + delay, sampleRate_))
@@ -1404,6 +1412,43 @@ void Synth::Impl::noteOnDispatch(int delay, int noteNumber, float velocity) noex
         const Region& region = layer->getRegion();
         layer->previousKeySwitched_ = (region.previousKeyswitch == noteNumber);
     }
+}
+
+void Synth::Impl::oscairnSelect(int delay, int noteNumber, float velocity) noexcept
+{
+    if (elements_.empty())
+        return;
+    const MidiState& midiState = resources_.getMidiState();
+    if (elements_.mono()) {
+        for (auto& voice : voiceManager_) {
+            const Region* region = voice.getRegion();
+            if (!voice.isFree() && region && region->oscairn.element.number > 0)
+                voice.off(delay, true);
+        }
+        oscairnSounding_ = noteNumber;
+    }
+    // the keys held besides this one; a held key started again counts itself
+    const int held = midiState.getActiveNotes() - (oscairnRetrigger_ ? 0 : 1);
+    elements_.select(noteNumber, std::max(1, static_cast<int>(std::lround(velocity * 127.0f))), held,
+                     midiState.getCCValueAt(oscairn::kAssignSwitchCC[0], delay) >= 0.5f,
+                     midiState.getCCValueAt(oscairn::kAssignSwitchCC[1], delay) >= 0.5f);
+}
+
+void Synth::Impl::oscairnMonoNoteOff(int delay, int noteNumber) noexcept
+{
+    if (!elements_.mono() || noteNumber != oscairnSounding_)
+        return;
+    oscairnSounding_ = -1;
+    const MidiState& midiState = resources_.getMidiState();
+    int newest = -1;
+    for (int key = 0; key < 128; ++key)
+        if (midiState.isNotePressed(key) && (newest < 0 || midiState.getNoteDuration(key, delay) < midiState.getNoteDuration(newest, delay)))
+            newest = key;
+    if (newest < 0)
+        return;
+    oscairnRetrigger_ = true;
+    noteOnDispatch(delay, newest, midiState.getNoteVelocity(newest));
+    oscairnRetrigger_ = false;
 }
 
 void Synth::Impl::startDelayedSustainReleases(Layer* layer, int delay, SisterVoiceRingBuilder& ring) noexcept
@@ -2266,6 +2311,8 @@ void Synth::restart() noexcept
     midiState.programChangeEvent(0, 0);
     impl.resetAllControllers(0);
     impl.currentSwitch_ = impl.loadedSwitch_;
+    impl.elements_.restart();
+    impl.oscairnSounding_ = -1;
     // each layer's switches and pedals as finalizeSfzLoad sets them up
     for (const Impl::LayerPtr& layerPtr : impl.layers_) {
         Layer& layer = *layerPtr;

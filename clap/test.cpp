@@ -1595,6 +1595,27 @@ int main(int argc, char** argv)
         plugin->deactivate(plugin);
         plugin->destroy(plugin);
     }
+    { // a mono part keeps a held note whose voices a newer note cut: it plays again at that note's end
+        auto* plugin = create();
+        CHECK(load(plugin, stateFor("<control> oscairn_profile=1 <region> sample=*sine oscairn_element=1 oscairn_mono=1\n")));
+        CHECK(plugin->activate(plugin, 48000, 1, 256));
+        Run run { plugin };
+        Events events;
+        auto blocks = [&](int n) { for (int b = 0; b < n; ++b) run.block(events, 256); };
+        events.note(CLAP_EVENT_NOTE_ON, 0, 1, 60, 1.0);
+        blocks(2);
+        events.note(CLAP_EVENT_NOTE_ON, 0, 2, 67, 1.0);
+        blocks(20);
+        CHECK(events.ends(1) == 0 && run.peak > 0.1f);
+        events.note(CLAP_EVENT_NOTE_OFF, 0, 2, 67, 0.0);
+        blocks(20);
+        CHECK(events.ends(2) == 1 && events.ends(1) == 0 && run.peak > 0.1f); // note 1 again
+        events.note(CLAP_EVENT_NOTE_OFF, 0, 1, 60, 0.0);
+        blocks(20);
+        CHECK(events.ends(1) == 1 && run.peak == 0.0f);
+        plugin->deactivate(plugin);
+        plugin->destroy(plugin);
+    }
     // No allocation in any process call above
     CHECK(guardedAllocations.load() == 0);
     if (guardedAllocations.load())

@@ -1606,3 +1606,237 @@ TEST_CASE("[Oscairn] Element filter stays finite below the reference rate")
         }
     }
 }
+
+namespace {
+// A patch of sine elements, element i + 1 with opcodes elements[i]
+std::string elementPatch(const std::vector<std::string>& elements, const std::string& common = "")
+{
+    std::string text = "<control> oscairn_profile=1 <global> amp_veltrack=0 " + common + "\n";
+    for (size_t i = 0; i < elements.size(); ++i)
+        text += "<region> sample=*sine oscairn_element=" + std::to_string(i + 1) + " " + elements[i] + "\n";
+    return text;
+}
+
+struct ElementPlayer {
+    sfz::Synth synth;
+    sfz::AudioBuffer<float> buffer { 2, 64 };
+    explicit ElementPlayer(const std::string& text)
+    {
+        synth.setSamplesPerBlock(64);
+        synth.loadSfzString(fs::current_path() / "tests/TestFiles/oscairn.sfz", text);
+    }
+    void on(int key, int velocity = 100) { synth.noteOn(0, key, velocity); synth.renderBlock(buffer); }
+    void off(int key) { synth.noteOff(0, key, 0); synth.renderBlock(buffer); }
+    void cc(int number, float value) { synth.hdcc(0, number, value); }
+    // The elements sounding for a key (started and not released), in element order
+    std::vector<int> sounding(int key) const
+    {
+        std::vector<int> out;
+        for (const sfz::Voice* v : synth.getActiveVoices())
+            if (!v->released() && v->getTriggerEvent().number == key)
+                out.push_back(v->getRegion()->oscairn.element.number);
+        std::sort(out.begin(), out.end());
+        return out;
+    }
+    // Plays a short note and returns its elements
+    std::vector<int> note(int key, int velocity = 100)
+    {
+        on(key, velocity);
+        auto s = sounding(key);
+        off(key);
+        return s;
+    }
+};
+
+using Elements = std::vector<int>;
+} // namespace
+
+TEST_CASE("[Oscairn] Element selection opcodes")
+{
+    sfz::Synth synth;
+    synth.loadSfzString(fs::current_path() / "tests/TestFiles/oscairn.sfz", R"(
+        <region> sample=*sine oscairn_element=3 oscairn_xa=3
+        <control> oscairn_profile=1
+        <region> sample=*sine oscairn_element=7 oscairn_xa=4 oscairn_element_group=2 oscairn_element_lokey=c4
+            oscairn_element_hikey=72 oscairn_element_lovel=10 oscairn_element_hivel=90 oscairn_mono=1
+        <region> sample=*sine oscairn_element=200 oscairn_xa=9 oscairn_element_group=0
+    )");
+    REQUIRE(isUnknown(synth, "oscairn_element"));
+    REQUIRE(synth.getRegionView(0)->oscairn.element.number == 0);
+    const auto& e = synth.getRegionView(1)->oscairn;
+    REQUIRE(e.element.number == 7);
+    REQUIRE(e.element.mode == sfz::oscairn::kRandom);
+    REQUIRE(e.element.group == 2);
+    REQUIRE(e.element.loKey == 60);
+    REQUIRE(e.element.hiKey == 72);
+    REQUIRE(e.element.loVel == 10);
+    REQUIRE(e.element.hiVel == 90);
+    REQUIRE(e.mono);
+    const auto& c = synth.getRegionView(2)->oscairn.element; // clamped
+    REQUIRE(c.number == 128);
+    REQUIRE(c.mode == sfz::oscairn::kSwitch2On);
+    REQUIRE(c.group == 1);
+}
+
+TEST_CASE("[Oscairn] XA Cycle: one position per element group, across keys")
+{
+    // Reference renders (xa1 cyc3, cycrange, cyc2grp, cycheld)
+    ElementPlayer three { elementPatch({ "oscairn_xa=3", "oscairn_xa=3", "oscairn_xa=3" }) };
+    std::vector<Elements> got;
+    for (int i = 0; i < 7; ++i)
+        got.push_back(three.note(60));
+    REQUIRE(got == std::vector<Elements> { { 1 }, { 2 }, { 3 }, { 1 }, { 2 }, { 3 }, { 1 } });
+
+    // an element whose limits leave a key out is passed over on that key
+    ElementPlayer range { elementPatch({ "oscairn_xa=3", "oscairn_xa=3 oscairn_element_lokey=60 oscairn_element_hikey=60", "oscairn_xa=3" }) };
+    got.clear();
+    for (int key : { 60, 62, 60, 62, 62, 60, 60, 62, 60, 60 })
+        got.push_back(range.note(key));
+    REQUIRE(got == std::vector<Elements> { { 1 }, { 3 }, { 1 }, { 3 }, { 1 }, { 2 }, { 3 }, { 1 }, { 2 }, { 3 } });
+
+    // two groups count apart; a Normal element plays beside them
+    ElementPlayer groups { elementPatch({ "oscairn_xa=3", "oscairn_xa=3", "oscairn_xa=3 oscairn_element_group=2",
+                                          "oscairn_xa=3 oscairn_element_group=2", "oscairn_xa=3 oscairn_element_group=2", "" }) };
+    got.clear();
+    for (int i = 0; i < 6; ++i)
+        got.push_back(groups.note(60));
+    REQUIRE(got == std::vector<Elements> { { 1, 3, 6 }, { 2, 4, 6 }, { 1, 5, 6 }, { 2, 3, 6 }, { 1, 4, 6 }, { 2, 5, 6 } });
+
+    // the position is the part's, whatever keys are held
+    ElementPlayer held { elementPatch({ "oscairn_xa=3", "oscairn_xa=3", "oscairn_xa=3" }) };
+    held.on(48);
+    REQUIRE(held.note(60) == Elements { 2 });
+    REQUIRE(held.note(64) == Elements { 3 });
+    REQUIRE(held.sounding(48) == Elements { 1 });
+    held.off(48);
+    REQUIRE(held.note(60) == Elements { 1 });
+
+    // a reload or a restart starts over
+    held.note(60);
+    held.synth.restart();
+    REQUIRE(held.note(60) == Elements { 1 });
+    held.note(60);
+    held.synth.loadSfzString(fs::current_path() / "tests/TestFiles/oscairn.sfz", elementPatch({ "oscairn_xa=3", "oscairn_xa=3", "oscairn_xa=3" }));
+    REQUIRE(held.note(60) == Elements { 1 });
+}
+
+TEST_CASE("[Oscairn] XA Random: each covering element alike, the same after a restart")
+{
+    // Reference (xa1 rand1, rand3, rand3b, rand2grp): one random element always plays; three
+    // play alike (206, 214, 180 of 600 notes); groups draw apart
+    ElementPlayer one { elementPatch({ "oscairn_xa=4" }) };
+    for (int i = 0; i < 600; ++i)
+        REQUIRE(one.note(60) == Elements { 1 });
+
+    ElementPlayer three { elementPatch({ "oscairn_xa=4", "oscairn_xa=4", "oscairn_xa=4" }) };
+    std::vector<Elements> first;
+    int counts[4] {};
+    for (int i = 0; i < 3000; ++i) {
+        first.push_back(three.note(60));
+        REQUIRE(first.back().size() == 1);
+        ++counts[first.back()[0]];
+    }
+    for (int k = 1; k <= 3; ++k)
+        REQUIRE(std::abs(counts[k] - 1000) < 100);
+    three.synth.restart();
+    for (int i = 0; i < 50; ++i)
+        REQUIRE(three.note(60) == first[static_cast<size_t>(i)]);
+
+    // limits and groups: element 2 covers note 60 only; group 2 draws on its own
+    ElementPlayer groups { elementPatch({ "oscairn_xa=4", "oscairn_xa=4 oscairn_element_lokey=60 oscairn_element_hikey=60",
+                                          "oscairn_xa=4 oscairn_element_group=2", "oscairn_xa=4 oscairn_element_group=2", "" }) };
+    // (a draw of 255 takes the sound's first element if it is one of the group's: group 2,
+    // without it, then plays none, one note in 256)
+    int two = 0, g3 = 0, g4 = 0;
+    for (int i = 0; i < 400; ++i) {
+        const Elements a = groups.note(62);
+        REQUIRE(a.front() == 1);
+        REQUIRE(a.back() == 5);
+        const Elements b = groups.note(60);
+        two += b.front() == 2;
+        g3 += std::count(b.begin(), b.end(), 3);
+        g4 += std::count(b.begin(), b.end(), 4);
+    }
+    REQUIRE(std::abs(two - 200) < 40);
+    REQUIRE(std::abs(g3 - 200) < 40);
+    REQUIRE(std::abs(g4 - 200) < 40);
+}
+
+TEST_CASE("[Oscairn] XA Legato: a mono part's notes while another key is held")
+{
+    // Reference (xa1 leg_mono, leg_poly, leg_groups, leg_cycle)
+    auto play = [](const std::vector<std::string>& elements, bool mono) {
+        ElementPlayer p { elementPatch(elements, mono ? "oscairn_mono=1" : "") };
+        std::vector<Elements> got;
+        p.on(60);
+        got.push_back(p.sounding(60));
+        p.on(62);
+        got.push_back(p.sounding(62));
+        got.push_back(p.sounding(60)); // a mono part's newer note cuts the held one
+        p.off(60);
+        p.on(64);
+        got.push_back(p.sounding(64));
+        p.off(62);
+        p.off(64);
+        got.push_back(p.note(60));
+        p.on(60);
+        p.on(62);
+        p.off(62); // a mono part starts the held key again, as a legato note
+        got.push_back(p.sounding(60));
+        p.off(60);
+        got.push_back(p.note(62));
+        return got;
+    };
+    REQUIRE(play({ "", "oscairn_xa=1" }, true) == std::vector<Elements> { { 1 }, { 2 }, {}, { 2 }, { 1 }, { 2 }, { 1 } });
+    REQUIRE(play({ "", "oscairn_xa=1" }, false) == std::vector<Elements> { { 1 }, { 1 }, { 1 }, { 1 }, { 1 }, { 1 }, { 1 } });
+    // a Legato element plays only beside a plain element of its group, which counts whatever
+    // its limits; a Normal element gives way only to a Legato element of its own group
+    REQUIRE(play({ "", "oscairn_xa=1 oscairn_element_group=2", "oscairn_xa=1 oscairn_element_group=3",
+                   "oscairn_element_group=3 oscairn_element_lokey=100 oscairn_element_hikey=110" }, true)
+        == std::vector<Elements> { { 1 }, { 1, 3 }, {}, { 1, 3 }, { 1 }, { 1, 3 }, { 1 } });
+    // Cycle elements keep cycling under legato notes
+    REQUIRE(play({ "oscairn_xa=3", "oscairn_xa=3", "oscairn_xa=1" }, true)
+        == std::vector<Elements> { { 1 }, { 2, 3 }, {}, { 1, 3 }, { 2 }, { 1, 3 }, { 2 } });
+}
+
+TEST_CASE("[Oscairn] XA A.SW: the assignable switches at note-on")
+{
+    // Reference (xa1 asw, asw_held, asw_leg): on from 64 of 127, read at note-on
+    using sfz::oscairn::kAssignSwitchCC;
+    ElementPlayer p { elementPatch({ "oscairn_xa=5", "oscairn_xa=6", "oscairn_xa=7", "" }) };
+    const float on = 64 / 127.0f, off = 63 / 127.0f;
+    std::vector<Elements> got;
+    got.push_back(p.note(60));
+    p.cc(kAssignSwitchCC[0], 1.0f);
+    got.push_back(p.note(60));
+    p.cc(kAssignSwitchCC[1], 1.0f);
+    got.push_back(p.note(60));
+    p.cc(kAssignSwitchCC[0], 0.0f);
+    got.push_back(p.note(60));
+    p.cc(kAssignSwitchCC[1], off);
+    got.push_back(p.note(60));
+    p.cc(kAssignSwitchCC[1], on);
+    got.push_back(p.note(60));
+    REQUIRE(got == std::vector<Elements> { { 1, 4 }, { 2, 4 }, { 2, 3, 4 }, { 3, 4 }, { 1, 4 }, { 3, 4 } });
+
+    // a held note keeps its elements
+    p.cc(kAssignSwitchCC[1], 0.0f);
+    p.on(60);
+    p.cc(kAssignSwitchCC[0], 1.0f);
+    p.synth.renderBlock(p.buffer);
+    REQUIRE(p.sounding(60) == Elements { 1, 4 });
+    p.off(60);
+
+    // an A.SW element counts as plain for legato only while its switch is on
+    ElementPlayer leg { elementPatch({ "oscairn_xa=6", "oscairn_xa=1" }, "oscairn_mono=1") };
+    leg.on(60);
+    leg.on(62);
+    REQUIRE(leg.sounding(60).empty());
+    REQUIRE(leg.sounding(62).empty());
+    leg.off(60);
+    leg.off(62);
+    leg.cc(kAssignSwitchCC[0], 1.0f);
+    leg.on(60);
+    leg.on(62);
+    REQUIRE(leg.sounding(62) == Elements { 2 });
+}

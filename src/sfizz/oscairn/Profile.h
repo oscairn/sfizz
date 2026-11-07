@@ -12,6 +12,7 @@
 #pragma once
 #include "../Opcode.h"
 #include "ElementEnvelope.h"
+#include "Elements.h"
 #include "ElementFilter.h"
 #include "ElementLevel.h"
 #include "ElementLfo.h"
@@ -38,6 +39,10 @@ struct RegionData {
     ElementLevelScaling levelScaling;
     // Key-off element (a release region): its envelopes release keyOffHoldSeconds after it starts
     bool keyOff { false };
+    // Element selection (Elements.h): the element this region belongs to, and the part's
+    // mono/poly mode
+    ElementParameters element;
+    bool mono { false };
     // Balance-law pan, after sfizz's pan stage
     bool panEnabled { false };
     int32_t pan { 64 };

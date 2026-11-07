@@ -145,6 +145,17 @@ struct Synth::Impl final: public Parser::Listener {
     void noteOffDispatch(int delay, int noteNumber, float velocity) noexcept;
 
     /**
+     * @brief Oscairn's element selection (oscairn/Elements.h) for a note-on: which elements it
+     * starts; in a mono part it first cuts the other notes' element voices.
+     */
+    void oscairnSelect(int delay, int noteNumber, float velocity) noexcept;
+    /**
+     * @brief When the note a mono part's elements play ends while other keys are held, the
+     * newest of them starts again (as a legato note).
+     */
+    void oscairnMonoNoteOff(int delay, int noteNumber) noexcept;
+
+    /**
      * @brief Check all regions and start voices for cc events
      *
      * @param delay
@@ -296,6 +307,9 @@ struct Synth::Impl final: public Parser::Listener {
     Random::Streams loadedRandom_;
     std::vector<std::string> unknownOpcodes_;
     bool oscairnProfile_ { false }; // <control> oscairn_profile=1 seen in this patch
+    oscairn::ElementSelection elements_;
+    int oscairnSounding_ { -1 }; // the key a mono part's elements last started
+    bool oscairnRetrigger_ { false }; // noteOnDispatch starts a held key again
     using RegionViewVector = std::vector<Region*>;
     using LayerViewVector = std::vector<Layer*>;
     using VoiceViewVector = std::vector<Voice*>;

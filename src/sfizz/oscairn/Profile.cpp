@@ -30,6 +30,10 @@ const OpcodeSpec<int32_t> speed63 { 38, Range<int32_t>(0, 63), kEnforceBounds };
 const OpcodeSpec<int32_t> speed415 { 60, Range<int32_t>(0, 415), kEnforceBounds };
 const OpcodeSpec<int32_t> ratioSpec { 0, Range<int32_t>(-128, 127), kEnforceBounds };
 const OpcodeSpec<int32_t> note { 24, Range<int32_t>(0, 127), kEnforceBounds | kCanBeNote };
+const OpcodeSpec<int32_t> elementNumber { 0, Range<int32_t>(1, kMaxElements), kEnforceBounds };
+const OpcodeSpec<int32_t> elementMode { 0, Range<int32_t>(0, 7), kEnforceBounds };
+const OpcodeSpec<int32_t> elementGroup { 1, Range<int32_t>(1, kElementGroups), kEnforceBounds };
+const OpcodeSpec<int32_t> velocity127 { 1, Range<int32_t>(1, 127), kEnforceBounds };
 }
 
 bool parseControlOpcode(const Opcode& opcode, bool& profileEnabled)
@@ -145,6 +149,14 @@ bool parseRegionOpcode(const Opcode& opcode, RegionData& data)
     case hash("oscairn_fileg_veldepth"): data.fegDepthVelocitySensitivity = opcode.read(bipolar64); data.fegEnabled = true; return true;
     case hash("oscairn_fileg_veldepth_curve"): data.fegDepthVelocityCurve = opcode.read(fegCurves); data.fegEnabled = true; return true;
     case hash("oscairn_keyoff"): data.keyOff = opcode.read(switchSpec) == 1; return true;
+    case hash("oscairn_element"): data.element.number = opcode.read(elementNumber); return true;
+    case hash("oscairn_xa"): data.element.mode = opcode.read(elementMode); return true;
+    case hash("oscairn_element_group"): data.element.group = opcode.read(elementGroup); return true;
+    case hash("oscairn_element_lokey"): data.element.loKey = opcode.read(note); return true;
+    case hash("oscairn_element_hikey"): data.element.hiKey = opcode.read(note); return true;
+    case hash("oscairn_element_lovel"): data.element.loVel = opcode.read(velocity127); return true;
+    case hash("oscairn_element_hivel"): data.element.hiVel = opcode.read(velocity127); return true;
+    case hash("oscairn_mono"): data.mono = opcode.read(switchSpec) == 1; return true;
     case hash("oscairn_ref_level"): data.referenceLevel = opcode.read(switchSpec) == 1; return true;
     case hash("oscairn_elfo_mode"): data.lfo.mode = opcode.read(switchSpec); data.lfoEnabled = true; return true;
     case hash("oscairn_elfo_wave"): data.lfo.wave = opcode.read(lfoWaves); data.lfoEnabled = true; return true;
