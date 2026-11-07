@@ -12,11 +12,11 @@ namespace sfz {
 namespace oscairn {
 
 namespace {
-// Velocity curves 0, 1, 2 and 4 in dB at measured velocities (sensitivity +32, offset 0):
-// velocity 1 and every fourth velocity (renders fl3 vk_*); interpolated linearly in dB
-// between them. Curve 3 is (velocity / 127)^2.
-// shortcut: velocities between the knots are not checked; curve 4 rises 14 dB per 4
-// velocities between 60 and 68
+// Velocity curves 0, 1, 2 and 4 in dB at measured velocities (sensitivity +32, offset 0, where
+// the scale is the velocity's): velocity 1 and every fourth velocity (renders fl3 vk_*);
+// interpolated linearly in dB between them. Curve 3 is (scale / 2047)^2.
+// shortcut: points between the knots are not checked; curve 4 rises 14 dB per 4 velocities
+// between 60 and 68
 constexpr int kKnots = 33;
 constexpr int knotVelocities[kKnots] = { 1, 4, 8, 12, 16, 20, 24, 28, 32, 36, 40, 44, 48, 52, 56, 60, 64, 68, 72, 76, 80, 84, 88, 92, 96, 100, 104, 108, 112, 116, 120, 124, 127 };
 constexpr float curveDb[5][kKnots] = {
@@ -39,51 +39,63 @@ constexpr float curveDb[5][kKnots] = {
         -5.27f, -4.14f, -3.39f, -3.01f, -2.26f, -1.51f, -1.13f, -0.38f, 0.00f },
 };
 
-float curveVelocity(int curve, float v)
+// A note velocity, or a velocity offset, 1-127 on the 0-2047 scale the response works on:
+// 16 per step up to 64, then 1023 / 63 per step (renders lv1 and lv2; checked on sv1)
+int32_t scale2048(int32_t v)
 {
-    if (curve == 3 || curve < 0 || curve > 4)
-        return v;
-    int i = 1;
-    while (i < kKnots - 1 && v > knotVelocities[i])
-        ++i;
-    const float a = static_cast<float>(knotVelocities[i - 1]), b = static_cast<float>(knotVelocities[i]);
-    const float f = std::max(0.0f, std::min(1.0f, (v - a) / (b - a)));
-    const float db = curveDb[curve][i - 1] + f * (curveDb[curve][i] - curveDb[curve][i - 1]);
-    return 127.0f * std::pow(10.0f, db / 40.0f); // the velocity whose level is that
+    v = std::max<int32_t>(0, std::min<int32_t>(127, v));
+    return v <= 64 ? 16 * v : static_cast<int32_t>(std::lround(1024.0 + (v - 64) * 1023.0 / 63.0));
 }
 
-float spread(int sensitivity)
+// The sensitivity's factor, in 2048ths: |s| / 31.75 up to 31, then 31.75 / (63.75 - |s|),
+// and 127 at 64 (so that only the end of the range sounds)
+int64_t factor2048(int32_t s)
 {
-    const float s = static_cast<float>(std::abs(sensitivity));
-    return s <= 32.0f ? s / 32.0f : 31.5f / (63.5f - s); // fitted: 1.35 at 40, 2.03 at 48, 4.2 at 56
+    const int32_t a = std::abs(s);
+    if (a >= 64)
+        return 127 * 2048;
+    return std::lround(a < 32 ? 2048.0 * a / 31.75 : 2048.0 * 31.75 / (63.75 - a));
+}
+
+// Level in dB of a curve other than 3 at a point of the 0-2047 scale: the measured knots sit
+// at the scale of their velocities, linear in dB between them
+double curveDbAt(int curve, int32_t r)
+{
+    int i = 1;
+    while (i < kKnots - 1 && r > scale2048(knotVelocities[i]))
+        ++i;
+    const double a = scale2048(knotVelocities[i - 1]), b = scale2048(knotVelocities[i]);
+    const double f = std::max(0.0, std::min(1.0, (r - a) / (b - a)));
+    return curveDb[curve][i - 1] + f * (curveDb[curve][i] - curveDb[curve][i - 1]);
 }
 } // namespace
 
-float effectiveVelocity(const ElementVelocity& v, int velocity) noexcept
+int32_t velocityScale(const ElementVelocity& v, int velocity) noexcept
 {
-    const float offsetVelocity = std::min(127.0f, static_cast<float>(std::max(0, velocity) + std::max(0, v.offset)));
-    const float c = curveVelocity(v.curve, offsetVelocity);
-    if (v.sensitivity <= -64) // only a velocity of 1 sounds, about 85 dB down
-        return c <= 1.0f ? 1.0f : 0.0f;
-    const float k = spread(v.sensitivity);
-    float out = 127.0f;
-    if (v.sensitivity > 0)
-        out = 127.0f - (127.0f - c) * k;
-    else if (v.sensitivity < 0)
-        out = 127.0f - (c - 1.0f) * k;
-    return std::max(0.0f, std::min(127.0f, out));
+    const int32_t s = v.sensitivity >= 63 ? 64 : std::max<int32_t>(-64, v.sensitivity); // +63 counts as 64
+    const int32_t vel = scale2048(velocity);
+    const int32_t offset = v.offset > 0 ? scale2048(v.offset) : 0;
+    const int64_t k = factor2048(s);
+    // positive sensitivities scale the distance below the top, negative ones the distance
+    // above 0, which the offset lowers; the scaled distance is truncated
+    const int64_t moved = s >= 0 ? (2047 - std::min(vel + offset, 2047)) * k
+                                 : std::max(0, std::min(2047, vel - offset)) * k;
+    return 2047 - static_cast<int32_t>(std::min<int64_t>(2047, moved / 2048));
 }
 
 float velocityGain(const ElementVelocity& v, int velocity) noexcept
 {
-    // (v / 127)^2 on the same 0.375 dB grid, computed at a finer velocity resolution: the
-    // effective velocity times 16.05 against 2048 (fitted: velocity 80 lands on 22 steps,
-    // 104 on 9)
-    const double scaled = effectiveVelocity(v, velocity) * 16.05;
-    if (scaled < 1.0)
+    const int32_t r = velocityScale(v, velocity);
+    if (r <= 0)
         return 0.0f;
-    const double steps = std::max(0.0, std::round(40.0 * std::log10(2048.0 / scaled) / 0.375));
-    return static_cast<float>(std::pow(10.0, -0.375 * steps / 20.0));
+    // on the 0.375 dB grid; curve 3 is (r / 2047)^2, the others the measured curves; 255 steps
+    // and more are silent
+    const double steps = (v.curve == 3 || v.curve < 0 || v.curve > 4)
+        ? std::round(40.0 * std::log10(2047.0 / r) / 0.375)
+        : std::round(-curveDbAt(v.curve, r) / 0.375);
+    if (steps >= 255.0)
+        return 0.0f;
+    return static_cast<float>(std::pow(10.0, -0.375 * std::max(0.0, steps) / 20.0));
 }
 
 float levelScalingGain(const ElementLevelScaling& s, int key) noexcept

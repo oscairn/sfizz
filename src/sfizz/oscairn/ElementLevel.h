@@ -6,10 +6,12 @@
 
 // An element's velocity response and pan, as measured on the reference (oscairn/measurement):
 //
-// - Velocity: the velocity plus the offset (at most 127) goes through one of five curves
-//   (curve 3 leaves it as it is); the sensitivity then spreads it: positive values scale the
-//   distance below 127 by k, negative ones the distance above 1, with k = s / 32 up to 32 and
-//   31.5 / (63.5 - s) above. The gain is (result / 127)^2, the level law of the envelope.
+// - Velocity: the velocity and the offset on a 0-2047 scale (16 per step up to 64, 1023 / 63
+//   per step above); a positive sensitivity scales the distance of velocity + offset below
+//   2047 by k, a negative one the distance of velocity - offset above 0, with k = |s| / 31.75
+//   up to 31, 31.75 / (63.75 - |s|) above and 127 at 64 (+63 counts as 64), the scaled
+//   distance truncated. One of five curves then gives the level of the result r: curve 3 is
+//   (r / 2047)^2, the level law of the envelope; 0, 1, 2 and 4 are measured.
 // - Pan 1-127 (64 centre) is a balance: the far side falls as sin^2 of the distance from the
 //   edge (over 64 steps), the near side keeps its level. Levels sit on 0.375 dB steps.
 
@@ -26,9 +28,9 @@ struct ElementVelocity {
 };
 
 /**
- * @brief The effective velocity (0-127, fractional) of a note velocity 1-127.
+ * @brief Where a note velocity 1-127 lands on the 0-2047 scale after offset and sensitivity.
  */
-float effectiveVelocity(const ElementVelocity& v, int velocity) noexcept;
+int32_t velocityScale(const ElementVelocity& v, int velocity) noexcept;
 
 /**
  * @brief The amplitude gain of a note velocity 1-127.
