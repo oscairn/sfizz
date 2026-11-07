@@ -1877,6 +1877,12 @@ TEST_CASE("[Oscairn] Key On Delay: time length and tempo-synced note length")
         REQUIRE(onset("oscairn_delay_note=5", rate, 1.0) == Approx(0.125).margin(0.001));
         REQUIRE(onset("oscairn_delay_note=11", rate, 1.0) == Approx(0.5).margin(0.001));
         REQUIRE(onset("oscairn_delay_note=14", rate, 2.0) == Approx(1.0).margin(0.001));
+        // triplets (xa2: an 1/8 triplet 0.164 s, a 1/4 triplet 0.337 s, a 1/2 triplet 0.660 s, a
+        // whole triplet 1.330 s)
+        REQUIRE(onset("oscairn_delay_note=6", rate, 1.0) == Approx(1.0 / 6).margin(0.001));
+        REQUIRE(onset("oscairn_delay_note=9", rate, 1.0) == Approx(1.0 / 3).margin(0.001));
+        REQUIRE(onset("oscairn_delay_note=12", rate, 1.0) == Approx(2.0 / 3).margin(0.001));
+        REQUIRE(onset("oscairn_delay_note=15", rate, 2.0) == Approx(4.0 / 3).margin(0.001));
     }
     // the tempo sets the note length; the note length wins over a time length
     REQUIRE(onset("oscairn_delay_note=11 oscairn_delay=100", 48000.0, 2.0, 60.0f) == Approx(1.0).margin(0.001));

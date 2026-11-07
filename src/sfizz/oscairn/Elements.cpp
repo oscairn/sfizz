@@ -42,8 +42,9 @@ bool switchedOn(int32_t mode, bool switch1, bool switch2)
 double keyOnDelaySeconds(int32_t timeLength, int32_t noteLength, double beatsPerSecond) noexcept
 {
     // quarter notes per note length 5-21
-    static constexpr double quarters[17] = { 1.0 / 4, 1.0 / 6, 3.0 / 8, 1.0 / 2, 1.0 / 3, 3.0 / 4, 1.0, 2.0 / 3,
-                                             3.0 / 2, 2.0, 4.0 / 3, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0 };
+    // (a triplet note is a third of the next longer note: an 1/8 triplet a third of a quarter)
+    static constexpr double quarters[17] = { 1.0 / 4, 1.0 / 3, 3.0 / 8, 1.0 / 2, 2.0 / 3, 3.0 / 4, 1.0, 4.0 / 3,
+                                             3.0 / 2, 2.0, 8.0 / 3, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0 };
     if (noteLength >= 5 && noteLength <= 21)
         return beatsPerSecond > 0.0 ? quarters[noteLength - 5] / beatsPerSecond : 0.0;
     const int i = std::min(127, std::max(0, timeLength));
