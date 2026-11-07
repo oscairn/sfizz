@@ -196,6 +196,52 @@ TEST_CASE("[Oscairn] Element envelope: initial level, release before the end of 
     REQUIRE(out[150] > 0.0f);
 }
 
+TEST_CASE("[Oscairn] Fast segments: attack 0 at once, releases below 32 straight lines in amplitude")
+{
+    using sfz::oscairn::releaseRampSeconds;
+    for (double rate : { 44100.0, 48000.0, 96000.0, 192000.0 }) {
+        INFO("rate " << rate);
+        ElementEnvelopeParameters p;
+        p.attackTime = 0;
+        p.decay1Time = p.decay2Time = 0;
+        auto v = renderEnvelope(p, rate, 0.01, 1.0);
+        REQUIRE(v[0] == 1.0f); // attack index 0: full level from the first sample
+        // release index 16 from level 127: a straight line in amplitude to silence over the
+        // table's time (measured: renders sv1); index 32 is a straight line in dB again
+        p.releaseTime = 16;
+        const double hold = 0.05, ramp = releaseRampSeconds(16);
+        REQUIRE(ramp == Approx(0.0037).epsilon(0.05));
+        v = renderEnvelope(p, rate, hold + 0.03, hold);
+        const double tol = 2.0 / rate;
+        REQUIRE(crossing(v, rate, 0.75f, false, hold) - hold == Approx(0.25 * ramp).margin(tol));
+        REQUIRE(crossing(v, rate, 0.25f, false, hold) - hold == Approx(0.75 * ramp).margin(tol));
+        REQUIRE(crossing(v, rate, 0.0f, false, hold) - hold == Approx(ramp).margin(tol));
+        // from level 64: the same rate, so the level's amplitude times as long (renders sv2)
+        p.decay1Level = p.decay2Level = 64;
+        v = renderEnvelope(p, rate, hold + 0.03, hold);
+        REQUIRE(crossing(v, rate, 0.0f, false, hold) - hold == Approx(ramp * sfz::oscairn::levelGain(64)).margin(tol));
+        p.decay1Level = p.decay2Level = 127;
+        // release index 0: silent at once
+        p.releaseTime = 0;
+        v = renderEnvelope(p, rate, hold + 0.01, hold);
+        REQUIRE(crossing(v, rate, 0.0f, false, hold) - hold <= tol);
+        p.releaseTime = 32;
+        v = renderEnvelope(p, rate, hold + 0.1, hold);
+        const double per60 = sfz::oscairn::releaseSecondsPer60dB(32);
+        REQUIRE(crossing(v, rate, 0.1f, false, hold) - hold == Approx(per60 * 20.0 / 60.0).margin(tol));
+        // a choke's fast release stays a straight line in dB whatever the index
+        ElementEnvelope eg;
+        eg.setSampleRate(rate);
+        p.releaseTime = 16;
+        eg.start(p, 0);
+        eg.release(16);
+        eg.setReleaseSeconds(0.02);
+        std::vector<float> out(16 + static_cast<size_t>(0.01 * rate));
+        eg.process(absl::MakeSpan(out));
+        REQUIRE(out.back() == Approx(std::pow(10.0f, -30.0f / 20.0f)).epsilon(0.02));
+    }
+}
+
 TEST_CASE("[Oscairn] A region with the element envelope plays through it and ends after its release")
 {
     sfz::Synth synth;

@@ -13,7 +13,8 @@
 // is a straight line in amplitude whose time depends on the index and on both levels
 // (attackDurationFactor);
 // decays and the release are straight lines in dB that take the index's time whatever
-// distance they cover.
+// distance they cover, except a release below index 32, which is a straight line in amplitude
+// to silence at the index's rate (index 0: at once).
 
 #pragma once
 #include <absl/types/span.h>
@@ -67,9 +68,14 @@ float attackDurationFactor(int32_t from, int32_t to) noexcept;
  */
 float decaySecondsPer60dB(int32_t index) noexcept;
 /**
- * @brief Seconds the release at a release index takes to fall by 60 dB.
+ * @brief Seconds the release at a release index takes to fall by 60 dB (indices 32 and up).
  */
 float releaseSecondsPer60dB(int32_t index) noexcept;
+/**
+ * @brief Below release index 32: seconds the release's straight line in amplitude takes from
+ * level 127 to silence (from a lower level, that level's amplitude times as long); 0 above.
+ */
+float releaseRampSeconds(int32_t index) noexcept;
 
 class ElementEnvelope {
 public:
@@ -100,6 +106,7 @@ private:
     double step_ { 0.0 };   // per sample, in the segment's unit
     double target_ { 0.0 }; // in the segment's unit
     double ratio_ { 1.0 };  // decays and release: gain factor per sample
+    bool ramp_ { false };   // a release that is a straight line in amplitude
 };
 
 } // namespace oscairn

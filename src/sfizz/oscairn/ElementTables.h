@@ -17,6 +17,7 @@ namespace tables {
 extern const float attackSeconds[128];
 extern const float decaySecondsPer60dB[128];
 extern const float releaseSecondsPer60dB[128];
+extern const float releaseRampSeconds[32];
 
 } // namespace tables
 } // namespace oscairn

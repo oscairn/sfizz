@@ -68,6 +68,11 @@ float attackDurationFactor(int32_t from, int32_t to) noexcept
 }
 float decaySecondsPer60dB(int32_t index) noexcept { return tables::decaySecondsPer60dB[clampIndex(index)]; }
 float releaseSecondsPer60dB(int32_t index) noexcept { return tables::releaseSecondsPer60dB[clampIndex(index)]; }
+float releaseRampSeconds(int32_t index) noexcept
+{
+    const int32_t i = clampIndex(index);
+    return i < 32 ? tables::releaseRampSeconds[i] : 0.0f;
+}
 
 ElementTimeShifts timeShifts(const ElementEnvelopeParameters& p, int key, int velocity) noexcept
 {
@@ -120,6 +125,7 @@ void ElementEnvelope::setReleaseSeconds(double secondsPer60dB) noexcept
 void ElementEnvelope::enter(Stage stage) noexcept
 {
     stage_ = stage;
+    ramp_ = false;
     switch (stage) {
     case Stage::Attack: {
         // A straight line in amplitude from the initial to the attack level. It takes the
@@ -134,9 +140,21 @@ void ElementEnvelope::enter(Stage stage) noexcept
             step_ = 1e-12; // equal levels: the attack ends at once
         break;
     }
+    case Stage::Release:
+        if (releaseOverride_ <= 0.0 && p_.releaseTime < 32) {
+            // A straight line in amplitude from the current level to silence, falling at the
+            // index's rate: from a lower level it ends sooner (measured: renders sv1, sv2)
+            ramp_ = true;
+            target_ = 0.0;
+            const double samples = releaseRampSeconds(p_.releaseTime) * sampleRate_;
+            step_ = samples >= 1.0 ? -1.0 / samples : -gain_;
+            if (step_ == 0.0)
+                step_ = -1e-12; // already silent: the release ends at once
+            break;
+        }
+        // fall through
     case Stage::Decay1:
-    case Stage::Decay2:
-    case Stage::Release: {
+    case Stage::Decay2: {
         // Straight lines in dB from the current level to the segment's level, lasting the
         // same time whatever the distance: the time of a full-scale fall (0 dB to the floor),
         // which the tables give per 60 dB of it
@@ -192,9 +210,16 @@ float ElementEnvelope::tick() noexcept
             enter(Stage::Decay1);
         }
         return static_cast<float>(gain_);
+    case Stage::Release:
+        if (ramp_) {
+            gain_ += step_;
+            if (gain_ <= 0.0)
+                enter(Stage::Done);
+            return static_cast<float>(gain_);
+        }
+        // fall through
     case Stage::Decay1:
-    case Stage::Decay2:
-    case Stage::Release: {
+    case Stage::Decay2: {
         db_ += step_;
         if ((step_ >= 0.0 && db_ >= target_) || (step_ < 0.0 && db_ <= target_)) {
             db_ = target_;
@@ -232,8 +257,8 @@ void ElementEnvelope::process(absl::Span<float> output) noexcept
         }
         // within a segment: the samples that cannot reach its target (two to spare for
         // rounding) without the per-sample checks
-        const bool attack = stage_ == Stage::Attack;
-        const bool falls = stage_ == Stage::Decay1 || stage_ == Stage::Decay2 || stage_ == Stage::Release;
+        const bool attack = stage_ == Stage::Attack || ramp_; // straight lines in amplitude
+        const bool falls = !attack && (stage_ == Stage::Decay1 || stage_ == Stage::Decay2 || stage_ == Stage::Release);
         if ((attack || falls) && releaseDelay_ != 0 && step_ != 0.0) {
             const double left = ((attack ? gain_ : db_) - target_) / -step_ - 2.0;
             size_t m = left > 0.0 ? static_cast<size_t>(std::min(left, static_cast<double>(n - i))) : 0;
