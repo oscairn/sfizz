@@ -11,6 +11,7 @@
 #include <oscairn-clap/sound-contexts.h>
 #include <oscairn-clap/ui.h>
 #include <oscairn-clap/voice-budget.h>
+#include <dirent.h>
 #include <dlfcn.h>
 #include <atomic>
 #include <cstdlib>
@@ -19,6 +20,8 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <fstream>
+#include <sstream>
 #include <string>
 #include <thread>
 #include <vector>
@@ -245,6 +248,76 @@ const clap_plugin_t* create()
     auto* plugin = factory->create_plugin(factory, &host, desc->id);
     CHECK(plugin && plugin->init(plugin));
     return plugin;
+}
+
+// Events at frames from the start, played in blocks of `block` frames: Main's output, left and
+// right interleaved; the plugin's output events are added to `out`
+std::vector<float> play(const clap_plugin_t* plugin, const Events& all, uint32_t frames, Events* out = nullptr, uint32_t block = 256)
+{
+    std::vector<std::vector<uint8_t>> in = all.in;
+    auto time = [](const std::vector<uint8_t>& e) { return reinterpret_cast<const clap_event_header_t*>(e.data())->time; };
+    // in time order, events at one time as given (not std::stable_sort: its buffer comes from the
+    // nothrow operator new, which the allocation guard below does not replace)
+    std::vector<size_t> order(in.size());
+    for (size_t i = 0; i < order.size(); ++i)
+        order[i] = i;
+    std::sort(order.begin(), order.end(), [&](size_t a, size_t b) { return time(in[a]) != time(in[b]) ? time(in[a]) < time(in[b]) : a < b; });
+    std::vector<std::vector<uint8_t>> sorted;
+    for (size_t i : order)
+        sorted.push_back(in[i]);
+    in.swap(sorted);
+    Run run { plugin };
+    Events events;
+    std::vector<float> lr;
+    lr.reserve(2 * frames);
+    size_t next = 0;
+    for (uint32_t start = 0; start < frames; start += block) {
+        const uint32_t n = std::min(block, frames - start);
+        for (; next < in.size() && time(in[next]) < start + n; ++next) {
+            events.in.push_back(in[next]);
+            reinterpret_cast<clap_event_header_t*>(events.in.back().data())->time -= std::min(start, time(in[next]));
+        }
+        run.block(events, n);
+        for (uint32_t i = 0; i < n; ++i) {
+            lr.push_back(run.left[i]);
+            lr.push_back(run.right[i]);
+        }
+    }
+    if (out)
+        out->out.insert(out->out.end(), events.out.begin(), events.out.end());
+    return lr;
+}
+
+double rms(const std::vector<float>& lr, size_t from, size_t to)
+{
+    double e = 0;
+    for (size_t i = 2 * from; i < 2 * to && i < lr.size(); ++i)
+        e += double(lr[i]) * lr[i];
+    return std::sqrt(e / double(2 * (to - from)));
+}
+
+std::string readFile(const std::string& path)
+{
+    std::ifstream f(path);
+    std::stringstream b;
+    b << f.rdbuf();
+    return b.str();
+}
+
+// The .sfz files directly in a folder, sorted
+std::vector<std::string> sfzFiles(const std::string& dir)
+{
+    std::vector<std::string> r;
+    if (DIR* d = opendir(dir.c_str())) {
+        while (dirent* e = readdir(d)) {
+            const std::string name = e->d_name;
+            if (name.size() > 4 && name.compare(name.size() - 4, 4, ".sfz") == 0)
+                r.push_back(dir + "/" + name);
+        }
+        closedir(d);
+    }
+    std::sort(r.begin(), r.end());
+    return r;
 }
 
 const std::string sine = "<region> sample=*sine ampeg_release=0.01\n";
@@ -784,6 +857,217 @@ int main(int argc, char** argv)
         CHECK(run.status == CLAP_PROCESS_SLEEP); // released as in a fresh instance
         plugin->deactivate(plugin);
         plugin->destroy(plugin);
+    }
+    { // CLAP reset, as Oscairn sends it to an instance it takes over, before giving it a state:
+      // it takes effect at once, so a note in the next block sounds at full level; the instance
+      // then plays exactly as a fresh one with the state it gets, whatever it played before; every
+      // prepared sound with it, an idle one too; and nothing is allocated (reset is guarded)
+        auto reset = [](const clap_plugin_t* p) {
+            guarded = true;
+            p->reset(p);
+            guarded = false;
+        };
+        // What reset clears would show here: the keyswitches (sw_default, a range, the previous
+        // note), round robins, lorand and every random generator, the notes held (trigger=first),
+        // channel and poly aftertouch, a controller, the bend, the program and the tempo as
+        // switches, a release region under the pedal, a random LFO and controller, and the volume
+        // controller's smoothing
+        const std::string routed = R"(
+            <control> set_cc20=10
+            <global> ampeg_release=0.03
+            <group> sw_lokey=24 sw_hikey=25 sw_default=24
+            <region> sw_last=24 lokey=60 hikey=72 sample=*sine
+            <region> sw_last=25 lokey=60 hikey=72 sample=*saw
+            <group>
+            <region> key=48 seq_length=3 seq_position=1 sample=*sine
+            <region> key=48 seq_length=3 seq_position=2 sample=*triangle
+            <region> key=48 seq_length=3 seq_position=3 sample=*square
+            <region> key=50 hirand=0.5 sample=*noise pitch_random=50 amp_random=3 delay_random=0.002
+            <region> key=50 lorand=0.5 sample=*gnoise fil_type=lpf_2p cutoff=2000 fil_random=1000
+            <region> key=52 lochanaft=64 sample=*saw
+            <region> key=53 lopolyaft=64 sample=*square
+            <region> key=54 locc20=64 sample=*triangle
+            <region> key=55 lobend=4000 sample=*saw
+            <region> key=56 loprog=1 hiprog=127 sample=*sine
+            <region> key=45 lobpm=200 sample=*triangle
+            <region> key=46 sw_lolast=23 sw_hilast=24 sample=*saw
+            <region> key=58 sw_previous=84 sample=*triangle
+            <region> key=58 trigger=first sample=*square
+            <region> key=57 sample=*sine
+            <region> key=57 trigger=release sample=*saw
+            <region> key=59 sample=*saw oscillator_phase=-1 lfo1_wave=12 lfo1_freq=20 lfo1_pitch=100 pitch_oncc135=200
+        )";
+        // What the outgoing Performance played on channel `ch`: notes held, under the sustain and
+        // sostenuto pedals, the keyswitch, round robins, aftertouch, controllers and the bend;
+        // ids from 1000 * (ch + 1)
+        auto busy = [](Events& e, int16_t ch) {
+            const int32_t id = 1000 * (ch + 1);
+            const uint8_t cc = static_cast<uint8_t>(0xb0 | ch);
+            e.midi(0, cc, 66, 127);
+            e.note(CLAP_EVENT_NOTE_ON, 10, id, 25, 0.8, ch); // keyswitch
+            e.note(CLAP_EVENT_NOTE_OFF, 20, id, 25, 0.0, ch);
+            int k = 1;
+            for (int16_t key : { 48, 50, 48, 50, 57, 59, 60, 64, 36, 67, 72, 84 })
+                e.note(CLAP_EVENT_NOTE_ON, 100 * static_cast<uint32_t>(k), id + k, key, 0.4 + 0.04 * k, ch), ++k;
+            e.midi(1500, cc, 64, 127);
+            e.note(CLAP_EVENT_NOTE_OFF, 1600, id + 5, 57, 0.0, ch); // its release waits for the pedal
+            e.midi(1700, static_cast<uint8_t>(0xe0 | ch), 0x7f, 0x7f);
+            e.midi(1800, static_cast<uint8_t>(0xd0 | ch), 127, 0);
+            e.midi(1900, static_cast<uint8_t>(0xa0 | ch), 53, 127);
+            e.midi(1910, static_cast<uint8_t>(0xa0 | ch), 60, 90);
+            for (uint8_t n : { 1, 7, 10, 11, 20, 74 })
+                e.midi(2000 + n, cc, n, 127 - n);
+        };
+        // what the incoming one plays
+        auto incoming = [](Events& e, int16_t ch, uint32_t at) {
+            const int32_t id = 100 * (ch + 1);
+            int k = 0;
+            for (int16_t key : { 58, 46, 60, 48, 50, 52, 53, 54, 55, 56, 45, 57, 59, 50, 48, 64 })
+                e.note(CLAP_EVENT_NOTE_ON, at + 200 * static_cast<uint32_t>(k), id + k, key, 0.8, ch), ++k;
+            e.note(CLAP_EVENT_NOTE_OFF, at + 3000, id + 11, 57, 0.0, ch);
+            e.midi(at + 3100, static_cast<uint8_t>(0xb0 | ch), 64, 127);
+            e.note(CLAP_EVENT_NOTE_OFF, at + 3200, id + 3, 48, 0.0, ch);
+            e.midi(at + 3300, static_cast<uint8_t>(0xb0 | ch), 64, 0); // releases what the pedal holds
+            e.note(CLAP_EVENT_NOTE_OFF, at + 20000, -1, -1, 0.0, ch);
+        };
+        const uint32_t frames = 30000;
+
+        // At once: notes in the first block after a reset sound at full level, and no NOTE_END
+        // comes for the notes the reset ended
+        {
+            auto* a = create();
+            auto* b = create();
+            CHECK(load(a, stateFor(routed)) && load(b, stateFor(routed)));
+            CHECK(a->activate(a, 48000, 1, 256) && b->activate(b, 48000, 1, 256));
+            Events before, after, fresh;
+            busy(before, 0);
+            play(a, before, 25600);
+            reset(a);
+            incoming(after, 0, 0);
+            Events ends;
+            const auto x = play(a, after, frames, &ends);
+            incoming(fresh, 0, 0);
+            const auto y = play(b, fresh, frames);
+            CHECK(rms(y, 0, 4800) > 1e-3 && rms(x, 0, 4800) >= 0.99 * rms(y, 0, 4800));
+            int stale = 0;
+            for (int32_t id = 1000; id < 1100; ++id)
+                stale += ends.ends(id);
+            CHECK(stale == 0 && ends.ends(100) == 1);
+            a->destroy(a);
+            b->destroy(b);
+        }
+
+        // As a fresh instance: reset and the same state loaded again, or another state after this
+        // one played; reset with no load (its state unchanged); and the host's takeover (reset,
+        // deactivate, load, activate). The patch above, the stock gate's own patches and sfizz's
+        // test files.
+        std::vector<std::pair<std::string, std::string>> patches { { "routed", stateFor(routed) } }; // name, state
+        const std::string files = OSCAIRN_TEST_FILES;
+        std::vector<std::string> paths = sfzFiles(files + "/../../scripts/oscairn/patches");
+        for (const std::string& path : sfzFiles(files))
+            if (path.find("newdrums_flat") == std::string::npos) // not reproducible in stock either (compare-stock.sh)
+                paths.push_back(path);
+        for (const std::string& path : paths)
+            patches.push_back({ path, stateFor(readFile(path), "", "", path.substr(0, path.rfind('/'))) });
+        int compared = 0, failed = 0;
+        // A patch whose samples stream can render differently when sfizz's loader falls behind
+        // (section 3 of the plan), as on a loaded machine; a gap left by reset differs every time,
+        // so a render differing from a fresh one is rendered again, both of them, once.
+        for (size_t i = 0; i < patches.size(); ++i) {
+            const std::string& state = patches[i].second;
+            const std::string& other = patches[(i * 7 + 3) % patches.size()].second;
+            Events in;
+            incoming(in, 0, 0);
+            auto renderFresh = [&](std::vector<float>& out) {
+                auto* f = create();
+                const bool ok = load(f, state) && f->activate(f, 48000, 1, 256);
+                if (ok)
+                    out = play(f, in, frames);
+                f->destroy(f);
+                return ok;
+            };
+            std::vector<float> fresh;
+            if (!renderFresh(fresh))
+                continue;
+            for (int way = 0; way < 4; ++way) {
+                bool same = false;
+                for (int attempt = 0; attempt < 2 && !same; ++attempt) {
+                    if (attempt)
+                        renderFresh(fresh);
+                    auto* a = create();
+                    CHECK(load(a, way == 1 ? other : state) || load(a, state));
+                    CHECK(a->activate(a, 48000, 1, 256));
+                    Events before;
+                    busy(before, 0);
+                    play(a, before, 25600);
+                    const std::string saved = save(a);
+                    reset(a);
+                    if (way == 3)
+                        a->deactivate(a);
+                    if (way != 2)
+                        CHECK(load(a, state));
+                    if (way == 3)
+                        CHECK(a->activate(a, 48000, 1, 256));
+                    if (way == 2)
+                        CHECK(save(a) == saved);
+                    same = play(a, in, frames) == fresh;
+                    a->on_main_thread(a);
+                    a->destroy(a);
+                }
+                if (!same)
+                    std::printf("after a reset (way %d) it renders differently from a fresh instance: %s\n", way, patches[i].first.c_str());
+                failed += !same;
+            }
+            ++compared;
+        }
+        std::printf("reset: %d patches compared, %d renders differ from a fresh instance's\n", compared, failed);
+        CHECK(compared > 30 && failed == 0);
+
+        // Every sound: three prepared sounds on channels 2 to 4. The one on channel 2 is taken off
+        // it while it still sounds (cleared at once); the one on channel 4 is taken off and rings
+        // out, idle at the reset (cleared when next selected). After the reset and the selections
+        // the instance plays as one that never played.
+        {
+            const std::string random = "<region> sample=*noise hirand=0.5 ampeg_release=0.005\n<region> sample=*gnoise lorand=0.5 ampeg_release=0.005\n";
+            auto prepare = [&](const clap_plugin_t* p, uint32_t* ids) {
+                auto* ctx = static_cast<const oscairn_plugin_sound_contexts_t*>(p->get_extension(p, OSCAIRN_EXT_SOUND_CONTEXTS));
+                char message[256] {};
+                ids[0] = ctx->prepare(p, "Routed", nullptr, 0, routed.c_str(), nullptr, message, sizeof(message));
+                ids[1] = ctx->prepare(p, "Saw", nullptr, 0, "<region> sample=*saw ampeg_release=0.02 lfo1_wave=12 lfo1_freq=9 lfo1_pitch=50", nullptr, message, sizeof(message));
+                ids[2] = ctx->prepare(p, "Random", nullptr, 0, random.c_str(), nullptr, message, sizeof(message));
+                CHECK(ids[0] != CLAP_INVALID_ID && ids[1] != CLAP_INVALID_ID && ids[2] != CLAP_INVALID_ID);
+                CHECK(ctx->select(p, ids[0], 1) && ctx->select(p, ids[1], 2) && ctx->select(p, ids[2], 3));
+                return ctx;
+            };
+            auto* a = create();
+            auto* b = create();
+            CHECK(load(a, stateFor(routed)) && load(b, stateFor(routed)));
+            uint32_t ia[3], ib[3];
+            auto* ca = prepare(a, ia);
+            prepare(b, ib);
+            CHECK(a->activate(a, 48000, 1, 256) && b->activate(b, 48000, 1, 256));
+            Events before;
+            for (int16_t ch : { 0, 1, 2 })
+                busy(before, ch);
+            for (int k = 0; k < 6; ++k) // the random sound draws, then is released
+                before.note(CLAP_EVENT_NOTE_ON, 100 * static_cast<uint32_t>(k), 4000 + k, 60 + k, 0.8, 3);
+            before.note(CLAP_EVENT_NOTE_OFF, 1000, -1, -1, 0.0, 3);
+            play(a, before, 12800);
+            CHECK(ca->select(a, 0, 1) && ca->select(a, 0, 3));
+            play(a, {}, 12800);
+            oscairn_sound_context_info_t info {};
+            CHECK(ca->get(a, 1, &info) && info.active_voices && ca->get(a, 3, &info) && info.idle); // ringing, and idle
+            reset(a);
+            for (uint32_t slot = 0; slot < 4; ++slot) // nothing sounds, at once
+                CHECK(ca->get(a, slot, &info) && !info.active_voices);
+            CHECK(ca->select(a, ia[0], 1) && ca->select(a, ia[2], 3));
+            Events in;
+            for (int16_t ch : { 0, 1, 2, 3 })
+                incoming(in, ch, 0);
+            CHECK(play(a, in, frames) == play(b, in, frames));
+            a->destroy(a);
+            b->destroy(b);
+        }
     }
     { // context calls on the main thread beside process(): prepare, select, choke_retiring and
       // discard while the audio thread plays another context (ThreadSanitizer checks the sharing)
