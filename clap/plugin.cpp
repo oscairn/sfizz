@@ -33,6 +33,9 @@
 // Rendering: CLAP's render extension; offline, every block waits for the samples its notes
 // stream (sfizz's freewheeling), so a render does not depend on how far the loader has got.
 //
+// Assign Switch 1 and 2 (A.SW elements) are parameters each sound has too, addressed the same
+// way, at their event's frame.
+//
 // Files: with the host's oscairn.assets, every sample a patch uses is resolved through the
 // host, and oscairn.asset-dependencies lists them; without it, paths resolve from the
 // patch's directory.
@@ -85,6 +88,7 @@ constexpr size_t maxNotes = 256;
 constexpr uint32_t contextCount = 8;
 constexpr uint32_t busCount = contextCount + 1; // Main and a sound bus per sound
 constexpr clap_id busParam = 1;
+constexpr clap_id switchParams[2] = { 2, 3 }; // Assign Switch 1 and 2
 constexpr const char* freshPatch = "<region> sample=*sine\n"; // a fresh instance plays something
 constexpr uint32_t selectionCapacity = 32;
 constexpr int16_t chokeMark = -2; // a queued choke_retiring, in place of a channel
@@ -129,6 +133,7 @@ struct Context {
     std::atomic<uint32_t> queued { 0 };           // selections not yet applied
     std::atomic<uint32_t> sounding { 0 };         // notes or voices left, audio thread
     std::atomic<uint32_t> bus { 0 };              // the output bus new voices take
+    std::atomic<uint32_t> switches { 0 };         // Assign Switch 1 and 2 (bits 0 and 1), as last set
 };
 
 struct Selection {
@@ -435,12 +440,50 @@ void keepWithinLimits(Plugin& s, uint32_t incoming, int delay)
     }
 }
 
+// The context's Assign Switch values into its synth (a parameter keeps its value through a
+// reset and a new patch)
+void applySwitches(const Context& c, Engine& e)
+{
+    const uint32_t switches = c.switches.load(std::memory_order_relaxed);
+    for (int k = 0; k < 2; ++k)
+        e.synth.hdcc(0, sfz::oscairn::kAssignSwitchCC[k], (switches >> k & 1) ? 1.0f : 0.0f);
+}
+
 // A context as in a fresh instance (activation, reset): its synth as loaded, nothing sounding;
 // allocation-free
 void clearContext(Plugin& s, uint32_t i, Engine& e)
 {
     e.synth.restart();
+    applySwitches(s.contexts[i], e);
     s.contexts[i].sounding.store(0, std::memory_order_release);
+}
+
+// An Assign Switch event: the switch of the sound its channel selects, or of every selected
+// sound, at its frame; the element selection reads it at each note-on
+bool applySwitch(Plugin& s, const clap_event_header_t* h, int delay)
+{
+    if (h->space_id != CLAP_CORE_EVENT_SPACE_ID || h->type != CLAP_EVENT_PARAM_VALUE)
+        return false;
+    const auto* e = reinterpret_cast<const clap_event_param_value_t*>(h);
+    const int k = e->param_id == switchParams[0] ? 0 : e->param_id == switchParams[1] ? 1 : -1;
+    if (k < 0 || e->note_id >= 0 || e->key >= 0 || e->port_index > 0 || e->channel < -1 || e->channel > 15 || !std::isfinite(e->value))
+        return k >= 0;
+    const bool on = e->value >= 0.5;
+    uint32_t contexts = 0;
+    for (int ch = 0; ch < 16; ++ch)
+        if (e->channel < 0 || e->channel == ch)
+            contexts |= 1u << s.channelContext[ch];
+    for (uint32_t i = 0; i < contextCount; ++i) {
+        if (!(contexts >> i & 1))
+            continue;
+        Context& c = s.contexts[i];
+        const uint32_t bit = 1u << k;
+        c.switches.store(on ? (c.switches.load(std::memory_order_relaxed) | bit) : (c.switches.load(std::memory_order_relaxed) & ~bit),
+                         std::memory_order_relaxed);
+        if (Engine* engine = c.live.load(std::memory_order_relaxed))
+            engine->synth.hdcc(delay, sfz::oscairn::kAssignSwitchCC[k], on ? 1.0f : 0.0f);
+    }
+    return true;
 }
 
 // An Output bus event: the bus of the sound its channel selects, or of every selected sound
@@ -465,7 +508,7 @@ bool matches(const Note& note, int32_t id, int16_t channel, int16_t key)
 
 void applyEvent(Plugin& s, const clap_event_header_t* h, int delay)
 {
-    if (h->space_id != CLAP_CORE_EVENT_SPACE_ID)
+    if (h->space_id != CLAP_CORE_EVENT_SPACE_ID || applySwitch(s, h, delay))
         return;
     switch (h->type) {
     case CLAP_EVENT_NOTE_ON:
@@ -658,6 +701,7 @@ clap_process_status process(const clap_plugin_t* p, const clap_process_t* proces
             }
             s.noteCount = kept;
             s.retired.store(s.contexts[0].engine.release(), std::memory_order_release);
+            applySwitches(s.contexts[0], *next);
             setEngine(s.contexts[0], std::unique_ptr<Engine>(next));
             if (s.host->request_callback)
                 s.host->request_callback(s.host);
@@ -923,8 +967,10 @@ bool stateLoad(const clap_plugin_t* p, const clap_istream_t* stream)
     s.contexts[0].bus.store(patch.bus, std::memory_order_relaxed);
     if (s.active)
         delete s.pendingDefault.exchange(e.release()); // replaces one the audio thread never took
-    else
+    else {
+        applySwitches(s.contexts[0], *e);
         setEngine(s.contexts[0], std::move(e));
+    }
     return true;
 }
 
@@ -960,11 +1006,17 @@ uint32_t contextPrepare(const clap_plugin_t* p, const char* name, const oscairn_
             std::snprintf(message, capacity, "%s", why.c_str());
         return CLAP_INVALID_ID;
     };
-    uint32_t bus = 0;
+    uint32_t bus = 0, switches = 0;
     for (uint32_t i = 0; i < count; ++i) {
+        if (parameters && (parameters[i].id == switchParams[0] || parameters[i].id == switchParams[1])
+            && parameters[i].value >= 0 && parameters[i].value <= 1) {
+            if (parameters[i].value >= 0.5)
+                switches |= 1u << (parameters[i].id - switchParams[0]);
+            continue;
+        }
         if (!parameters || parameters[i].id != busParam || !(parameters[i].value >= 0 && parameters[i].value < busCount)
             || parameters[i].value != std::floor(parameters[i].value))
-            return fail("the only parameter is the output bus, 0 to 8");
+            return fail("the parameters are the output bus, 0 to 8, and the assign switches, 0 or 1");
         bus = static_cast<uint32_t>(parameters[i].value);
     }
     if (!patchText)
@@ -987,6 +1039,8 @@ uint32_t contextPrepare(const clap_plugin_t* p, const char* name, const oscairn_
         return fail(why);
     e->id = s.nextId;
     slot->bus.store(bus, std::memory_order_relaxed);
+    slot->switches.store(switches, std::memory_order_relaxed);
+    applySwitches(*slot, *e); // before the audio thread sees the synth
     setEngine(*slot, std::move(e));
     slot->id = s.nextId++;
     std::snprintf(slot->name, sizeof(slot->name), "%s", name ? name : "");
@@ -1148,6 +1202,7 @@ bool snapshotLoad(const clap_plugin_t* p, const clap_istream_t* stream)
         if (engines[i])
             engines[i]->id = c.id;
         c.bus.store(used[i] ? patches[i].bus : 0, std::memory_order_relaxed);
+        c.switches.store(0, std::memory_order_relaxed); // a snapshot's sounds start with them off
         setEngine(c, std::move(engines[i]));
         c.prepared = used[i];
         std::snprintf(c.name, sizeof(c.name), "%s", used[i] ? names[i].c_str() : "");
@@ -1203,6 +1258,7 @@ bool snapshotPrepare(const clap_plugin_t* p, const clap_istream_t* stream, uint3
         Context& c = s.contexts[slotFor[i]];
         engines[i]->id = s.nextId;
         c.bus.store(parsed.patches[i].bus, std::memory_order_relaxed);
+        c.switches.store(0, std::memory_order_relaxed);
         setEngine(c, std::move(engines[i]));
         c.id = s.nextId++;
         std::snprintf(c.name, sizeof(c.name), "%s", parsed.names[i].c_str());
@@ -1249,9 +1305,12 @@ uint32_t snapshotSoundValues(const clap_plugin_t* p, uint32_t id, oscairn_sound_
         if (c.prepared && c.id == id) {
             if (c.selectedChannels.load(std::memory_order_acquire))
                 return 0;
-            if (values && capacity)
-                values[0] = { busParam, double(c.bus.load(std::memory_order_relaxed)) };
-            return 1;
+            const oscairn_sound_parameter_t all[3] = { { busParam, double(c.bus.load(std::memory_order_relaxed)) },
+                                                       { switchParams[0], double(c.switches.load(std::memory_order_relaxed) & 1) },
+                                                       { switchParams[1], double(c.switches.load(std::memory_order_relaxed) >> 1 & 1) } };
+            for (uint32_t k = 0; values && k < capacity && k < 3; ++k)
+                values[k] = all[k];
+            return 3;
         }
     return 0;
 }
@@ -1342,15 +1401,23 @@ uint32_t budgetNotes(const clap_plugin_t* p, oscairn_voice_budget_note_t* out, u
 
 const oscairn_plugin_voice_budget_t voiceBudget { budgetHonorsVolume, budgetSetLimits, budgetActiveVoices, budgetNotes };
 
-// Parameters: Output bus, each sound's own. get_value shows the default context's.
+// Parameters: Output bus and Assign Switch 1 and 2, each sound's own. get_value shows the
+// default context's.
 
-uint32_t paramCount(const clap_plugin_t*) { return 1; }
+uint32_t paramCount(const clap_plugin_t*) { return 3; }
 
 bool paramInfo(const clap_plugin_t*, uint32_t index, clap_param_info_t* info)
 {
-    if (index != 0)
+    if (index > 2)
         return false;
     *info = {};
+    if (index > 0) {
+        info->id = switchParams[index - 1];
+        info->flags = CLAP_PARAM_IS_STEPPED | CLAP_PARAM_IS_AUTOMATABLE;
+        std::snprintf(info->name, sizeof(info->name), "Assign Switch %u", index);
+        info->max_value = 1;
+        return true;
+    }
     info->id = busParam;
     info->flags = CLAP_PARAM_IS_STEPPED | CLAP_PARAM_IS_ENUM;
     std::snprintf(info->name, sizeof(info->name), "%s", "Output bus");
@@ -1362,6 +1429,10 @@ bool paramInfo(const clap_plugin_t*, uint32_t index, clap_param_info_t* info)
 
 bool paramValue(const clap_plugin_t* p, clap_id id, double* value)
 {
+    if ((id == switchParams[0] || id == switchParams[1]) && value) {
+        *value = self(p).contexts[0].switches.load(std::memory_order_relaxed) >> (id - switchParams[0]) & 1;
+        return true;
+    }
     if (id != busParam || !value)
         return false;
     *value = self(p).contexts[0].bus.load(std::memory_order_relaxed);
@@ -1370,6 +1441,10 @@ bool paramValue(const clap_plugin_t* p, clap_id id, double* value)
 
 bool paramToText(const clap_plugin_t*, clap_id id, double value, char* text, uint32_t capacity)
 {
+    if ((id == switchParams[0] || id == switchParams[1]) && text && capacity && value >= 0 && value <= 1) {
+        std::snprintf(text, capacity, "%s", value >= 0.5 ? "On" : "Off");
+        return true;
+    }
     if (id != busParam || !text || !capacity || !(value >= 0 && value <= busCount - 1))
         return false;
     const int bus = static_cast<int>(std::lround(value));
@@ -1382,6 +1457,10 @@ bool paramToText(const clap_plugin_t*, clap_id id, double value, char* text, uin
 
 bool paramFromText(const clap_plugin_t*, clap_id id, const char* text, double* value)
 {
+    if ((id == switchParams[0] || id == switchParams[1]) && text && value && (!std::strcmp(text, "On") || !std::strcmp(text, "Off"))) {
+        *value = !std::strcmp(text, "On") ? 1 : 0;
+        return true;
+    }
     if (id != busParam || !text || !value)
         return false;
     if (!std::strcmp(text, "Main")) {
@@ -1399,8 +1478,10 @@ bool paramFromText(const clap_plugin_t*, clap_id id, const char* text, double* v
 // While not processing (the main thread when inactive, else the audio thread)
 void paramFlush(const clap_plugin_t* p, const clap_input_events_t* in, const clap_output_events_t*)
 {
-    for (uint32_t i = 0, n = in ? in->size(in) : 0; i < n; ++i)
+    for (uint32_t i = 0, n = in ? in->size(in) : 0; i < n; ++i) {
         applyParam(self(p), in->get(in, i));
+        applySwitch(self(p), in->get(in, i), 0);
+    }
 }
 
 const clap_plugin_params_t params { paramCount, paramInfo, paramValue, paramToText, paramFromText, paramFlush };

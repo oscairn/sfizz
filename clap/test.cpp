@@ -107,6 +107,14 @@ struct Events {
         e.param_id = 1; e.note_id = -1; e.port_index = -1; e.channel = channel; e.key = -1; e.value = value;
         add(e);
     }
+    // Assign Switch 1 or 2 of the sound `channel` selects (-1: every selected sound)
+    void assignSwitch(uint32_t time, int which, int16_t channel, double value)
+    {
+        clap_event_param_value_t e {};
+        e.header = { sizeof(e), time, CLAP_CORE_EVENT_SPACE_ID, CLAP_EVENT_PARAM_VALUE, 0 };
+        e.param_id = static_cast<clap_id>(1 + which); e.note_id = -1; e.port_index = -1; e.channel = channel; e.key = -1; e.value = value;
+        add(e);
+    }
     void midi(uint32_t time, uint8_t status, uint8_t a, uint8_t b)
     {
         clap_event_midi_t m {};
@@ -1281,11 +1289,11 @@ int main(int argc, char** argv)
         auto* plugin = create();
         auto* params = static_cast<const clap_plugin_params_t*>(plugin->get_extension(plugin, CLAP_EXT_PARAMS));
         auto* ui = static_cast<const oscairn_plugin_ui_t*>(plugin->get_extension(plugin, OSCAIRN_EXT_UI));
-        CHECK(params && params->count(plugin) == 1);
+        CHECK(params && params->count(plugin) == 3);
         clap_param_info_t info {};
         CHECK(params->get_info(plugin, 0, &info) && info.id == 1 && (info.flags & CLAP_PARAM_IS_STEPPED)
               && !(info.flags & CLAP_PARAM_IS_READONLY) && info.min_value == 0 && info.max_value == 8 && info.default_value == 0);
-        CHECK(!params->get_info(plugin, 1, &info));
+        CHECK(!params->get_info(plugin, 3, &info));
         oscairn_param_hint_t hint {};
         CHECK(ui && ui->param_hint(plugin, 1, &hint) && hint.role == OSCAIRN_ROLE_OUTPUT_BUS && !ui->param_hint(plugin, 2, &hint));
         char text[64] {};
@@ -1315,7 +1323,7 @@ int main(int argc, char** argv)
         // a sound as Oscairn shares one: the plugin's own patch, the bus as its parameter
         auto* ctx = static_cast<const oscairn_plugin_sound_contexts_t*>(plugin->get_extension(plugin, OSCAIRN_EXT_SOUND_CONTEXTS));
         char message[256] {};
-        const oscairn_sound_parameter_t bus4 { 1, 4 }, bad { 1, 9 }, other2 { 2, 0 };
+        const oscairn_sound_parameter_t bus4 { 1, 4 }, bad { 1, 9 }, other2 { 4, 0 };
         CHECK(ctx->prepare(plugin, "Bad", &bad, 1, nullptr, nullptr, message, sizeof(message)) == CLAP_INVALID_ID);
         CHECK(ctx->prepare(plugin, "Bad", &other2, 1, nullptr, nullptr, message, sizeof(message)) == CLAP_INVALID_ID);
         const uint32_t id = ctx->prepare(plugin, "Shared", &bus4, 1, nullptr, nullptr, message, sizeof(message));
@@ -1418,7 +1426,7 @@ int main(int argc, char** argv)
         const oscairn_sound_parameter_t bus3 { 1, 3 };
         const uint32_t idc = ctx->prepare(plugin, "C", &bus3, 1, a.c_str(), nullptr, message, sizeof(message));
         oscairn_sound_parameter_t values[4] {};
-        CHECK(own->sound_values(plugin, idc, values, 4) == 1 && values[0].id == 1 && values[0].value == 3);
+        CHECK(own->sound_values(plugin, idc, values, 4) == 3 && values[0].id == 1 && values[0].value == 3);
         CHECK(own->sound_values(plugin, idb, values, 4) == 0); // selected on channel 1
         CHECK(own->sound_values(plugin, 999, values, 4) == 0);
         Buffer alone;
@@ -1592,6 +1600,90 @@ int main(int argc, char** argv)
         blocks(4);
         CHECK(events.ends(7) == 1 && events.ends(5) == 0 && events.ends(6) == 0 && events.ends(8) == 0);
         CHECK(run.peak(1) > 0.1f && run.peak(2) > 0.1f && run.peak(0) == 0.0f);
+        plugin->deactivate(plugin);
+        plugin->destroy(plugin);
+    }
+    { // the assignable switches (A.SW elements) as parameters, each sound's own
+        const std::string patch = "<control> oscairn_profile=1 <region> sample=*sine amp_veltrack=0 oscairn_element=1 oscairn_xa=6\n";
+        auto* plugin = create();
+        auto* params = static_cast<const clap_plugin_params_t*>(plugin->get_extension(plugin, CLAP_EXT_PARAMS));
+        clap_param_info_t info {};
+        for (uint32_t k = 1; k <= 2; ++k)
+            CHECK(params->get_info(plugin, k, &info) && info.id == 1 + k && (info.flags & CLAP_PARAM_IS_STEPPED)
+                  && info.min_value == 0 && info.max_value == 1 && info.default_value == 0
+                  && std::string(info.name) == "Assign Switch " + std::to_string(k));
+        char text[64] {};
+        double value = -1;
+        CHECK(params->value_to_text(plugin, 2, 1, text, sizeof(text)) && !std::strcmp(text, "On"));
+        CHECK(params->value_to_text(plugin, 3, 0, text, sizeof(text)) && !std::strcmp(text, "Off"));
+        CHECK(params->text_to_value(plugin, 3, "On", &value) && value == 1);
+        CHECK(load(plugin, stateFor(patch)));
+        CHECK(plugin->activate(plugin, 48000, 1, 256));
+        Run run { plugin };
+        Events events;
+        events.note(CLAP_EVENT_NOTE_ON, 0, 1, 69, 1.0);
+        run.block(events, 256);
+        CHECK(run.peak == 0.0f); // switch 1 off: the element does not play
+        events.note(CLAP_EVENT_NOTE_OFF, 0, 1, 69, 0.0);
+        events.assignSwitch(100, 1, -1, 1.0);
+        events.note(CLAP_EVENT_NOTE_ON, 100, 2, 69, 1.0); // at the switch's frame
+        run.block(events, 256);
+        CHECK(run.peak > 0.1f && run.left[99] == 0.0f);
+        CHECK(params->get_value(plugin, 2, &value) && value == 1 && params->get_value(plugin, 3, &value) && value == 0);
+        events.note(CLAP_EVENT_NOTE_OFF, 0, 2, 69, 0.0);
+        events.assignSwitch(0, 1, -1, 0.0);
+        run.block(events, 256);
+        events.note(CLAP_EVENT_NOTE_ON, 0, 3, 69, 1.0);
+        run.block(events, 256);
+        run.block(events, 256);
+        CHECK(run.peak < 1e-3f); // note 2's release tail only
+        // a reset keeps the parameter's value (CLAP), as does a new patch
+        events.note(CLAP_EVENT_NOTE_OFF, 0, 3, 69, 0.0);
+        events.assignSwitch(0, 1, -1, 1.0);
+        run.block(events, 256);
+        plugin->reset(plugin);
+        CHECK(params->get_value(plugin, 2, &value) && value == 1);
+        events.note(CLAP_EVENT_NOTE_ON, 0, 4, 69, 1.0);
+        run.block(events, 256);
+        CHECK(run.peak > 0.1f);
+        events.note(CLAP_EVENT_NOTE_OFF, 0, 4, 69, 0.0);
+        run.block(events, 256);
+        CHECK(load(plugin, stateFor(patch + " ")));
+        run.block(events, 256); // the new patch takes over
+        events.note(CLAP_EVENT_NOTE_ON, 0, 5, 69, 1.0);
+        run.block(events, 256);
+        CHECK(run.peak > 0.1f);
+        events.note(CLAP_EVENT_NOTE_OFF, 0, 5, 69, 0.0);
+        events.assignSwitch(0, 1, -1, 0.0);
+        run.block(events, 256);
+        // a shared sound: prepared with its switch on, addressed by its channel, reported as a value
+        auto* ctx = static_cast<const oscairn_plugin_sound_contexts_t*>(plugin->get_extension(plugin, OSCAIRN_EXT_SOUND_CONTEXTS));
+        auto* own = static_cast<const oscairn_plugin_sound_snapshots_t*>(plugin->get_extension(plugin, OSCAIRN_EXT_SOUND_SNAPSHOTS));
+        char message[256] {};
+        const oscairn_sound_parameter_t on[2] = { { 1, 2 }, { 2, 1 } }, bad { 2, 2 };
+        CHECK(ctx->prepare(plugin, "Bad", &bad, 1, patch.c_str(), nullptr, message, sizeof(message)) == CLAP_INVALID_ID);
+        const uint32_t id = ctx->prepare(plugin, "Switched", on, 2, patch.c_str(), nullptr, message, sizeof(message));
+        oscairn_sound_parameter_t values[3] {};
+        CHECK(own->sound_values(plugin, id, values, 3) == 3 && values[0].value == 2 && values[1].id == 2 && values[1].value == 1
+              && values[2].id == 3 && values[2].value == 0);
+        CHECK(ctx->select(plugin, id, 3));
+        BusRun shared { plugin };
+        events.note(CLAP_EVENT_NOTE_ON, 0, 5, 69, 1.0, 3);
+        shared.block(events, 256);
+        CHECK(shared.peak(2) > 0.1f);
+        events.note(CLAP_EVENT_NOTE_OFF, 0, 5, 69, 0.0, 3);
+        events.assignSwitch(0, 1, 0, 0.0); // channel 0's sound only
+        shared.block(events, 256);
+        events.note(CLAP_EVENT_NOTE_ON, 0, 6, 69, 1.0, 3);
+        shared.block(events, 256);
+        CHECK(shared.peak(2, 512) > 0.1f);
+        events.note(CLAP_EVENT_NOTE_OFF, 0, 6, 69, 0.0, 3);
+        events.assignSwitch(0, 1, 3, 0.0);
+        shared.block(events, 256);
+        shared.block(events, 256);
+        events.note(CLAP_EVENT_NOTE_ON, 0, 7, 69, 1.0, 3);
+        shared.block(events, 256);
+        CHECK(shared.peak(2, 1280) < 1e-3f); // note 6's release tail only
         plugin->deactivate(plugin);
         plugin->destroy(plugin);
     }
