@@ -445,6 +445,13 @@ the wrapper implements the extension directly.
   The notes reset ended get no `NOTE_END` (as Oscairn Analog). Reset keeps the parameters (each
   sound's Output bus), the prepared sounds and channel selections and the voice budget's limits;
   sfizz gets no host tempo or transport from the plugin, so it keeps its own default.
+- **Offline rendering** (0.5.1). CLAP's `clap.render`: in `CLAP_RENDER_OFFLINE` every sound's
+  synth freewheels (sfizz's `enableFreeWheeling`, set on the audio thread at each render from an
+  atomic the main thread writes), so each block waits for the samples its notes stream and uses
+  sfizz's freewheeling sample and oscillator qualities; offline processing may allocate. In real
+  time (the default) a streamed sample plays what the loader has read so far, so two fresh
+  instances can render differently on a loaded machine (section 3). The mode is the host's, not
+  the state's: reset keeps it, as it keeps the parameters.
 
 ### Native sound contexts (RFC 0005, `oscairn.sound-contexts/draft-5`)
 
@@ -1561,6 +1568,37 @@ when this entry was written. CI: `24bf3d33` (run 42359648614) passed all five jo
 **Concurrency.** The element-model work (box 3) shared the repository; this session's engine
 changes stayed in `oscairn/ElementLevel.*`, `ElementEnvelope.*` and `ElementTables.*`, with no change
 to `Voice.cpp`.
+
+### Flaky reset test session (2026-11-07): offline rendering, plugin 0.5.1
+
+The CLAP reset test failed now and then under load (1 to 19 native patches, see the verify
+session) and twice on CI's macOS job on `d88a8f9a` (`off_mode.sfz`, `default_path_reset.sfz`).
+Commits: `863d3836` (offline rendering, the reset test rendered offline), then the version and
+this entry.
+
+**Cause: the test, not the reset.** The test rendered in real time, where a streamed sample plays
+what sfizz's loader has read so far (section 3). With the loader delayed locally by a random 0 to
+2 ms per file (a sleep before `streamFromFile`, not committed), `d88a8f9a` failed 10 of 10 runs,
+and 20 of 20 with 48 busy processes beside it, with 9 or 10 renders differing in the runs
+looked at, despite the retry; two fresh instances, with no reset at all, rendered differently on 6 patches in one such
+run (7 at up to 20 ms). With every instance rendering offline the reset and fresh renders agree
+under the same delays, so nothing that survives reset depends on the loader's timing. What does
+survive is the file pool's streamed data when the same state is loaded again: a reset instance
+may already hold a file a fresh one still has to stream, so in real time it can play more of the
+sample, never something else.
+
+**Changed.** `clap.render` (section 5): offline, each sound's synth freewheels. The reset test sets
+every instance it compares offline and no longer renders a differing comparison again; its
+processing is outside the allocation guard while offline (freewheeling queues the block's loads
+on the audio thread), its resets still inside. A new test plays a note in one 32768-frame block
+offline and checks it plays past the 8192-frame preload; with the plugin's freewheeling taken out
+it failed 5 of 5 runs.
+
+**Stress** (the delayed loader, on `863d3836`'s code): 50 of 50 runs passed at up
+to 2 ms with 48 busy processes, 50 of 50 at up to 20 ms; without the delay, 48 busy processes did
+not make `d88a8f9a` fail in 20 runs on this machine.
+
+**Gates and CI** on both commits are in the session report.
 
 ### Upstream merge test (2026-11-01)
 
