@@ -62,6 +62,7 @@ set(SFIZZ_TEST_SOURCES
     DataHelpers.h
     DataHelpers.cpp
     OscairnT.cpp
+    OscairnReferenceT.cpp
 )
 
 add_executable(sfizz_tests ${SFIZZ_TEST_SOURCES})
