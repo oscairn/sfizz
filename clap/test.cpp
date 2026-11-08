@@ -1297,6 +1297,10 @@ int main(int argc, char** argv)
         CHECK(!params->get_info(plugin, 3, &info));
         oscairn_param_hint_t hint {};
         CHECK(ui && ui->param_hint(plugin, 1, &hint) && hint.role == OSCAIRN_ROLE_OUTPUT_BUS && !ui->param_hint(plugin, 2, &hint));
+        // oscairn.ui draft 4, not draft 3 (its smaller hint); no parameter is in a rich view yet
+        CHECK(plugin->get_extension(plugin, "oscairn.ui/draft-4") && !plugin->get_extension(plugin, "oscairn.ui/draft-3"));
+        CHECK(ui && !ui->algorithm && ui->param_hint(plugin, 1, &hint) && hint.view == 0 && hint.field == OSCAIRN_FIELD_NONE && hint.index == 0);
+        CHECK(ui && !ui->param_hint(plugin, 3, &hint));
         char text[64] {};
         double value = -1;
         CHECK(params->value_to_text(plugin, 1, 0, text, sizeof(text)) && !std::strcmp(text, "Main"));

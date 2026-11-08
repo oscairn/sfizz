@@ -1,6 +1,6 @@
 {
   "repository": "https://github.com/oscairn/oscairn",
   "path": "core/clap-ext",
-  "commit": "0a5c14f569d23987941daa82a2c67b95a6351498",
+  "commit": "28856988bcdddbd3cafae4a7850087858925de58",
   "note": "The Oscairn plugin SDK's extension headers and helper (MIT): sound-contexts.h, assets.h, voice-budget.h, voice-budget-plugin.hpp and ui.h only, unchanged."
 }
