@@ -2299,6 +2299,29 @@ TEST_CASE("[Synth] Each synth draws its own random numbers")
     REQUIRE(render() == first);
 }
 
+TEST_CASE("[Synth] Synths sum a target's modulations in the same order")
+{
+    // (1200 - 1200) + 0.0001 and (1200 + 0.0001) - 1200 differ in float. Synths alive together
+    // hold their connection tables at different addresses, which ordered a hash map's entries.
+    const std::string patch = R"(
+        <control> set_cc20=127 set_cc21=127 set_cc22=127
+        <region> sample=*sine pitch_oncc20=1200 pitch_oncc21=-1200 pitch_oncc22=0.0001
+    )";
+    sfz::Synth synths[64];
+    for (sfz::Synth& synth : synths)
+        synth.loadSfzString(fs::current_path() / "tests/TestFiles/modorder.sfz", patch);
+    std::vector<std::vector<float>> outputs;
+    for (sfz::Synth& synth : synths) {
+        synth.noteOn(0, 60, 100);
+        sfz::AudioBuffer<float> buffer { 2, 256 };
+        synth.renderBlock(buffer);
+        outputs.emplace_back(buffer.getConstSpan(0).begin(), buffer.getConstSpan(0).end());
+    }
+    REQUIRE(std::any_of(outputs[0].begin(), outputs[0].end(), [](float x) { return x != 0.0f; }));
+    for (const auto& out : outputs)
+        REQUIRE(out == outputs[0]);
+}
+
 TEST_CASE("[Synth] After restart a synth plays as it did after loading")
 {
     // What restart puts back would show here: the keyswitches (sw_default, a range, the previous

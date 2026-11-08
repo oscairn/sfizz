@@ -15,6 +15,7 @@
 #include <absl/container/flat_hash_map.h>
 #include <absl/strings/str_cat.h>
 #include <absl/strings/string_view.h>
+#include <map>
 #include <vector>
 #include <algorithm>
 
@@ -47,7 +48,8 @@ struct ModMatrix::Impl {
     struct Target {
         ModKey key;
         uint32_t region {};
-        absl::flat_hash_map<uint32_t, ConnectionData> connectedSources;
+        // ordered: the sources are summed in this order, and a hash map's order depends on its address
+        std::map<uint32_t, ConnectionData> connectedSources;
         bool bufferReady {};
         Buffer<float> buffer;
     };
