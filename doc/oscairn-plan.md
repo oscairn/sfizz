@@ -638,7 +638,10 @@ passes its cross-rate check at 44.1, 48 and 96 kHz (section 6).
 
 Milestone 3 status (2026-11-07, plugin 0.6.0): built, and its gate passes on hold-out probes
 recorded after the implementation was frozen (section 11, element model session), with the
-random sequences compared by distribution (K51). Open within it: K52-K57.
+random sequences compared by distribution (K51). Open within it: K52-K57. Tempo-synced Key On
+Delay is now measured at 60, 90, 140, 200 and 300 BPM as well as 120 (K53 session): the engine
+follows the host's tempo exactly and lies within 12.3 ms of the reference, whose own recordings of
+one probe differ by up to 7.3 ms; past the 7 ms seen at 120 BPM, so for Jacob to accept (K53).
 
 ---
 
@@ -1825,6 +1828,31 @@ brief's "values reach the view" and "no allocation" tests have no view to test.
 
 **Gates, CI and Oscairn host checks** on both commits are in the session report.
 
+### K53 session (2026-11-07): tempo-synced Key On Delay at other tempos
+
+The element model session measured note lengths at 120 BPM only, as the recorder gave no host
+tempo. The reference takes its tempo from the host's playhead and ignores the Performance's
+(`k53a`): with a host tempo given (the recorder's musical context and transport blocks; a copy of
+the recorder with them, `esp_seq_tempo.swift`), an 1/8 takes 0.50 s at 60 BPM and 0.126 s at 240
+whatever tempo the Performance stores. Without one it plays at 120.
+
+**Probes** (renders stay on the measuring machine): `k53b`, two elements a sine an octave apart,
+the second delayed by a note length, at host tempos 60, 90, 140, 200 and 300 with the Performance
+at the same tempo, every note length 5-21 (straight, dotted and triplet) whose delay is at most
+4 s: 79 probes. `k53c` records the twelve farthest from the engine three more times. Each `.pfm`
+converted by the converter (`oscairn_delay_note`; the converter writes the Performance's tempo as
+Oscairn's transport tempo) and rendered through the built CLAP module at the probe's tempo as the
+transport's, the path Oscairn uses; onsets as in the element model session (`xa.py`'s
+`onset_delay`).
+
+**Result.** The engine gives the exact note length at every tempo (within 0.45 ms; 48, 96 and 192
+kHz within 0.04 ms of 44.1 kHz). The reference lies within 12.3 ms of it (65 of 79 within 7 ms);
+per tempo its delays scale with the note length within 0.35 %, with no tempo or length rule in what
+remains: one probe's four recordings span up to 7.3 ms, and the four-recording means of the twelve
+farthest differ from the engine by up to 10.6 ms. No change to the engine or converter: no rule
+found would bring them closer. K53 has the figures; whether 12.3 ms is close enough (the 120 BPM
+probes were within 7 ms, the time-length hold-outs of K52 within 9.8 ms) is for Jacob.
+
 ### Upstream merge test (2026-11-01)
 
 `upstream/develop` has no commits after `f5c6e29f`: merging it into `oscairn` is a no-op
@@ -1894,7 +1922,7 @@ repository, or the local scripts beside the renders).
 | K50 | Decays below index 56 to levels above 0 | Decays to level 32 at indices 4, 20, 40 reach -20 dB 14 % later, 4.5 % sooner and 9 % sooner than the time rule (a segment takes the full-scale time whatever the distance) | Probably the reference picks the nearest of its rates for each distance; not modelled | Open | `sv2` (`dl_*`) | `ElementEnvelope.cpp` `enter` |
 | K51 | XA Random sequences | Distribution matches (hold-outs, 120 notes of two elements: reference 61/59, engine 62/58; 400 notes of two: 219/200 against 211/187; with a velocity-limited third element at velocity 120: 59/42/49 against 49/48/53), but the sequences differ: the reference draws from a generator the whole instrument shares (every voice it starts draws too) and that runs on across Performance loads (`xa1` rand3 and rand3b, the same probe loaded twice, gave different sequences); the engine draws one 8-bit value per group with random elements per note from a generator per sound, restarted at a load and a reset. As on the reference, one draw in 256 picks none of the group's elements unless the sound's first element is one of them, then that one (so a single random element always plays: `xa1` rand1, 599 of 599 notes) | Deterministic per sound by design | Deliberate (decision 31) | `xa1` (`rand*`), `xa2` (`h_rand2`, `h_randvel`, `h_cycmix`); `scratchpad engine_xa.py`, `compare_xa.py` | `oscairn/Elements.cpp` `select` |
 | K52 | Key On Delay time lengths between the measured knots | Knots at 0-8, every 4 to 32, every 8 to 112, then 116, 120, 124, 127; linear between. Hold-outs at 10, 36, 60, 100, 108: within 0.2, 0.4, 9.8, 1.2 and 5.9 ms (largest 0.37 % at 60) | Interpolation | Accepted unless Jacob sets a tighter tolerance | `xa1`, `xa1b` (`kod_*`), `xa2` (`h_kod_*`); `measurement/awm2/xa.py --onsets` | `oscairn/Elements.cpp` `keyOnDelaySeconds` |
-| K53 | Tempo-synced Key On Delay | Measured at 120 BPM only: the recorder passes no host tempo and the Performance's tempo (90) did not change the delays; within 7 ms of the note length (an 1/8 read 0.257 s, a dotted 1/16 0.181 s); the engine takes the CLAP transport's tempo | The recorder | Other tempos unverified | `xa1` (`kods_*`), `xa2` (`h_kods_*`), `xa3` (`t_kods_*`) | `clap/plugin.cpp` `process` |
+| K53 | Tempo-synced Key On Delay | Measured at 60, 90, 140, 200 and 300 BPM (79 probes, every note length up to 4 s at each tempo) besides 120: the engine gives the note length at the host's tempo exactly (within 0.45 ms, and within 0.04 ms of itself at 48, 96 and 192 kHz); the reference lies within 12.3 ms of it (largest: 4 quarters at 90 BPM, 0.46 %), 65 of 79 within 7 ms; under 0.4 s within 8.6 ms, which is up to 8.9 % of a 1/16 at 300 BPM. Per tempo the reference's delays scale with the note length within 0.35 % (slopes 0.9966-1.0005), offset -2.4 ms on average; the same probe recorded four times spans up to 7.3 ms, and the four-recording means of the farthest twelve still differ by up to 10.6 ms (8 quarters at 200 BPM; the lengths from a 1/2 up at 200 BPM all early) | The reference's timing scatter; the remaining offsets fit no tempo or length rule | Within the reference's repeatability (7.3 ms) plus 5 ms; for Jacob to accept (past the 7 ms seen at 120 BPM). The reference follows the host's tempo, not the Performance's (`k53a`: a Performance at 60 BPM plays an 1/8 in 0.25 s at a host tempo of 120, one at 120 in 0.50 s at 60); Oscairn's transport takes the Performance's tempo from the converter | `xa1` (`kods_*`), `xa2` (`h_kods_*`), `xa3` (`t_kods_*`) at 120 BPM; `k53a` (`f_*`), `k53b` (`k_<tempo>_<length>`), `k53c` (repeats); scripts in `k53b/scripts`: the recorder with a host tempo (`esp_seq_tempo.swift`), `engine_k53.py` (through the CLAP module at the transport's tempo), `onsets.py` | `clap/plugin.cpp` `process`; `oscairn/Elements.cpp` `keyOnDelaySeconds` |
 | K54 | A mono part's cut voices | The reference's earlier note falls more than 10 dB within about 6 ms of the new note (`xa1b` mono_fade; the 2 ms analysis cannot resolve it further); the engine fades it over sfizz's off time (6 ms). Key-off elements are not cut in the engine (not measured on the reference); sustain pedal and key assign with mono not measured | Not measured further | Unverified | `xa1b` (`mono_fade`) | `Synth.cpp` `oscairnSelect` |
 | K55 | Element limits and velocity cross fade | The element's velocity limits decide its selection; on the reference a velocity cross fade widens them for the selection too (not measured), and the engine has no velocity cross fade (dropped by the converter) | Velocity cross fade not built | Open | none | `oscairn/Elements.cpp` |
 | K56 | Elements the converter leaves out | An element with level 0, or whose wave the converter cannot find, has no regions, so it takes no part in the selection; on the reference it still takes a Cycle step, counts as a plain element for Legato and can be a Random pick | Converter | Open, for the converter | none | converter `awm2.py` |
