@@ -404,7 +404,7 @@ sfizz has no CLAP build in either repository. The fork adds one in `clap/`
 upstream builds are unchanged; the bundle was `oscairn-sfizz.clap`, target `sfizz_clap`, before
 0.5.0). It vendors the CLAP headers (MIT) and Oscairn's plugin SDK headers
 (MIT: `sound-contexts.h`, `assets.h`, from 0.3.0 `voice-budget.h` and the helper
-`voice-budget-plugin.hpp`, and from 0.4.0 `ui.h`) with their commits. The SDK's
+`voice-budget-plugin.hpp`, and from 0.4.0 `ui.h`, draft 4 from 0.6.2) with their commits. The SDK's
 `sound-contexts-plugin.hpp` owns voices itself, which does not fit sfizz's voice manager, so
 the wrapper implements the extension directly.
 
@@ -849,6 +849,14 @@ Taken in the element model session (2026-11-07), for Jacob to confirm:
     them off, as its controls are at rest), and a snapshot's sounds start with them off.
 34. **Key On Delay time lengths** take 28 measured knots, linear between them (K52); note lengths
     use the host's tempo from the CLAP transport.
+35. **No rich views yet** (`oscairn.ui` draft 4, 0.6.2): Oscairn's porting guide gives the AWM2
+    element views "once its elements are parameters", and the plugin's only parameters are Output
+    bus and the Assign Switches, so it declares none. The element parameters the views need are
+    not built; the proposal is in the rich views session's entry (section 11), for Jacob to
+    accept or change before any of it is built.
+36. **`oscairn.assets` draft 2** (from the headers vendored at Oscairn `2885698`): the plugin asks
+    the host for draft 2 and uses only `resolve`; a host answering only draft 1 (Oscairn before
+    `8a8fcc6`) no longer gives it assets.
 
 Risks and open questions:
 
@@ -1765,6 +1773,57 @@ render twice) stayed bit-identical on `11f9f435`: 159 renders, 0 unstable in sto
 **After** (ARM64 container, `11f9f435`'s tree): the full `sfizz_tests` passed 104 of 104 runs.
 
 **Gates and CI** on both commits are in the session report.
+
+### Rich views session (2026-11-07): `oscairn.ui` draft 4, plugin 0.6.2
+
+Oscairn's `oscairn.ui` draft 4 (Oscairn `ed073e7` to `4961c35`) lets a plugin say which of its
+parameters make an envelope, a key or velocity map or an FM operator view, which Desktop and Panel
+draw above the parameters' tiles and edit by setting them. Commits: `1ab97c67` (the vendored
+headers at Oscairn `2885698`, the same as at `4961c35` and `c48d698`), then the version and this
+entry.
+
+**What is declared.** Oscairn's porting guide ("Rich views: what each engine should declare")
+gives this plugin one view of every element, index n, "once its elements are parameters", and
+notes it "has only Output bus and the Assign Switches today". So nothing is in a view: the plugin
+offers draft 4 with the hint it had (Output bus, `OSCAIRN_ROLE_OUTPUT_BUS`, a list; view, field
+and index 0), no hint for the Assign Switches and no `algorithm` call. It no longer answers draft
+3, whose smaller hint the draft 4 struct would overrun (decision 35). `assets.h` came along at
+draft 2 (decision 36).
+
+**Proposal: the element parameters the views need** (not built; for Jacob). The smallest set that
+backs the guide's view:
+
+- Per element 1 to 8 (the views' indexes stop at 8), on page `Element n`, IDs `1000 n + k` in
+  reading order: Note Limit Low and High (0 to 127, note-named), Velocity Limit Low and High (1 to
+  127), Level Velocity Sensitivity (-64 to +63), AEG Initial Level, Attack Time and Level, Decay
+  1 Time and Level, Decay 2 Time and Level, Release Time (0 to 127): 13 each, 104 in all, in the
+  reference's raw units, as the opcodes take them (decision 3). Element Level (0 to 127,
+  `OSCAIRN_ROLE_LEVEL_1 + n - 1`) would make 14.
+- Fields as the guide gives them, but without its AEG Hold Time: the reference's amplitude
+  envelope has no hold (the Data List's element amplitude block has initial, attack, decay 1,
+  decay 2 and release; only the pitch and filter EGs hold), nor has the engine's. So Initial Level
+  `LEVEL_0`, Attack `TIME_1`/`LEVEL_1`, Decay 1 `TIME_2`/`LEVEL_2`, Decay 2 `TIME_3`/`LEVEL_3`
+  (held while the key is down), Release `TIME_4`: the guide's table needs that correction in
+  Oscairn.
+- Each value is each sound's own, as the Assign Switches are. It starts at the loaded patch's
+  value for element n (its `oscairn_element_*`, `oscairn_amp_velsens` and `oscairn_ampeg_*`
+  opcodes) and an event writes it into every region of element n in that sound's synth on the
+  audio thread (plain stores, no allocation), for notes started after it. A native patch has no
+  element regions, so the parameters change nothing in it and the stock gate is unaffected.
+- Open choices: whether an edit reaches voices already sounding (not measured on the reference);
+  how edits are kept (a state version 5 field per edited value, or the SFZ text rewritten on the
+  main thread at save); elements 9 to 128 (a Normal Part has up to 128; parameters without
+  views, or none); parameters of an element the patch lacks (kept, doing nothing, since CLAP's
+  list is fixed while active); and the filter EG as a second view per element, which the guide
+  also describes.
+
+**Tests** (`oscairn_sampler_clap_tests`, the Output bus block): the extension is found as draft 4
+and not as draft 3; no `algorithm`; Output bus's hint is in no view; the Assign Switches have no
+hint. Seen failing: with the old headers (the test does not compile: no `algorithm`, `view` or
+`field`), and with the new headers but the plugin answering the draft 3 ID (4 failures). The
+brief's "values reach the view" and "no allocation" tests have no view to test.
+
+**Gates, CI and Oscairn host checks** on both commits are in the session report.
 
 ### Upstream merge test (2026-11-01)
 
