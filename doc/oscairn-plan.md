@@ -174,6 +174,11 @@ gate renders; two synths in one process now draw the same numbers instead of sha
 sequences (section 3). `Random::randomGenerator` stays for anything outside a synth (one test
 seeds its own copy).
 
+From the ARM64 session (2026-11-07, `11f9f435`) the modulation matrix sums a target's sources in
+source-index order (`std::map`). Stock keeps them in an `absl::flat_hash_map`, whose iteration
+order depends on the table's address (Abseil's per-table salt), so two synths, or two processes,
+could sum the same sources in different orders and differ in the last bit (section 11).
+
 ---
 
 ## 3. The rule: native SFZ stays stock
@@ -863,6 +868,10 @@ Risks and open questions:
   audio thread, and other plugins on that thread had their denormals flushed (an Oscairn
   arpeggiator hung on it). Fixed in `8900c80c` as a separate, upstreamable commit; its test fails
   on AArch64 without the fix.
+- Stock sfizz: the modulation matrix summed a target's sources in the order of a hash map salted
+  with its address, so identical synths could differ in the last bit (with fused multiply-add on
+  AArch64 even two sources). Fixed in `11f9f435` as a separate, upstreamable commit; its test
+  failed 20 of 20 runs without the fix on macOS arm64 and Linux ARM64.
 - `-ffast-math` makes the gate compiler-dependent: bit identity is only claimed between the
   two builds made with one compiler on one machine.
 
@@ -1716,7 +1725,46 @@ ARM64 failed "Each synth draws its own random numbers" (`SynthT.cpp`) twice, the
 a rerun. That test is flaky on Linux ARM64 without these commits: in an `ubuntu:24.04` ARM64
 container it failed 10 of 20 runs on `dc7fa3ec`'s code and 8 of 20 on `78227d86`'s. Two synths
 rendering its patch differ from sample 669 on about one run in four, only with all three of its
-regions together (each region alone always matched). Open (the test's commit is `9c7f3792`).
+regions together (each region alone always matched). Resolved in the ARM64 session (`11f9f435`):
+the modulation matrix summed a target's sources in a hash map's address-dependent order.
+
+### ARM64 session (2026-11-07): modulation order, plugin 0.6.1
+
+The element model session's open item: "Each synth draws its own random numbers" failed on Linux
+ARM64 now and then. Commits: `11f9f435` (the fix and its test), then the version and this entry.
+
+**Reproduced** in an `ubuntu:24.04` ARM64 container (GCC 13.3, Release as CI builds it): the full
+`sfizz_tests` failed 5 of 20 runs on `eaa92a3e`; the test alone passed 20 of 20, so it needs the
+heap the earlier tests leave behind.
+
+**Cause: the order a target's modulation sources are summed in, not the random numbers.** With
+every `fast_rand` draw logged, both synths drew the same 43197 numbers in a failing run; the
+outputs differed in 10 samples, by one unit in the last place. Hashing each stage of each voice's
+block showed the saw region's pitch modulation differing first, and logging the matrix's
+connections showed that target's two sources (the LFO and controller 135) summed in opposite
+orders in the two synths, as was a second target's. `ModMatrix` kept a target's sources in an
+`absl::flat_hash_map`, and Abseil salts each table's hash with its address (`PerTableSalt`, the
+address shifted right 12 bits), so the order follows where the table landed. With fused
+multiply-add (GCC contracts on AArch64) even two terms do not commute; x86_64 builds without FMA,
+which is probably why two sources gave the same bits there (not checked). The heap layout, and so
+the failure, depends on what ran before in the process.
+
+**Changed.** `connectedSources` is a `std::map`: sources are summed by source index. Built at
+load, iterated in the audio thread, no allocation there. New test "Synths sum a target's
+modulations in the same order": 64 synths alive together render a patch with three controller
+depths on the pitch (1200, -1200, 0.0001), which sum differently by order even without FMA;
+without the fix it failed 20 of 20 runs on macOS arm64 and on Linux ARM64, with it 0 of 20 on
+macOS.
+
+**Native output.** Stock sums in the hash map's order, which depends on addresses, so for a
+target with several sources stock's own output is only repeatable while the allocation pattern
+is; the fork's is always the source-index order. A target with one source, or a sum whose order
+does not change the bits, renders as stock. The stock gate (one synth per fresh process, each
+render twice) stayed bit-identical on `11f9f435`: 159 renders, 0 unstable in stock.
+
+**After** (ARM64 container, `11f9f435`'s tree): the full `sfizz_tests` passed 104 of 104 runs.
+
+**Gates and CI** on both commits are in the session report.
 
 ### Upstream merge test (2026-11-01)
 
