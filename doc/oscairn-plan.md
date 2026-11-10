@@ -404,7 +404,7 @@ sfizz has no CLAP build in either repository. The fork adds one in `clap/`
 upstream builds are unchanged; the bundle was `oscairn-sfizz.clap`, target `sfizz_clap`, before
 0.5.0). It vendors the CLAP headers (MIT) and Oscairn's plugin SDK headers
 (MIT: `sound-contexts.h`, `assets.h`, from 0.3.0 `voice-budget.h` and the helper
-`voice-budget-plugin.hpp`, and from 0.4.0 `ui.h`, draft 4 from 0.6.2) with their commits. The SDK's
+`voice-budget-plugin.hpp`, and from 0.4.0 `ui.h`, draft 5 from 0.6.3) with their commits. The SDK's
 `sound-contexts-plugin.hpp` owns voices itself, which does not fit sfizz's voice manager, so
 the wrapper implements the extension directly.
 
@@ -852,14 +852,16 @@ Taken in the element model session (2026-11-07), for Jacob to confirm:
     them off, as its controls are at rest), and a snapshot's sounds start with them off.
 34. **Key On Delay time lengths** take 28 measured knots, linear between them (K52); note lengths
     use the host's tempo from the CLAP transport.
-35. **No rich views yet** (`oscairn.ui` draft 4, 0.6.2): Oscairn's porting guide gives the AWM2
+35. **No rich views yet** (`oscairn.ui` draft 5, 0.6.3): Oscairn's porting guide gives the AWM2
     element views "once its elements are parameters", and the plugin's only parameters are Output
-    bus and the Assign Switches, so it declares none. The element parameters the views need are
+    bus and the Assign Switches, so it declares none, and answers draft 5's `seconds` with null:
+    it has no envelope-time parameter. The element parameters the views need are
     not built; the proposal is in the rich views session's entry (section 11), for Jacob to
     accept or change before any of it is built.
-36. **`oscairn.assets` draft 2** (from the headers vendored at Oscairn `2885698`): the plugin asks
-    the host for draft 2 and uses only `resolve`; a host answering only draft 1 (Oscairn before
-    `8a8fcc6`) no longer gives it assets.
+36. **`oscairn.assets` draft 3** (from the headers vendored from oscairn/oscairn-clap `7b5c4e0`):
+    the plugin asks the host for draft 3 and uses only `resolve` (draft 3's `create` stores a file
+    the plugin produces, and the sampler produces none); a host answering only drafts 1 or 2 no
+    longer gives it assets.
 
 Risks and open questions:
 

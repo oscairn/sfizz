@@ -1503,7 +1503,7 @@ bool paramHint(const clap_plugin_t*, clap_id id, oscairn_param_hint_t* hint)
     return true;
 }
 
-const oscairn_plugin_ui_t ui { paramHint };
+const oscairn_plugin_ui_t ui { paramHint, nullptr, nullptr };
 
 bool renderSet(const clap_plugin_t* p, clap_plugin_render_mode mode)
 {
@@ -1563,7 +1563,7 @@ const clap_plugin_descriptor_t descriptor {
     "https://github.com/oscairn/sfizz",
     "",
     "",
-    "0.6.2",
+    "0.6.3",
     "SFZ and AWM2-class sample player, based on sfizz",
     features,
 };
