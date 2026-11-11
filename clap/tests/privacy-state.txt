@@ -1,0 +1,12 @@
+oscairn-sampler-4
+0
+
+24
+org.oscairn.privacy-test
+0
+
+32
+<region> sample=kick.wav key=60
+
+1
+0

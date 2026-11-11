@@ -32,4 +32,13 @@ if(SFIZZ_TESTS)
     target_link_libraries(oscairn_sampler_clap_tests PRIVATE oscairn_sampler_clap_plugin ${CMAKE_DL_LIBS})
     target_compile_definitions(oscairn_sampler_clap_tests PRIVATE OSCAIRN_TEST_FILES="${PROJECT_SOURCE_DIR}/tests/TestFiles")
     add_dependencies(oscairn_sampler_clap_tests oscairn_sampler_clap)
+    # Opened as Oscairn does, with a temporary HOME: nothing may touch the user's Documents,
+    # Desktop or Downloads, or create anything under HOME (tests/privacy-check.sh).
+    add_executable(oscairn_sampler_privacy_host tests/privacy-host.cpp)
+    target_link_libraries(oscairn_sampler_privacy_host PRIVATE oscairn_sampler_clap_headers ${CMAKE_DL_LIBS})
+    set_target_properties(oscairn_sampler_privacy_host PROPERTIES CXX_STANDARD 17)
+    if(APPLE) # std::filesystem; a test tool, so the plugin's deployment target stays
+        target_compile_options(oscairn_sampler_privacy_host PRIVATE -mmacosx-version-min=10.15)
+        target_link_options(oscairn_sampler_privacy_host PRIVATE -mmacosx-version-min=10.15)
+    endif()
 endif()
