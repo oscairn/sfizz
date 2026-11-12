@@ -48,12 +48,6 @@ jobs:
             sanitizer: asan-ubsan
             flags: "-fsanitize=address,undefined -fno-omit-frame-pointer"
             gate: false
-          - name: Linux x86_64 TSan
-            os: ubuntu-24.04
-            compiler: gcc
-            sanitizer: tsan
-            flags: "-fsanitize=thread"
-            gate: false
     env:
       # ccache for every cmake build in the job, the stock gate's two included
       CMAKE_C_COMPILER_LAUNCHER: ccache
@@ -101,3 +95,83 @@ jobs:
         if: matrix.gate
         run: scripts/oscairn/compare-stock.sh "$RUNNER_TEMP/gate"
 
+  # The TSan build. Its tests (25-28 minutes in one job) run in the tsan-tests jobs, split
+  # three ways, on the runner image the binaries were built on.
+  tsan-build:
+    name: Linux x86_64 TSan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      FLAGS: "-fsanitize=thread"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Install Ninja
+        run: sudo apt-get update && sudo apt-get install -y ninja-build
+      - uses: hendrikmuhs/ccache-action@v1.2.24
+        with:
+          key: oscairn-sampler-ubuntu-24.04-gcc-Release-tsan
+          max-size: 1000M
+          evict-old-files: job
+      - name: Configure
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DSFIZZ_TESTS=ON -DSFIZZ_CLAP=ON -DSFIZZ_RENDER=OFF -DSFIZZ_JACK=OFF -DSFIZZ_SHARED=OFF -DENABLE_LTO=OFF \
+            -DCMAKE_C_FLAGS="$FLAGS" -DCMAKE_CXX_FLAGS="$FLAGS" \
+            -DCMAKE_EXE_LINKER_FLAGS="$FLAGS" -DCMAKE_SHARED_LINKER_FLAGS="$FLAGS" \
+            -DCMAKE_MODULE_LINKER_FLAGS="$FLAGS"
+      - name: Build
+        run: cmake --build build --target sfizz_tests oscairn_sampler_clap oscairn_sampler_clap_tests oscairn_sampler_privacy_host
+      - uses: actions/upload-artifact@v4
+        with:
+          name: oscairn-sampler-tsan
+          path: |
+            build/library/bin/sfizz_tests
+            build/library/bin/oscairn_sampler_clap_tests
+            build/library/bin/oscairn_sampler_privacy_host
+            build/library/lib/oscairn-sampler.clap
+          retention-days: 1
+
+  # sfizz_tests in three parts (Catch2 test specs; -# tags each test with its file), the
+  # CLAP tests and the privacy check with the third. The first two name their tests, the
+  # third excludes those, and --warn NoTests fails a part whose names match nothing.
+  tsan-tests:
+    name: Linux x86_64 TSan tests (${{ matrix.part }})
+    needs: tsan-build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - part: 1 of 3
+            spec: '"*Element filter types against the reference"'
+          - part: 2 of 3
+            spec: '"*Element filter near the top of the range*","*Element filter responses match the reference",[#ConcurrencyT]'
+          - part: 3 of 3
+            spec: '~"*Element filter types against the reference"~"*Element filter near the top of the range*"~"*Element filter responses match the reference"~[#ConcurrencyT]'
+            clap: true
+    steps:
+      # the test files, at the paths the tests read them from
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: oscairn-sampler-tsan
+          path: build/library
+      - name: Test
+        env:
+          TSAN_OPTIONS: halt_on_error=1
+          SPEC: ${{ matrix.spec }}
+        run: |
+          chmod +x build/library/bin/*
+          ./build/library/bin/sfizz_tests -# --warn NoTests "$SPEC"
+      - name: CLAP tests and privacy
+        if: matrix.clap
+        env:
+          TSAN_OPTIONS: halt_on_error=1
+        run: |
+          ./build/library/bin/oscairn_sampler_clap_tests build/library/lib/oscairn-sampler.clap
+          clap/tests/privacy-check.sh ./build/library/bin/oscairn_sampler_privacy_host build/library/lib/oscairn-sampler.clap \
+            org.oscairn.sampler --library org.oscairn.privacy-test="$PWD/tests/TestFiles" --state clap/tests/privacy-state.txt
