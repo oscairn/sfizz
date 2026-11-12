@@ -583,6 +583,32 @@ Absolute paths and escapes from the library are rejected, as in the Sampler.
 | Sound contexts, workers | Oscairn's host tests, run against this checkout (as the Sampler's CI does) |
 | Sanitizers | ASan+UBSan and TSan builds of `sfizz_tests` and the fork tests |
 
+### Releasing
+
+The package version is the plugin descriptor's version (`clap/plugin.cpp`; the published
+release carries the same number, and the release scripts read it from there — libsfizz's own
+CMake version is upstream's and stays untouched). Bump it, commit, then tag the package
+version and push the tag:
+
+```
+git tag oscairn-v0.6.4
+git push origin oscairn-v0.6.4
+```
+
+The [release workflow](../.github/workflows/release.yml) configures a clean Release build
+with the section 5 options and, on macOS, `PKG_CONFIG_LIBDIR=/var/empty` plus
+`-DCMAKE_IGNORE_PREFIX_PATH=/opt/homebrew;/usr/local` so no Homebrew path lands in the
+binary, builds it for each platform, runs the three test commands above and the device
+dependency checks, and creates a GitHub Release holding `oscairn-sampler-<platform>.clap`,
+`licenses.tar.gz` (every licence the published record lists) and `oscairn-release.json`. The
+tag version must match the descriptor version; the release fails if it does not. To try the
+workflow without a tag, run it manually (`workflow_dispatch`) with *dry run* checked:
+everything runs and the files land as a workflow artifact instead of a release. The
+repo-specific facts (names, ids, plugins, licence files) live in
+`scripts/oscairn/release/release.conf`; a local dry run of the macOS path is
+`scripts/oscairn/release/build.sh macos-arm64 dist && scripts/oscairn/release/test.sh
+macos-arm64 dist`.
+
 ---
 
 ## 6. Measurement
