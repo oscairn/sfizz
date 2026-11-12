@@ -26,24 +26,38 @@ jobs:
         include:
           - name: Linux x86_64
             os: ubuntu-24.04
+            compiler: gcc
+            sanitizer: none
             flags: ""
             gate: true
           - name: Linux ARM64
             os: ubuntu-24.04-arm
+            compiler: gcc
+            sanitizer: none
             flags: ""
             gate: true
           - name: macOS arm64
             os: macos-15
+            compiler: appleclang
+            sanitizer: none
             flags: ""
             gate: true
           - name: Linux x86_64 ASan UBSan
             os: ubuntu-24.04
+            compiler: gcc
+            sanitizer: asan-ubsan
             flags: "-fsanitize=address,undefined -fno-omit-frame-pointer"
             gate: false
           - name: Linux x86_64 TSan
             os: ubuntu-24.04
+            compiler: gcc
+            sanitizer: tsan
             flags: "-fsanitize=thread"
             gate: false
+    env:
+      # ccache for every cmake build in the job, the stock gate's two included
+      CMAKE_C_COMPILER_LAUNCHER: ccache
+      CMAKE_CXX_COMPILER_LAUNCHER: ccache
     steps:
       - uses: actions/checkout@v4
         with:
@@ -51,6 +65,11 @@ jobs:
       - name: Install Ninja
         run: |
           if [[ "$RUNNER_OS" == "Linux" ]]; then sudo apt-get update && sudo apt-get install -y ninja-build; else brew install ninja; fi
+      - uses: hendrikmuhs/ccache-action@v1.2.24
+        with:
+          key: oscairn-sampler-${{ matrix.os }}-${{ matrix.compiler }}-Release-${{ matrix.sanitizer }}
+          max-size: 1000M
+          evict-old-files: job
       - name: Configure
         # Sanitized builds use Release too: at -O2 with UBSan, some of sfizz's exact float
         # comparisons in RegionValuesT fail on clang (seen on macOS, 2026-11-01)
@@ -72,6 +91,13 @@ jobs:
           ./build/library/bin/oscairn_sampler_clap_tests build/library/lib/oscairn-sampler.clap
           clap/tests/privacy-check.sh ./build/library/bin/oscairn_sampler_privacy_host build/library/lib/oscairn-sampler.clap \
             org.oscairn.sampler --library org.oscairn.privacy-test="$PWD/tests/TestFiles" --state clap/tests/privacy-state.txt
+      - name: Restore the stock tree
+        if: matrix.gate
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/gate/stock-src
+          key: sfizz-stock-src-${{ hashFiles('scripts/oscairn/compare-stock.sh') }}
       - name: Stock vs fork
         if: matrix.gate
         run: scripts/oscairn/compare-stock.sh "$RUNNER_TEMP/gate"
+
