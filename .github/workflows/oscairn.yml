@@ -96,7 +96,7 @@ jobs:
         run: scripts/oscairn/compare-stock.sh "$RUNNER_TEMP/gate"
 
   # The TSan build. Its tests (25-28 minutes in one job) run in the tsan-tests jobs, split
-  # three ways, on the runner image the binaries were built on.
+  # two ways, on the runner image the binaries were built on.
   tsan-build:
     name: Linux x86_64 TSan
     runs-on: ubuntu-24.04
@@ -134,9 +134,9 @@ jobs:
             build/library/lib/oscairn-sampler.clap
           retention-days: 1
 
-  # sfizz_tests in three parts (Catch2 test specs; -# tags each test with its file), the
-  # CLAP tests and the privacy check with the third. The first two name their tests, the
-  # third excludes those, and --warn NoTests fails a part whose names match nothing.
+  # sfizz_tests in two parts by Catch2 test spec: the element filter's rate test, which alone
+  # takes about 19 of the 23 minutes under TSan, and every other test, with the CLAP tests
+  # and the privacy check. --warn NoTests fails a part whose spec matches nothing.
   tsan-tests:
     name: Linux x86_64 TSan tests (${{ matrix.part }})
     needs: tsan-build
@@ -146,12 +146,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - part: 1 of 3
-            spec: '"*Element filter types against the reference"'
-          - part: 2 of 3
-            spec: '"*Element filter near the top of the range*","*Element filter responses match the reference",[#ConcurrencyT]'
-          - part: 3 of 3
-            spec: '~"*Element filter types against the reference"~"*Element filter near the top of the range*"~"*Element filter responses match the reference"~[#ConcurrencyT]'
+          - part: 1 of 2
+            spec: '"*The element filter follows its 44.1 kHz response at every rate"'
+          - part: 2 of 2
+            spec: '~"*The element filter follows its 44.1 kHz response at every rate"'
             clap: true
     steps:
       # the test files, at the paths the tests read them from
@@ -166,7 +164,7 @@ jobs:
           SPEC: ${{ matrix.spec }}
         run: |
           chmod +x build/library/bin/*
-          ./build/library/bin/sfizz_tests -# --warn NoTests --durations yes "$SPEC"
+          ./build/library/bin/sfizz_tests --warn NoTests --durations yes "$SPEC"
       - name: CLAP tests and privacy
         if: matrix.clap
         env:
