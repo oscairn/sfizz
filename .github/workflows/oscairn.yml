@@ -166,7 +166,7 @@ jobs:
           SPEC: ${{ matrix.spec }}
         run: |
           chmod +x build/library/bin/*
-          ./build/library/bin/sfizz_tests -# --warn NoTests "$SPEC"
+          ./build/library/bin/sfizz_tests -# --warn NoTests --durations yes "$SPEC"
       - name: CLAP tests and privacy
         if: matrix.clap
         env:
