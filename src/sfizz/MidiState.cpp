@@ -94,6 +94,14 @@ void sfz::MidiState::flushEvents() noexcept
         events.resize(1);
     };
 
+    if (numEventsToFlush < eventsToFlush.size()) {
+        for (size_t i = 0; i < numEventsToFlush; ++i)
+            flushEventVector(*eventsToFlush[i]);
+        numEventsToFlush = 0;
+        return;
+    }
+    numEventsToFlush = 0;
+
     for (auto& events : ccEvents)
         flushEventVector(events);
 
@@ -152,9 +160,11 @@ float sfz::MidiState::getVelocityOverride() const noexcept
 void sfz::MidiState::insertEventInVector(EventVector& events, int delay, float value)
 {
     const auto insertionPoint = absl::c_lower_bound(events, delay, MidiEventDelayComparator {});
-    if (insertionPoint == events.end() || insertionPoint->delay != delay)
+    if (insertionPoint == events.end() || insertionPoint->delay != delay) {
         events.insert(insertionPoint, { delay, value });
-    else
+        if (events.size() == 2 && numEventsToFlush < eventsToFlush.size())
+            eventsToFlush[numEventsToFlush++] = &events;
+    } else
         insertionPoint->value = value;
 }
 

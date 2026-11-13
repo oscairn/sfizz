@@ -108,6 +108,48 @@ TEST_CASE("[MidiState] Flushing state")
     REQUIRE(state.getPitchBend() == 0.7f);
 }
 
+TEST_CASE("[MidiState] Flushing every kind of event, more of them than the list of changed ones holds")
+{
+    sfz::MidiState state;
+    auto check = [&](float offset) {
+        for (int cc = 0; cc < sfz::config::numCCs; ++cc) {
+            REQUIRE(state.getCCEvents(cc).size() == 1);
+            REQUIRE(state.getCCEvents(cc).front().delay == 0);
+            REQUIRE(state.getCCValue(cc) == offset + cc / 1024.0f);
+        }
+        for (int note = 0; note < 128; ++note) {
+            REQUIRE(state.getPolyAftertouchEvents(note).size() == 1);
+            REQUIRE(state.getPolyAftertouch(note) == offset + note / 256.0f);
+        }
+        REQUIRE(state.getPitchEvents().size() == 1);
+        REQUIRE(state.getChannelAftertouchEvents().size() == 1);
+    };
+    for (float offset : { 0.25f, 0.5f }) {
+        // a reset between events records a vector a second time
+        state.ccEvent(5, 3, 0.1f);
+        state.resetEventStates();
+        for (int cc = 0; cc < sfz::config::numCCs; ++cc) {
+            state.ccEvent(1 + cc % 7, cc, 0.9f);
+            state.ccEvent(10, cc, offset + cc / 1024.0f);
+        }
+        for (int note = 0; note < 128; ++note)
+            state.polyAftertouchEvent(3, note, offset + note / 256.0f);
+        state.pitchBendEvent(4, 0.5f);
+        state.channelAftertouchEvent(6, 0.5f);
+        state.advanceTime(64);
+        check(offset);
+        // a few changes after a full list
+        state.ccEvent(7, 9, 0.3f);
+        state.ccEvent(0, 10, 0.4f);
+        state.advanceTime(64);
+        REQUIRE(state.getCCEvents(9).size() == 1);
+        REQUIRE(state.getCCValue(9) == 0.3f);
+        REQUIRE(state.getCCValue(10) == 0.4f);
+        state.ccEvent(0, 9, offset + 9 / 1024.0f);
+        state.ccEvent(0, 10, offset + 10 / 1024.0f);
+    }
+}
+
 TEST_CASE("[MidiState] Set and get note velocities")
 {
     sfz::MidiState state;

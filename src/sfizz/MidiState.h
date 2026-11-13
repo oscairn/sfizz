@@ -302,6 +302,13 @@ private:
     std::array<EventVector, 128> polyAftertouchEvents;
 
     /**
+     * @brief The event vectors holding more than their current value, which flushEvents()
+     * resets; the others already hold just one event at delay 0. A full list flushes them all.
+     */
+    std::array<EventVector*, config::numCCs + 130> eventsToFlush;
+    size_t numEventsToFlush { 0 };
+
+    /**
      * @brief Current midi program
      */
     int currentProgram { 0 };
