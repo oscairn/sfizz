@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <cmath>
 #include <iterator>
+#include <type_traits>
 
 namespace sfz {
 namespace oscairn {
@@ -414,6 +415,54 @@ inline Pair directRun(const DirectCoefficients& c, DirectState& s, Pair x) noexc
     s.band2 = c.c2m * band - c.c2 * band1;
     return c.wh * high + c.wb * band + c.wl * low;
 }
+
+// The same step with each section's coefficients in its own lanes: two sections (or two
+// sections of two channels, in a vector of four) take one step together. Each lane does the
+// arithmetic of directRun, so the result is the same to the bit; the coefficients then fit in
+// registers, where the two-step loop kept spilling them.
+typedef float Quad __attribute__((vector_size(16)));
+template <class V>
+struct LaneCoefficients {
+    V inv, ci, ki, kf, k, kl, kx, kfg, c1, c2, c1m, c2m, wh, wb, wl;
+};
+template <class V>
+struct LaneState {
+    V low1, low2, band1, band2;
+};
+template <class V>
+inline V laneRun(const LaneCoefficients<V>& c, LaneState<V>& s, V x) noexcept
+{
+    const V low1 = s.low1, band1 = s.band1;
+    const V high = c.inv * x - c.ci * band1 - c.ki * low1;
+    const V band = c.kf * high + c.k * band1;
+    const V low = (c.kl * low1 + c.kx * x + c.kf * band1) + c.kfg * band;
+    s.low1 = (s.low2 - c.c1 * low1) + c.c1m * low;
+    s.low2 = c.c2m * low - c.c2 * low1;
+    s.band1 = (s.band2 - c.c1 * band1) + c.c1m * band;
+    s.band2 = c.c2m * band - c.c2 * band1;
+    return c.wh * high + c.wb * band + c.wl * low;
+}
+// Lane l of a vector of N lanes holds section (l * 2 / N)
+template <class V>
+LaneCoefficients<V> laneCoefficients(const DirectCoefficients& a, const DirectCoefficients& b) noexcept
+{
+    constexpr int n = sizeof(V) / sizeof(float);
+    LaneCoefficients<V> c;
+    for (int l = 0; l < n; ++l) {
+        const DirectCoefficients& s = l < n / 2 ? a : b;
+        c.inv[l] = s.inv, c.ci[l] = s.ci, c.ki[l] = s.ki, c.kf[l] = s.kf, c.k[l] = s.k, c.kl[l] = s.kl;
+        c.kx[l] = s.kx, c.kfg[l] = s.kfg, c.c1[l] = s.c1, c.c2[l] = s.c2, c.c1m[l] = s.c1m;
+        c.c2m[l] = s.c2m, c.wh[l] = s.wh, c.wb[l] = s.wb, c.wl[l] = s.wl;
+    }
+    return c;
+}
+// Keep lanes [from, to) of `saved`: a step whose result in those lanes is not wanted
+template <class V>
+inline void keepLanes(LaneState<V>& s, const LaneState<V>& saved, int from, int to) noexcept
+{
+    for (int l = from; l < to; ++l)
+        s.low1[l] = saved.low1[l], s.low2[l] = saved.low2[l], s.band1[l] = saved.band1[l], s.band2[l] = saved.band2[l];
+}
 } // namespace
 
 template <int Channels, int Mode>
@@ -451,6 +500,68 @@ void ElementFilter::runDirect(float* const* channels, size_t n) noexcept
         return c;
     };
     const DirectCoefficients c0 = coefficients(sections_[0]), c1 = coefficients(sections_[1]);
+    if ((Mode == 2 || Mode == 3) && lanes_ && n > 0) {
+        // The sections in lanes: in series (Mode 2) the second section runs one sample behind
+        // the first, on the first's previous output, so that both step together
+        typedef typename std::conditional<Channels == 2, Quad, Pair>::type V;
+        constexpr int half = Channels; // lanes of one section
+        const LaneCoefficients<V> c = laneCoefficients<V>(c0, c1);
+        LaneState<V> st;
+        for (int l = 0; l < 2 * half; ++l) {
+            const Section& s = sections_[l / half];
+            const int ch = l % half;
+            st.low1[l] = s.low[ch].s1, st.low2[l] = s.low[ch].s2;
+            st.band1[l] = s.band[ch].s1, st.band2[l] = s.band[ch].s2;
+        }
+        const float gain = gain_;
+        float* left = channels[0];
+        float* right = channels[1];
+        auto input = [&](size_t i) {
+            V x;
+            for (int l = 0; l < 2 * half; ++l)
+                x[l] = channels[l % half][i];
+            return x;
+        };
+        if (Mode == 3) {
+            for (size_t i = 0; i < n; ++i) {
+                const V y = laneRun(c, st, input(i));
+                left[i] = gain * (y[0] + y[half]);
+                if (Channels == 2)
+                    right[i] = gain * (y[1] + y[3]);
+            }
+        } else {
+            // the first sample: the second section's lanes do not step
+            LaneState<V> saved = st;
+            V y = laneRun(c, st, input(0));
+            keepLanes(st, saved, half, 2 * half);
+            for (size_t i = 1; i < n; ++i) {
+                V x = input(i);
+                for (int l = 0; l < half; ++l)
+                    x[half + l] = y[l];
+                y = laneRun(c, st, x);
+                left[i - 1] = gain * y[half];
+                if (Channels == 2)
+                    right[i - 1] = gain * y[3];
+            }
+            // the last sample: the first section's lanes do not step
+            V x = V {};
+            for (int l = 0; l < half; ++l)
+                x[half + l] = y[l];
+            saved = st;
+            y = laneRun(c, st, x);
+            keepLanes(st, saved, 0, half);
+            left[n - 1] = gain * y[half];
+            if (Channels == 2)
+                right[n - 1] = gain * y[3];
+        }
+        for (int l = 0; l < 2 * half; ++l) {
+            Section& s = sections_[l / half];
+            const int ch = l % half;
+            s.low[ch].s1 = st.low1[l], s.low[ch].s2 = st.low2[l];
+            s.band[ch].s1 = st.band1[l], s.band[ch].s2 = st.band2[l];
+        }
+        return;
+    }
     auto load = [](const Section& s) {
         return DirectState { Pair { s.low[0].s1, s.low[1].s1 }, Pair { s.low[0].s2, s.low[1].s2 },
             Pair { s.band[0].s1, s.band[1].s1 }, Pair { s.band[0].s2, s.band[1].s2 } };
@@ -494,6 +605,128 @@ void ElementFilter::runDirect(float* const* channels, size_t n) noexcept
     else
         runDirect<Channels, 2>(channels, n);
 }
+
+namespace {
+// run() for the rates whose reference-rate delay has a delay line (44.1, 88.2, 176.4 and
+// 192 kHz) without its branches: high = (a x - kh low' - cs band') inv;
+// band = kb (f high + band'); low = kb (low' + f band') + kfg band; the low line takes
+// ph high + pl low; out = wh high + wb band + wl low. The one-pole is a = f, kh = f - 1,
+// cs = 0 and high its output.
+struct DelayedCoefficients {
+    float a, kh, cs, inv, f, kb, kfg, ph, pl, wh, wb, wl, c1, c2;
+};
+} // namespace
+
+template <int Channels, int Mode, bool Allpass>
+void ElementFilter::runDelayed(float* const* channels, size_t n) noexcept
+{
+    static_assert((kMaxDelay & (kMaxDelay - 1)) == 0, "the delay line's length is a power of two");
+    constexpr int stages = Mode == 0 ? 0 : Mode == 1 ? 1 : 2;
+    constexpr int mask = kMaxDelay - 1;
+    DelayedCoefficients c[2];
+    for (int k = 0; k < 2; ++k) {
+        const Section& s = sections_[k];
+        DelayedCoefficients& d = c[k];
+        d.c1 = s.c1, d.c2 = s.c2, d.inv = s.inv, d.f = s.f;
+        d.wh = d.wb = d.wl = 0.0f;
+        if (s.output == Output::OnePole) {
+            d.a = s.f, d.kh = -(1.0f - s.f), d.cs = 0.0f, d.kb = d.kfg = 0.0f, d.ph = 1.0f, d.pl = 0.0f, d.wh = 1.0f;
+            continue;
+        }
+        d.a = 1.0f, d.kh = d.kb = s.k, d.cs = s.cs, d.kfg = s.k * s.f * s.g, d.ph = 0.0f, d.pl = 1.0f;
+        switch (s.output) {
+        case Output::High: d.wh = 1.0f; break;
+        case Output::Band: d.wb = 1.0f; break;
+        case Output::Notch: d.wh = d.wl = 1.0f; break;
+        case Output::LowMinusBand: d.wl = 1.0f, d.wb = -1.0f; break;
+        default: d.wl = 1.0f;
+        }
+    }
+    // the lines' last delay_ values and the allpasses' states, the channels in lanes
+    const int m = delay_;
+    int pos = sections_[0].low[0].pos;
+    Pair line[2][2][kMaxDelay], s1[2][2], s2[2][2];
+    for (int k = 0; k < stages; ++k) {
+        for (int g = 0; g < 2; ++g) {
+            const Delay* d = g ? sections_[k].band : sections_[k].low;
+            for (int j = 1; j <= m; ++j) {
+                const int at = (pos - j) & mask;
+                line[k][g][at] = Pair { d[0].line[at], Channels == 2 ? d[1].line[at] : 0.0f };
+            }
+            s1[k][g] = Pair { d[0].s1, Channels == 2 ? d[1].s1 : 0.0f };
+            s2[k][g] = Pair { d[0].s2, Channels == 2 ? d[1].s2 : 0.0f };
+        }
+    }
+    const float gain = gain_;
+    float* left = channels[0];
+    float* right = channels[1];
+    for (size_t i = 0; i < n; ++i) {
+        const int at = (pos - m) & mask;
+        auto step = [&](int k, Pair x) {
+            const DelayedCoefficients& d = c[k];
+            Pair v[2];
+            for (int g = 0; g < 2; ++g) {
+                const Pair u = line[k][g][at];
+                if (Allpass) {
+                    const Pair y = d.c2 * u + s1[k][g];
+                    s1[k][g] = d.c1 * (u - y) + s2[k][g];
+                    s2[k][g] = u - d.c2 * y;
+                    v[g] = y;
+                } else {
+                    v[g] = u;
+                }
+            }
+            const Pair high = (d.a * x - d.kh * v[0] - d.cs * v[1]) * d.inv;
+            const Pair band = d.kb * (d.f * high + v[1]);
+            const Pair low = d.kb * (v[0] + d.f * v[1]) + d.kfg * band;
+            line[k][0][pos] = d.ph * high + d.pl * low;
+            line[k][1][pos] = band;
+            return d.wh * high + d.wb * band + d.wl * low;
+        };
+        Pair x = { left[i], Channels == 2 ? right[i] : 0.0f };
+        if (Mode == 1)
+            x = step(0, x);
+        else if (Mode == 2)
+            x = step(1, step(0, x));
+        else if (Mode == 3)
+            x = step(0, x) + step(1, x);
+        x = gain * x;
+        left[i] = x[0];
+        if (Channels == 2)
+            right[i] = x[1];
+        pos = (pos + 1) & mask;
+    }
+    for (int k = 0; k < stages; ++k) {
+        for (int g = 0; g < 2; ++g) {
+            Delay* d = g ? sections_[k].band : sections_[k].low;
+            for (int ch = 0; ch < Channels; ++ch) {
+                for (int j = 1; j <= m; ++j) {
+                    const int at = (pos - j) & mask;
+                    d[ch].line[at] = line[k][g][at][ch];
+                }
+                d[ch].pos = pos;
+                d[ch].s1 = s1[k][g][ch];
+                d[ch].s2 = s2[k][g][ch];
+            }
+        }
+    }
+}
+
+template <int Channels>
+void ElementFilter::runDelayed(float* const* channels, size_t n) noexcept
+{
+    const int mode = stages_ == 0 ? 0 : parallel_ ? 3 : stages_;
+    switch (mode * 2 + allpass_) {
+    case 0: runDelayed<Channels, 0, false>(channels, n); break;
+    case 1: runDelayed<Channels, 0, true>(channels, n); break;
+    case 2: runDelayed<Channels, 1, false>(channels, n); break;
+    case 3: runDelayed<Channels, 1, true>(channels, n); break;
+    case 4: runDelayed<Channels, 2, false>(channels, n); break;
+    case 5: runDelayed<Channels, 2, true>(channels, n); break;
+    case 6: runDelayed<Channels, 3, false>(channels, n); break;
+    default: runDelayed<Channels, 3, true>(channels, n); break;
+    }
+}
 #endif
 
 void ElementFilter::process(absl::Span<float> left, absl::Span<float> right, absl::Span<const float> cents) noexcept
@@ -503,18 +736,21 @@ void ElementFilter::process(absl::Span<float> left, absl::Span<float> right, abs
     const bool stereo = !right.empty();
     const size_t n = stereo ? std::min(left.size(), right.size()) : left.size();
     float* const channels[2] = { left.data(), right.data() };
-    for (size_t i0 = 0; i0 < n; i0 += kControlInterval) {
+    for (size_t i0 = 0, end; i0 < n; i0 = end) {
         // the coefficients only change with the cutoff
         if (!cents.empty() && i0 < cents.size() && cents[i0] != cents_)
             update(cents[i0]);
-        const size_t end = std::min<size_t>(n, i0 + kControlInterval);
+        end = std::min<size_t>(n, i0 + kControlInterval);
 #if defined(__GNUC__)
-        if (delay_ == 0) {
+        if (delay_ == 0 || lanes_) {
+            // one run up to the next interval whose cutoff moves
+            while (end < n && (end >= cents.size() || cents[end] == cents_))
+                end = std::min<size_t>(n, end + kControlInterval);
             float* const sub[2] = { channels[0] + i0, stereo ? channels[1] + i0 : nullptr };
-            if (stereo)
-                runDirect<2>(sub, end - i0);
+            if (delay_ != 0)
+                stereo ? runDelayed<2>(sub, end - i0) : runDelayed<1>(sub, end - i0);
             else
-                runDirect<1>(sub, end - i0);
+                stereo ? runDirect<2>(sub, end - i0) : runDirect<1>(sub, end - i0);
             continue;
         }
 #endif

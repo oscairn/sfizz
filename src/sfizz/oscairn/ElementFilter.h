@@ -71,6 +71,10 @@ public:
     // Filters `left` and `right` in place; `cents` shifts the cutoff per sample
     // (empty for no shift). `right` may be empty for a mono voice.
     void process(absl::Span<float> left, absl::Span<float> right, absl::Span<const float> cents) noexcept;
+    // The loops without per-sample branches (at 48 and 96 kHz two sections step together in
+    // vector lanes; at the other rates the channels do); false keeps the earlier loops, which
+    // the tests compare them with
+    void setLaneLoops(bool on) noexcept { lanes_ = on; }
 
 private:
     static constexpr int kMaxDelay = 16; // reference-rate delay up to 16 host samples (705.6 kHz)
@@ -102,6 +106,11 @@ private:
     void runDirect(float* const* channels, size_t n) noexcept;
     template <int Channels>
     void runDirect(float* const* channels, size_t n) noexcept;
+    // the loop for the other rates (a delay line, and the allpass if `Allpass`)
+    template <int Channels, int Mode, bool Allpass>
+    void runDelayed(float* const* channels, size_t n) noexcept;
+    template <int Channels>
+    void runDelayed(float* const* channels, size_t n) noexcept;
 
     ElementFilterParameters p_;
     double sampleRate_ { 48000.0 };
@@ -116,6 +125,7 @@ private:
     float keyCents_ { 0.0f };
     float cents_ { 0.0f }; // the shift the coefficients are designed for
     float gain_ { 1.0f };
+    bool lanes_ { true };
 };
 
 } // namespace oscairn

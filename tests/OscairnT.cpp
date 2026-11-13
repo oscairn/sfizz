@@ -19,6 +19,8 @@
 #include <algorithm>
 #include <cmath>
 #include <complex>
+#include <cstring>
+#include <random>
 #include <vector>
 
 using namespace Catch::literals;
@@ -1602,6 +1604,64 @@ TEST_CASE("[Oscairn] Element filter stays finite below the reference rate")
                 INFO("rate " << rate << " type " << type << " cutoff " << cutoff);
                 REQUIRE(std::isfinite(peak));
                 REQUIRE(peak < 1e3f);
+            }
+        }
+    }
+}
+
+TEST_CASE("[Oscairn] Element filter: the loops without branches match the earlier ones")
+{
+    // The vector loops (two sections in lanes at 48 and 96 kHz, the channels in lanes at the
+    // other rates) round differently from the earlier loops where the compiler orders a sum
+    // differently (-ffast-math), so the check is a level: the difference stays more than
+    // 85 dB below the output (measured: -97 dB at worst, a resonant low cutoff), for every
+    // type, mono and stereo, with the cutoff moving and blocks of any length
+    for (double rate : { 44100.0, 48000.0, 88200.0, 96000.0, 176400.0, 192000.0 }) {
+        for (int type : { 0, 1, 2, 3, 4, 5, 6, 7, 8, 10, 11, 12, 13, 14, 15, 16, 17, 19, 21 }) {
+            for (int resonance : { 0, 127 }) {
+                for (int stereo = 0; stereo < 2; ++stereo) {
+                    sfz::oscairn::ElementFilterParameters p;
+                    p.type = type;
+                    p.cutoff = 300;
+                    p.resonance = resonance;
+                    p.hpfCutoff = 200;
+                    p.distance = -20;
+                    std::vector<float> out[2][2];
+                    for (int k = 0; k < 2; ++k) {
+                        sfz::oscairn::ElementFilter f;
+                        f.setLaneLoops(k == 0);
+                        f.setSampleRate(rate);
+                        f.start(p, 64, 100);
+                        std::minstd_rand rng(type);
+                        std::uniform_real_distribution<float> noise(-1.0f, 1.0f);
+                        for (auto& ch : out[k]) {
+                            ch.resize(6000);
+                            for (float& x : ch)
+                                x = noise(rng);
+                        }
+                        const size_t lengths[] = { 1, 128, 37, 16, 2, 300 };
+                        for (size_t i = 0, b = 0; i < out[k][0].size(); ++b) {
+                            const size_t len = std::min(lengths[b % 6], out[k][0].size() - i);
+                            std::vector<float> cents(len);
+                            for (size_t j = 0; j < len; ++j)
+                                cents[j] = 1200.0f * std::sin(0.002f * static_cast<float>(i + j));
+                            f.process(absl::MakeSpan(out[k][0]).subspan(i, len),
+                                stereo ? absl::MakeSpan(out[k][1]).subspan(i, len) : absl::Span<float>(), cents);
+                            i += len;
+                        }
+                    }
+                    double difference = 0.0, level = 0.0;
+                    for (int ch = 0; ch <= stereo; ++ch) {
+                        for (size_t i = 0; i < out[0][ch].size(); ++i) {
+                            const double d = static_cast<double>(out[0][ch][i]) - out[1][ch][i];
+                            difference += d * d;
+                            level += static_cast<double>(out[1][ch][i]) * out[1][ch][i];
+                        }
+                    }
+                    INFO("rate " << rate << " type " << type << " resonance " << resonance << " stereo " << stereo);
+                    REQUIRE(level > 0.0);
+                    REQUIRE(difference <= level * 3.2e-9); // -85 dB
+                }
             }
         }
     }
