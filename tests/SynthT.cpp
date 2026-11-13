@@ -2402,3 +2402,29 @@ TEST_CASE("[Synth] After restart a synth plays as it did after loading")
     REQUIRE(std::any_of(expected.begin(), expected.end(), [](float x) { return x != 0.0f; }));
     REQUIRE(play(used) == expected);
 }
+
+TEST_CASE("[Synth] Voice timings in the callback breakdown can be turned off")
+{
+    sfz::Synth synth;
+    synth.setSamplesPerBlock(256);
+    sfz::AudioBuffer<float> buffer { 2, 256 };
+    synth.loadSfzString(fs::current_path() / "tests/TestFiles/voice_timings.sfz", R"(
+        <region> sample=*saw fil_type=lpf_2p cutoff=500
+    )");
+    for (int k = 0; k < 32; ++k)
+        synth.noteOn(0, 40 + k, 100);
+    synth.renderBlock(buffer);
+    const auto on = synth.getCallbackBreakdown();
+    REQUIRE(on.data > 0.0);
+    REQUIRE(on.amplitude > 0.0);
+    REQUIRE(on.filters > 0.0);
+    REQUIRE(on.panning > 0.0);
+    synth.setVoiceTimings(false);
+    synth.renderBlock(buffer);
+    const auto off = synth.getCallbackBreakdown();
+    REQUIRE(off.data == 0.0);
+    REQUIRE(off.amplitude == 0.0);
+    REQUIRE(off.filters == 0.0);
+    REQUIRE(off.panning == 0.0);
+    REQUIRE(off.renderMethod > 0.0); // the block's own times stay
+}

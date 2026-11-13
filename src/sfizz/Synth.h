@@ -341,6 +341,12 @@ public:
      */
     void setSustainCancelsRelease(bool value);
     /**
+     * @brief Set whether each voice's render times are measured for the callback breakdown
+     *        (on by default; off, its data, amplitude, filters and panning read 0 and no
+     *        clock is read for them)
+     */
+    void setVoiceTimings(bool value) noexcept;
+    /**
      * @brief Get the current value for the volume, in dB.
      *
      * @return float

@@ -2061,6 +2061,11 @@ void Synth::setSustainCancelsRelease(bool value)
     impl_->resources_.getSynthConfig().sustainCancelsRelease = value;
 }
 
+void Synth::setVoiceTimings(bool value) noexcept
+{
+    impl_->resources_.getSynthConfig().voiceTimings = value;
+}
+
 float Synth::getVolume() const noexcept
 {
     Impl& impl = *impl_;

@@ -922,7 +922,7 @@ void Voice::renderBlock(AudioSpan<float, 2> buffer) noexcept
     impl.initialDelay_ -= static_cast<int>(delay);
 
     { // Fill buffer with raw data
-        ScopedTiming logger { impl.dataDuration_ };
+        ScopedTiming logger { impl.dataDuration_, ScopedTiming::Operation::replaceDuration, impl.resources_.getSynthConfig().voiceTimings };
         if (region->isOscillator())
             impl.fillWithGenerator(delayed_buffer);
         else
@@ -1085,7 +1085,7 @@ void Voice::Impl::amplitudeEnvelope(absl::Span<float> modulationSpan) noexcept
 
 void Voice::Impl::ampStageMono(AudioSpan<float> buffer) noexcept
 {
-    ScopedTiming logger { amplitudeDuration_ };
+    ScopedTiming logger { amplitudeDuration_, ScopedTiming::Operation::replaceDuration, resources_.getSynthConfig().voiceTimings };
 
     const auto numSamples = buffer.getNumFrames();
     const auto leftBuffer = buffer.getSpan(0);
@@ -1105,7 +1105,7 @@ void Voice::Impl::ampStageMono(AudioSpan<float> buffer) noexcept
 
 void Voice::Impl::ampStageStereo(AudioSpan<float> buffer) noexcept
 {
-    ScopedTiming logger { amplitudeDuration_ };
+    ScopedTiming logger { amplitudeDuration_, ScopedTiming::Operation::replaceDuration, resources_.getSynthConfig().voiceTimings };
 
     BufferPool& bufferPool = resources_.getBufferPool();
 
@@ -1123,7 +1123,7 @@ void Voice::Impl::ampStageStereo(AudioSpan<float> buffer) noexcept
 
 void Voice::Impl::panStageMono(AudioSpan<float> buffer) noexcept
 {
-    ScopedTiming logger { panningDuration_ };
+    ScopedTiming logger { panningDuration_, ScopedTiming::Operation::replaceDuration, resources_.getSynthConfig().voiceTimings };
 
     const auto numSamples = buffer.getNumFrames();
     const auto leftBuffer = buffer.getSpan(0);
@@ -1155,7 +1155,7 @@ void Voice::Impl::panStageMono(AudioSpan<float> buffer) noexcept
 
 void Voice::Impl::panStageStereo(AudioSpan<float> buffer) noexcept
 {
-    ScopedTiming logger { panningDuration_ };
+    ScopedTiming logger { panningDuration_, ScopedTiming::Operation::replaceDuration, resources_.getSynthConfig().voiceTimings };
     const auto numSamples = buffer.getNumFrames();
     const auto leftBuffer = buffer.getSpan(0);
     const auto rightBuffer = buffer.getSpan(1);
@@ -1219,7 +1219,7 @@ void Voice::Impl::oscairnFilterStage(absl::Span<float> left, absl::Span<float> r
 
 void Voice::Impl::filterStageMono(AudioSpan<float> buffer) noexcept
 {
-    ScopedTiming logger { filterDuration_ };
+    ScopedTiming logger { filterDuration_, ScopedTiming::Operation::replaceDuration, resources_.getSynthConfig().voiceTimings };
     const auto numSamples = buffer.getNumFrames();
     const auto leftBuffer = buffer.getSpan(0);
     const float* inputChannel[1] { leftBuffer.data() };
@@ -1237,7 +1237,7 @@ void Voice::Impl::filterStageMono(AudioSpan<float> buffer) noexcept
 
 void Voice::Impl::filterStageStereo(AudioSpan<float> buffer) noexcept
 {
-    ScopedTiming logger { filterDuration_ };
+    ScopedTiming logger { filterDuration_, ScopedTiming::Operation::replaceDuration, resources_.getSynthConfig().voiceTimings };
     const auto numSamples = buffer.getNumFrames();
     const auto leftBuffer = buffer.getSpan(0);
     const auto rightBuffer = buffer.getSpan(1);

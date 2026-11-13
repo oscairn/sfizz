@@ -209,6 +209,7 @@ void configure(const Plugin& s, sfz::Synth& synth)
     synth.setSamplesPerBlock(static_cast<int>(s.maxFrames));
     synth.setNumVoices(voicesPerSound);
     synth.setPreloadSize(preloadFrames);
+    synth.setVoiceTimings(false); // nothing reads them, and each costs a voice two clock reads a block
 }
 
 // The sample files a patch names, relative to its directory (default_path applied)

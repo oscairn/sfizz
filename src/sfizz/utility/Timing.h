@@ -40,11 +40,17 @@ struct ScopedTiming
      *
      * @param targetDuration
      * @param op
+     * @param enabled false: no clock is read, and a replaced duration becomes 0
      */
-    ScopedTiming(double& targetDuration, Operation op = Operation::replaceDuration)
-    : targetDuration(targetDuration), operation(op) {}
+    ScopedTiming(double& targetDuration, Operation op = Operation::replaceDuration, bool enabled = true)
+    : targetDuration(targetDuration), operation(op), enabled(enabled), creationTime(enabled ? highResNow() : TimePoint {}) {}
     ~ScopedTiming()
     {
+        if (!enabled) {
+            if (operation == Operation::replaceDuration)
+                targetDuration = 0.0;
+            return;
+        }
         switch(operation)
         {
         case(Operation::replaceDuration):
@@ -58,7 +64,8 @@ struct ScopedTiming
 
     double& targetDuration;
     const Operation operation;
-    const TimePoint creationTime { highResNow() };
+    const bool enabled;
+    const TimePoint creationTime;
 };
 
 }

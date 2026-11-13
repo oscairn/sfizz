@@ -30,5 +30,9 @@ struct SynthConfig
     }
 
     bool sustainCancelsRelease { Default::sustainCancelsRelease };
+
+    // Each voice's data, amplitude, filter and panning times in the callback breakdown (two
+    // clock reads each, a voice and block); off, they read 0
+    bool voiceTimings { true };
 };
 }
