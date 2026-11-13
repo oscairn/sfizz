@@ -59,6 +59,7 @@ const float decaySecondsPer60dB[128] = {
 
 // from 56: indices 64..71 measured, doubled per 8 indices
 // except 77..95: interpolated between the measured indices
+// except 120..127: measured at each index (120 to 126 on the doubling line, 127 equal to 126)
 // fitted at 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 64, 65, 66, 67, 68, 69, 70, 71
 const float releaseSecondsPer60dB[128] = {
     0.0165897f, 0.0165897f, 0.0165897f, 0.0165897f, 0.0165897f, 0.0165897f, 0.0165897f, 0.0165897f,
@@ -76,7 +77,7 @@ const float releaseSecondsPer60dB[128] = {
     7.92904f, 8.4954f, 9.14885f, 9.91139f, 10.8124f, 11.8935f, 13.2149f, 14.8675f,
     15.8581f, 16.9908f, 18.2977f, 19.8228f, 21.6248f, 23.7871f, 26.4298f, 29.735f,
     31.7162f, 33.9816f, 36.5954f, 39.6456f, 43.2495f, 47.5741f, 52.8596f, 59.4699f,
-    63.4323f, 67.9632f, 73.1908f, 79.2912f, 86.4991f, 95.1482f, 105.719f, 118.94f,
+    63.4323f, 67.9632f, 73.1908f, 79.2912f, 86.4991f, 95.1482f, 105.719f, 105.719f,
 };
 
 // release below index 32: seconds of a straight line in amplitude from level 127 to silence

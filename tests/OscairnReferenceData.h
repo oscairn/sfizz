@@ -46,6 +46,8 @@ const ReferenceProbe referenceProbes[] = {
     { "eg3/rel_103", "oscairn_ampeg_attack=0 oscairn_ampeg_decay1=0 oscairn_ampeg_decay2=0 oscairn_ampeg_release=103", 69, 127, 0.5, 12.816088024344337, ReleasePer60, 14.868, 0, 6, 32.9 },
     { "eg3/rel_111", "oscairn_ampeg_attack=0 oscairn_ampeg_decay1=0 oscairn_ampeg_decay2=0 oscairn_ampeg_release=111", 69, 127, 0.5, 16.0, ReleasePer60, 29.7347, 0, 3, 16.4 },
     { "eg3/rel_119", "oscairn_ampeg_attack=0 oscairn_ampeg_decay1=0 oscairn_ampeg_decay2=0 oscairn_ampeg_release=119", 69, 127, 0.5, 16.0, ReleasePer60, 59.4718, 0, 3, 8.2 },
+    { "eg3/rel_123", "oscairn_ampeg_attack=0 oscairn_ampeg_decay1=0 oscairn_ampeg_decay2=0 oscairn_ampeg_release=123", 69, 127, 0.5, 18.0, ReleasePer60, 79.29, 0, 3, 12.0 },
+    { "eg3/rel_127", "oscairn_ampeg_attack=0 oscairn_ampeg_decay1=0 oscairn_ampeg_decay2=0 oscairn_ampeg_release=127", 69, 127, 0.5, 24.0, ReleasePer60, 105.68, 0, 3, 12.0 },
     { "sv1/decl_104_n45", "oscairn_ampeg_attack=0 oscairn_ampeg_decay1=104 oscairn_ampeg_decay2=0 oscairn_ampeg_release=0 oscairn_ampeg_decay1_level=0 oscairn_ampeg_decay2_level=0", 45, 127, 6.6416, 0.05, DecayPer60, 16.9256, 0, 3, 21.0 },
     { "sv1/decl_107_n45", "oscairn_ampeg_attack=0 oscairn_ampeg_decay1=107 oscairn_ampeg_decay2=0 oscairn_ampeg_release=0 oscairn_ampeg_decay1_level=0 oscairn_ampeg_decay2_level=0", 45, 127, 8.316250031519136, 0.05, DecayPer60, 21.5417, 0, 3, 20.4 },
     { "sv1/decl_110_n45", "oscairn_ampeg_attack=0 oscairn_ampeg_decay1=110 oscairn_ampeg_decay2=0 oscairn_ampeg_release=0 oscairn_ampeg_decay1_level=0 oscairn_ampeg_decay2_level=0", 45, 127, 10.488002432590713, 0.05, DecayPer60, 29.6198, 0, 3, 20.0 },

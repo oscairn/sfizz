@@ -586,16 +586,30 @@ ones fading). Unset, nothing changes: 256 a sound. The host sets a limit through
 `contexts[i].limit`, `.reserve` and `.priority` per sound; a limit lowered below what sounds sheds
 at the next block's start (0.3.0 on; tested).
 
-**Long releases.** Release index 127 of the element envelope is 118.9 s per 60 dB (the table is
-measured to 121 and doubles per 8 indices beyond, `ElementTables.cpp`), so a pad released at 127
-rings for about 180 s before its envelope reaches the -90 dB floor, and the voice stays until
-then. Chords of two-region pad notes every half bar at 84 BPM pile up 100 or more such voices in
+**Long releases.** Release index 127 of the element envelope is 105.7 s per 60 dB (0.8.4; 0.8.3
+had 118.9 s: the table was measured to 121 and doubled per 8 indices beyond, which is right for
+122 to 126 and wrong at 127, where the reference's value equals 126's). A pad released at 127
+rings for about 160 s before its envelope reaches the -90 dB floor, and the voice stays until
+then. The reference does the same: its note rings with a straight line in dB at 0.568 dB/s from
+the released level, and its voice ends at about -96 dB (measured: a release-96 note falls
+exponentially to -96.9 dB re the held level and is then digitally silent). Chords of two-region pad notes every half bar at 84 BPM pile up 100 or more such voices in
 20 s (Jacob's "ST Final" "Pad" and "Pad 2": 170 voices after 20 s of playing, all releasing, still
 170 after 60 s of silence, 22 million instructions a block against 3.3 million with a cap of 28),
 and each holds its host note slot until its NOTE_END. That is the reference's model working as
 designed, not a leak; the cap and the voice budget are the bound. The element envelope already
 ends a voice at -90 dB (stock sfizz ends its envelope at -80 dB); a higher threshold would end
 only the last tenth of a release.
+
+**Release measurement (2026-11-14).** A held sine at note 60 (velocity 100, 1 s), release index
+96 to 127, the tail recorded for 20 s (96, 104, 112) or 45 s (116 and above), a line fitted to
+the dB envelope between -3 dB and the noise floor. Seconds per 60 dB, reference against the
+table: 96 7.94 (7.94), 104 15.84, 112 31.72, 116 43.28, 120 63.44 (63.43), 121 68.0 (67.96), 122 73.26
+(73.19), 123 79.29 (79.29), 124 86.48 (86.50), 125 95.09 (95.15), 126 105.68 (105.72), 127 105.68
+(table 118.94, now 105.72). The decay is one straight line in dB from the released level
+to the end of every recording (early and late halves of the fit agree to 0.01 dB/s); there is no
+change of slope and no floor above the end of the recordings (127: 17.9 dB of line seen, ends
+at -25 dB re held; a voice-end level of about -96 dB was seen at index 96). Probes
+`eg3/rel_123` and `eg3/rel_127` in `OscairnReferenceData.h` pin 123 and 127.
 
 **What the host reads.** `oscairn.voice-budget` `active_voices`: every voice not free in the sounds
 the plugin renders (releasing, fading and stolen-but-fading ones included), summed over the
@@ -2374,3 +2388,4 @@ repository, or the local scripts beside the renders).
 | K63 | A full note table | The 257th note ends the oldest held note (fading its key's voices, sending its NOTE_END) so that the new one is tracked | Only 256 notes are tracked | Deliberate | `clap/test.cpp` `fullNoteTable` | `clap/plugin.cpp` `applyEvent` |
 | K64 | An element with zero constant gain | Ends at the end of its first block (nothing could ever sound); the reference's behaviour for a velocity that mutes an element is not measured (K4 for velocity 1 only) | Looping an unheard voice costs CPU | Deliberate | `clap/test.cpp` `silentElements` | `src/sfizz/Voice.cpp` |
 | K65 | Voice stealing order with a device cap | With `OSCAIRN_SAMPLER_MAX_VOICES` (or a host limit) the voice budget's order decides which voice goes: releasing before held, then the quieter, then the older. Stock sfizz's engine limit steals the oldest voice whether held or releasing (the fork's 256 voices still do) | The device cannot render the reference's 128 voices | Deliberate; unset, stock's order | `clap/test.cpp` `voiceCap` | `clap/plugin.cpp` `budgetSetLimits` |
+| K66 | Where a released element voice ends | The element envelope ends a voice at -90 dB below its released level | The reference's voice ends at about -96 dB (measured at release index 96: the line in dB runs to -96.9 dB, then digital silence). Ours ends 6 dB early, 10.6 s at index 127 (105.7 s per 60 dB). Not measured at higher indices (recordings stop at 45 s) | Open: a one-constant change if wanted; not changed because 0.8.4 is a table fix | `tests/OscairnReferenceT.cpp` does not pin it | `src/sfizz/oscairn/ElementEnvelope.cpp` |
