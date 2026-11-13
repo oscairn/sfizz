@@ -586,6 +586,10 @@ ones fading). Unset, nothing changes: 256 a sound. The host sets a limit through
 `contexts[i].limit`, `.reserve` and `.priority` per sound; a limit lowered below what sounds sheds
 at the next block's start (0.3.0 on; tested).
 
+`OSCAIRN_SAMPLER_MAX_VOICES_PER_SOUND` (same range and rules, unreleased after 0.8.4) caps each
+sound on its own: a sound's limit is the lower of the host's limit for it and this cap, so one
+sound's tails cannot take the instance cap from the others. Unset, nothing changes.
+
 **Long releases.** Release index 127 of the element envelope is 105.7 s per 60 dB (0.8.4; 0.8.3
 had 118.9 s: the table was measured to 121 and doubled per 8 indices beyond, which is right for
 122 to 126 and wrong at 127, where the reference's value equals 126's). A pad released at 127

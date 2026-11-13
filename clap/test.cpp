@@ -877,6 +877,79 @@ void voiceCap()
     }
 }
 
+// A per-sound cap (OSCAIRN_SAMPLER_MAX_VOICES_PER_SOUND, read when the instance is created): each
+// sound plays at most that many voices, whatever the others do; a host limit on the sound below it
+// stands; the instance cap still bounds the sum; every cut note ends with one NOTE_END
+struct SoundCapEnvironment {
+    explicit SoundCapEnvironment(const char* value) { setenv("OSCAIRN_SAMPLER_MAX_VOICES_PER_SOUND", value, 1); }
+    ~SoundCapEnvironment() { unsetenv("OSCAIRN_SAMPLER_MAX_VOICES_PER_SOUND"); }
+};
+void soundCap()
+{
+    const std::string longRelease = "<region> sample=*sine amp_veltrack=0 ampeg_release=5\n";
+    // two sounds: the default on channel 0, a second on channel 1; each plays `notes` held notes
+    auto run = [&](const char* soundCap, const char* deviceCap, uint32_t hostLimit, uint32_t notes, uint32_t& a, uint32_t& b, int& balanced) {
+        std::unique_ptr<SoundCapEnvironment> perSound;
+        std::unique_ptr<CapEnvironment> device;
+        if (soundCap)
+            perSound.reset(new SoundCapEnvironment(soundCap));
+        if (deviceCap)
+            device.reset(new CapEnvironment(deviceCap));
+        Probe p(longRelease);
+        auto* ctx = static_cast<const oscairn_plugin_sound_contexts_t*>(p.plugin->get_extension(p.plugin, OSCAIRN_EXT_SOUND_CONTEXTS));
+        char message[256] {};
+        const uint32_t second = ctx->prepare(p.plugin, "Second", nullptr, 0, longRelease.c_str(), nullptr, message, sizeof(message));
+        CHECK(second != CLAP_INVALID_ID && ctx->select(p.plugin, second, 1));
+        if (hostLimit) { // the host's limit on the second sound alone
+            oscairn_voice_budget_context_t entry = selectedEntry(hostLimit, 0, 5);
+            entry.context = second;
+            setLimits(p.plugin, 0, { entry });
+        }
+        for (uint32_t i = 0; i < notes; ++i) {
+            p.on(static_cast<int32_t>(i), static_cast<int16_t>(40 + i), 0);
+            p.blocks(1);
+        }
+        for (uint32_t i = 0; i < 6; ++i) { // the second sound plays 6 notes
+            p.on(static_cast<int32_t>(100 + i), static_cast<int16_t>(40 + i), 1);
+            p.blocks(1);
+        }
+        p.blocks(4);
+        oscairn_sound_context_info_t info {};
+        CHECK(ctx->get(p.plugin, 0, &info));
+        a = info.active_voices;
+        CHECK(ctx->get(p.plugin, 1, &info));
+        b = info.active_voices;
+        for (uint32_t i = 0; i < notes; ++i)
+            p.off(static_cast<int32_t>(i), static_cast<int16_t>(40 + i), 0);
+        for (uint32_t i = 0; i < 6; ++i)
+            p.off(static_cast<int32_t>(100 + i), static_cast<int16_t>(40 + i), 1);
+        p.cc(123, 0);
+        p.cc(123, 0, 1);
+        p.seconds(6);
+        balanced = 0;
+        for (uint32_t i = 0; i < notes; ++i)
+            balanced += p.events.ends(static_cast<int32_t>(i)) != 1;
+        for (uint32_t i = 0; i < 6; ++i)
+            balanced += p.events.ends(static_cast<int32_t>(100 + i)) != 1;
+    };
+    uint32_t a = 0, b = 0;
+    int balanced = 0;
+    run("4", nullptr, 0, 10, a, b, balanced); // 10 notes against a cap of 4: the other sound's 6 are its own
+    CHECK(a == 4 && b == 4 && balanced == 0);
+    run("8", nullptr, 0, 10, a, b, balanced); // the sound with 6 is under the cap: untouched
+    CHECK(a == 8 && b == 6 && balanced == 0);
+    run("8", nullptr, 3, 10, a, b, balanced); // the second sound's host limit, below the cap, stands
+    CHECK(a == 8 && b == 3 && balanced == 0);
+    run("2", nullptr, 5, 10, a, b, balanced); // the cap below the host's limit stands
+    CHECK(a == 2 && b == 2 && balanced == 0);
+    run("4", "5", 0, 10, a, b, balanced); // both caps: the instance's bounds the sum
+    CHECK(a <= 4 && b <= 4 && a + b == 5 && balanced == 0);
+    for (const char* bad : { "0", "-3", "x", "9999", "4x", "" }) { // not a cap: ignored
+        run(bad, nullptr, 0, 10, a, b, balanced);
+        CHECK(a == 10 && b == 6 && balanced == 0);
+    }
+}
+
 // The voices and slots a pile of notes without note-offs can take, and what the host's limit does
 void stackedNotes(const std::string& sound, int notes, bool oneBlock)
 {
@@ -924,6 +997,7 @@ int main(int argc, char** argv)
             noteBalance(*sound, budget, 12345 + (budget ? 1 : 0));
     fullNoteTable();
     voiceCap();
+    soundCap();
     voiceCounts();
     silentElements();
     stackedNotes(loopContinuous, 600, false);

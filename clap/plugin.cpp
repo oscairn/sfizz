@@ -206,6 +206,7 @@ struct Plugin {
     const clap_output_events_t* out { nullptr }; // the block's, for NOTE_END from event handling
     std::vector<float> left, right, mix[2 * busCount];
     oscairn_sampler::VoiceBudget budget; // the host's limits, as set_limits last gave them, under deviceCap
+    uint32_t soundCap { 0 }; // OSCAIRN_SAMPLER_MAX_VOICES_PER_SOUND at creation: voices one sound plays at most (0: the host's limit alone)
     uint32_t deviceCap { 0 }; // OSCAIRN_SAMPLER_MAX_VOICES at creation: voices the instance plays at most (0: the host's limit alone)
     // One voice's cost in microseconds a block: a running mean of the audio thread's block time
     // over the voices of the block, kept through blocks with none; 0 before any voice. Written by
@@ -517,7 +518,7 @@ void keepWithinLimits(Plugin& s, uint32_t incoming, int delay)
 {
     using oscairn_sampler::VoiceBudget;
     VoiceBudget& budget = s.budget;
-    if (!budget.limited())
+    if (!budget.limited() && !s.soundCap)
         return;
     budget.clearCandidates();
     size_t count = 0;
@@ -566,8 +567,10 @@ void keepWithinLimits(Plugin& s, uint32_t incoming, int delay)
         return true;
     };
     for (uint32_t i = 0; i < contextCount; ++i) {
-        const uint32_t own = ids[i] == VoiceBudget::none ? 0
+        uint32_t own = ids[i] == VoiceBudget::none ? 0
             : budget.limitOf(ids[i], s.contexts[i].selectedChannels.load(std::memory_order_relaxed) != 0);
+        if (s.soundCap && (!own || own > s.soundCap))
+            own = s.soundCap;
         while (own && kept[i] > own && giveUp(i)) {
         }
     }
@@ -1876,6 +1879,11 @@ const clap_plugin_t* createPlugin(const clap_plugin_factory_t*, const clap_host_
         s->deviceCap = static_cast<uint32_t>(capValue);
         s->budget.setLimits(s->deviceCap, nullptr, 0);
     }
+    const char* soundCap = std::getenv("OSCAIRN_SAMPLER_MAX_VOICES_PER_SOUND");
+    char* soundCapEnd = nullptr;
+    const long soundCapValue = soundCap && *soundCap ? std::strtol(soundCap, &soundCapEnd, 10) : 0;
+    if (soundCap && *soundCap && !*soundCapEnd && soundCapValue >= 1 && soundCapValue <= static_cast<long>(voicesPerSound))
+        s->soundCap = static_cast<uint32_t>(soundCapValue);
     s->host = host;
     s->plugin.desc = &descriptor;
     s->plugin.plugin_data = s;
