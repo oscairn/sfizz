@@ -560,6 +560,8 @@ region count); `asset_bytes` the preloads, each buffer once. The CLAP tests chec
 activating allocate no more than the estimate and less than twice it plus 4 MB, and that `current`
 covers what the plugin holds while notes are held.
 
+**The loader's scheduling** (0.8.1): an ordinary thread; `OSCAIRN_SAMPLER_LOADER_PRIORITY` (`rr:<n>`, `fifo:<n>`, `stock`) selects a real-time one (decision 42).
+
 **The memory policy** (optimisation session, `memoryPolicyPreload` in `clap/plugin.cpp`). Each sound
 gets its preload as it loads. `OSCAIRN_SAMPLER_MEMORY=minimal` gives 2048 frames, `generous` 16384.
 Otherwise, on Linux, the room is the kernel's MemAvailable, or what the process's cgroup limit
@@ -972,6 +974,9 @@ Taken in the element model session (2026-11-07), for Jacob to confirm:
 41. **gcc stays the Linux compiler** (optimisation session): clang gives element voices about 12 %
     fewer instructions and decodes FLAC with 22 % more (section 11); too small and mixed to move the
     release build and its dependency check.
+42. **The loader thread is not real-time by default** (plugin 0.8.1): SCHED_OTHER, so it cannot hold
+    a core against the kernel's interrupt threads or the audio thread; `OSCAIRN_SAMPLER_LOADER_PRIORITY`
+    (`rr:<n>`, `fifo:<n>`, `stock`) restores a real-time one (K61, section 11).
 
 Risks and open questions:
 
@@ -2110,10 +2115,32 @@ stock mono 7 % more, and FLAC decoding 22 % more (dr_flac, 20 of Jacob's files: 
 million instructions; timed, both 1.1 to 1.3 us per channel-millisecond in Docker, not the factor
 of two the memory session saw). Decision 41: gcc stays.
 
-**Per-voice cost for the host.** The plugin's voice budget reports `active_voices` with a cost of 0
-(`budgetActiveVoices`). It could fill that `voice_cost` from a running mean of its own block time
-divided by its voices (one clock read a block, which the timing statistics already make), which is
-the cheap figure the host asks for, through the existing `oscairn.voice-budget` report; not built.
+**Per-voice cost for the host.** The plugin's voice budget reported `active_voices` with a cost of 0.
+Built in 0.8.1 (see "Loader priority and the cost hint" below).
+
+### Loader priority and the cost hint (2026-11-13): plugin 0.8.1
+
+**The loader thread is an ordinary thread.** The only thread the fork or sfizz raises to a
+real-time policy is the file loader (`FilePool::raiseCurrentThreadPriority`, called by the
+dispatching job and by `loadingJob`): SCHED_RR at `backgroundLoaderPthreadPriority` (50 %, which is
+priority 50 on Linux). The garbage collection thread is never raised. On the device (Linux 4.19) that
+is level with the kernel's threaded interrupt handlers (FIFO 50, the eMMC the samples come from)
+and the loader decodes every queued chunk in one go, the leading suspect for the 10 to 24 ms
+blocks that cluster after loading and first notes. Now the Oscairn Sampler sets
+`FilePool::setLoaderScheduling` when an instance is created, and the default is SCHED_OTHER
+(explicitly set, since a thread inherits the policy of the thread that made it). Stock sfizz and
+the stock gate are unchanged: `FilePool`'s default stays stock. `OSCAIRN_SAMPLER_LOADER_PRIORITY`,
+read when an instance is created: unset or `normal` (or anything not below) is SCHED_OTHER;
+`rr:<n>` or `fifo:<n>` is that policy at priority n (clamped to the system's range); `stock` is
+sfizz's own SCHED_RR 50. A late chunk plays silence (K59) and offline renders wait for their chunks,
+so renders are unchanged. Whether it removes the long blocks is not measured: that needs the device.
+
+**The cost hint.** `active_voices`'s `voice_cost` is a running mean (weight 0.1 of each block) of
+the audio thread's `process()` time divided by the voices alive at its end, in microseconds a block at
+the block size the host uses; two clock reads a block (none per voice), blocks with no voices leave
+it as it was, 0 before any voice. It is an `std::atomic<double>` the audio thread writes and the
+host's `active_voices` call reads. Voices that ended inside the block are not counted, so it errs
+high, and it includes the block's event handling and mixing.
 
 ### Upstream merge test (2026-11-01)
 
@@ -2192,3 +2219,4 @@ repository, or the local scripts beside the renders).
 | K58 | Voices | The reference's sample engine plays 128 voices for all its parts together; each Oscairn Sampler sound plays up to 256 (512 slots with fading ones), and the host's voice budget sets the limit across parts | Engine size chosen for headroom; the budget is the real limit | Accepted (memory session) | CLAP test "voices: a sound plays up to 256" | `clap/plugin.cpp` (`voicesPerSound`), `Config.h` |
 | K59 | A streamed chunk not decoded in time | In real time, the frames of a long sample whose chunk the loader has not brought yet play as silence and the voice goes on (stock sfizz ended the voice at the frames loaded so far); on the reference, not measured | Streaming in chunks (memory session); offline renders wait and are unaffected | Accepted; only under a loader that falls behind | CLAP test "a voice whose next chunk is late" | `FilePool::gather`, `Voice.cpp` |
 | K60 | Element voices at a lower sample quality | Only when a sound sets `sample_quality` 1 (or 0) or the device sets `OSCAIRN_SAMPLER_ELEMENT_QUALITY` to it: linear interpolation instead of Hermite; against Hermite the renders differ by -41 to -60 dB (RMS of the difference, four of Jacob's sounds); against the reference not measured | A setting for small devices (about 6 % of an element voice's instructions) | Off by default; for Jacob | A/B files in `forks/measurements/sampler-quality-2026-11-13/` | `Voice::Impl::getCurrentSampleQuality`, `clap/plugin.cpp` |
+| K61 | Loader thread scheduling | The Sampler's file loader is SCHED_OTHER; stock sfizz runs it SCHED_RR at 50 % of the range (`OSCAIRN_SAMPLER_LOADER_PRIORITY=stock` or `rr:<n>` restores that); not a reference behaviour, sound is unaffected except that a late chunk (K59) may come later | Real-time at the interrupt threads' level can hold a core against them and the audio thread (section 11) | Accepted; effect on the device's long blocks unmeasured | CLAP test "the sample loader thread is an ordinary thread" | `FilePool::raiseCurrentThreadPriority`, `applyLoaderScheduling` in `clap/plugin.cpp` |
