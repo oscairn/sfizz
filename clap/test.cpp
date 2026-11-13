@@ -496,6 +496,262 @@ double totalMB(const oscairn_memory_t& m, bool withCache)
     return (m.shared_bytes - cache + m.context_bytes + m.asset_bytes) / 1048576.0;
 }
 
+// Note lifetimes: a sound, 128-frame blocks at 48 kHz (375 a second), and what the plugin reports
+struct Probe {
+    const clap_plugin_t* plugin;
+    Run run;
+    Events events;
+    explicit Probe(const std::string& sfz, uint32_t frames = 128) : plugin(create()), run { plugin }
+    {
+        CHECK(load(plugin, stateFor(sfz, "", "", OSCAIRN_TEST_FILES)));
+        CHECK(plugin->activate(plugin, 48000, 1, frames));
+    }
+    ~Probe()
+    {
+        plugin->deactivate(plugin);
+        plugin->destroy(plugin);
+    }
+    void on(int32_t id, int16_t key, int16_t channel = 0, double velocity = 1.0, uint32_t time = 0)
+    {
+        events.note(CLAP_EVENT_NOTE_ON, time, id, key, velocity, channel);
+    }
+    void off(int32_t id, int16_t key, int16_t channel = 0, uint32_t time = 0)
+    {
+        events.note(CLAP_EVENT_NOTE_OFF, time, id, key, 0.0, channel);
+    }
+    void choke(int32_t id, int16_t key, int16_t channel = 0) { events.note(CLAP_EVENT_NOTE_CHOKE, 0, id, key, 0.0, channel); }
+    void cc(uint8_t number, uint8_t value, int channel = 0) { events.midi(0, static_cast<uint8_t>(0xb0 | channel), number, value); }
+    void blocks(int n)
+    {
+        for (int i = 0; i < n; ++i)
+            run.block(events, 128);
+    }
+    void seconds(double s) { blocks(static_cast<int>(s * 375)); }
+    uint32_t voices() { return activeVoices(plugin); }
+    // Blocks until no voice sounds, at most `limit` seconds: seconds taken, or -1
+    double settle(double limit = 3.0)
+    {
+        for (int b = 0; b < static_cast<int>(limit * 375); ++b) {
+            if (!voices())
+                return b / 375.0;
+            blocks(1);
+        }
+        return voices() ? -1.0 : limit;
+    }
+};
+
+// Sounds the lifetimes are tried on: a looped sample (loop_continuous and loop_sustain), a plain
+// endless one, a one-shot, and a converted sound's elements (two sustained, one key-off element)
+const std::string loopContinuous = "<region> sample=looped_flute.wav loop_mode=loop_continuous ampeg_release=0.05\n";
+const std::string loopSustain = "<region> sample=looped_flute.wav loop_mode=loop_sustain ampeg_release=0.05\n";
+const std::string endless = "<region> sample=*sine ampeg_release=0.05\n";
+const std::string oneShot = "<region> sample=looped_flute.wav loop_mode=one_shot ampeg_release=0.05\n";
+const std::string keyed = "<region> sample=*sine key=60 ampeg_release=0.05\n";
+const std::string elements =
+    "<control> oscairn_profile=1\n<global> amp_veltrack=0 sample=*sine oscairn_ampeg_attack=0 oscairn_ampeg_release=40\n"
+    "<region> oscairn_element=1\n<region> oscairn_element=2 volume=-6\n"
+    "<region> oscairn_element=3 trigger=release rt_dead=1 oscairn_keyoff=1\n";
+
+struct Scenario {
+    const char* name;
+    const std::string* sound;
+    void (*play)(Probe&); // the sequence after the note (id 1, key 60, 0.5 s on); the first block is not yet run
+    bool quiet;           // every voice ends within 5 s
+    int ends;             // NOTE_END for id 1 over the scenario
+    int other = -1;       // another note id the sequence starts, which has the same fate
+};
+
+// A sequence that leaves voices sounding is correct when SFZ says so (a sustain pedal left down, a
+// sostenuto that caught the note, a note never released): the host's all-notes-off, a choke or a
+// reset ends those
+const Scenario scenarios[] = {
+    { "note-on, never a note-off", &loopContinuous, [](Probe&) {}, false, 0 },
+    { "matching note-off", &loopContinuous, [](Probe& p) { p.off(1, 60); }, true, 1 },
+    { "note-off, id differs, key and channel match", &loopContinuous, [](Probe& p) { p.off(99, 60); }, true, 1 },
+    { "note-off, id -1", &loopContinuous, [](Probe& p) { p.off(-1, 60); }, true, 1 },
+    { "note-off, id matches, key differs", &loopContinuous, [](Probe& p) { p.off(1, 61); }, true, 1 },
+    { "note-off, id matches, channel differs", &loopContinuous, [](Probe& p) { p.off(1, 60, 1); }, true, 1 },
+    { "note-off, id, key and channel all differ", &loopContinuous, [](Probe& p) { p.off(99, 61, 1); }, false, 0 },
+    { "two note-ons on a key (ids 1, 2), note-off 1", &loopContinuous, [](Probe& p) { p.on(2, 60); p.off(1, 60); }, true, 1, 2 },
+    { "two note-ons on a key (ids 1, 2), note-off 2", &loopContinuous, [](Probe& p) { p.on(2, 60); p.off(2, 60); }, true, 1, 2 },
+    { "two note-ons on a key, ids -1, note-off -1", &loopContinuous, [](Probe& p) { p.on(-1, 60); p.off(-1, 60); }, true, 1 },
+    { "the same note-on twice (a retrigger), one note-off", &loopContinuous, [](Probe& p) { p.on(1, 60); p.off(1, 60); }, true, 1 },
+    { "note-off before its note-on, one block", &loopContinuous, [](Probe& p) { p.off(1, 60); p.off(5, 62, 0, 10); p.on(5, 62, 0, 1.0, 20); }, false, 1, 5 },
+    { "note-on and note-off at the same sample", &loopContinuous, [](Probe& p) { p.off(1, 60); p.on(5, 62, 0, 1.0, 20); p.off(5, 62, 0, 20); }, true, 1, 5 },
+    { "note-off in an earlier block than its note-on", &loopContinuous, [](Probe& p) { p.off(1, 60); p.off(5, 62); p.blocks(1); p.on(5, 62); }, false, 1, 5 },
+    { "MIDI note-on of velocity 0 is a note-off", &loopContinuous, [](Probe& p) { p.events.midi(0, 0x90, 60, 0); }, true, 1 },
+    { "CLAP note-on of velocity 0 is a note-on", &loopContinuous, [](Probe& p) { p.off(1, 60); p.on(7, 62, 0, 0.0); }, false, 1, 7 },
+    { "sustain down, note-off, sustain up", &loopContinuous, [](Probe& p) { p.cc(64, 127); p.blocks(1); p.off(1, 60); p.blocks(40); p.cc(64, 0); }, true, 1 },
+    { "sustain left down after the note-off", &loopContinuous, [](Probe& p) { p.cc(64, 127); p.blocks(1); p.off(1, 60); }, false, 0 },
+    { "sustain left down, then CC 120", &loopContinuous, [](Probe& p) { p.cc(64, 127); p.blocks(1); p.off(1, 60); p.blocks(40); p.cc(120, 0); }, true, 1 },
+    { "sustain left down, then CC 123", &loopContinuous, [](Probe& p) { p.cc(64, 127); p.blocks(1); p.off(1, 60); p.blocks(40); p.cc(123, 0); }, true, 1 },
+    { "note held, CC 120", &loopContinuous, [](Probe& p) { p.cc(120, 0); }, true, 1 },
+    { "note held, CC 123", &loopContinuous, [](Probe& p) { p.cc(123, 0); }, true, 1 },
+    { "sostenuto down over a held note, note-off", &loopContinuous, [](Probe& p) { p.cc(66, 127); p.blocks(1); p.off(1, 60); }, false, 0 },
+    { "sostenuto down over a held note, note-off, sostenuto up", &loopContinuous, [](Probe& p) { p.cc(66, 127); p.blocks(1); p.off(1, 60); p.blocks(40); p.cc(66, 0); }, true, 1 },
+    { "note held, reset() (no NOTE_END: the host ends it)", &loopContinuous, [](Probe& p) { p.plugin->reset(p.plugin); }, true, 0 },
+    { "note held, deactivate and activate (no NOTE_END)", &loopContinuous, [](Probe& p) { p.plugin->deactivate(p.plugin); p.plugin->activate(p.plugin, 48000, 1, 128); }, true, 0 },
+    { "note held, choke with id -1", &loopContinuous, [](Probe& p) { p.choke(-1, 60); }, true, 1 },
+    { "note held, choke with its id", &loopContinuous, [](Probe& p) { p.choke(1, 60); }, true, 1 },
+    { "pitch bend, then note-off", &loopContinuous, [](Probe& p) { p.events.midi(0, 0xe0, 0, 127); p.off(1, 60); }, true, 1 },
+    { "note-on with a channel that is not one (never starts)", &loopContinuous, [](Probe& p) { p.off(1, 60); p.on(9, 62, -1); }, true, 1, 9 },
+    { "note-on with a key that is not one (never starts)", &loopContinuous, [](Probe& p) { p.off(1, 60); p.on(9, 200); }, true, 1, 9 },
+    { "loop_sustain, note-off", &loopSustain, [](Probe& p) { p.off(1, 60); }, true, 1 },
+    { "loop_sustain, never released", &loopSustain, [](Probe&) {}, false, 0 },
+    { "endless sample, note-off", &endless, [](Probe& p) { p.off(1, 60); }, true, 1 },
+    { "one-shot, never released: the sample ends", &oneShot, [](Probe&) {}, true, 1 },
+    { "one-shot, note-off", &oneShot, [](Probe& p) { p.off(1, 60); }, true, 1 },
+    { "a key no region covers", &keyed, [](Probe& p) { p.off(1, 60); p.on(9, 61); }, true, 1, 9 },
+    { "elements, note-off (the key-off element rings 2 s)", &elements, [](Probe& p) { p.off(1, 60); }, true, 1 },
+    { "elements, never released", &elements, [](Probe&) {}, false, 0 },
+    { "elements, sustain down, note-off, sustain up", &elements, [](Probe& p) { p.cc(64, 127); p.blocks(1); p.off(1, 60); p.blocks(40); p.cc(64, 0); }, true, 1 },
+    { "elements, sustain left down", &elements, [](Probe& p) { p.cc(64, 127); p.blocks(1); p.off(1, 60); }, false, 0 },
+    { "elements, note-off with another id", &elements, [](Probe& p) { p.off(99, 60); }, true, 1 },
+    { "elements, choke", &elements, [](Probe& p) { p.choke(1, 60); }, true, 1 },
+    { "elements, CC 123", &elements, [](Probe& p) { p.cc(123, 0); }, true, 1 },
+};
+
+void noteLifetimes()
+{
+    for (const Scenario& sc : scenarios) {
+        Probe p(*sc.sound);
+        p.on(1, 60);
+        p.seconds(0.5);
+        CHECK(p.voices() > 0);
+        sc.play(p);
+        const double took = p.settle(5.0);
+        const bool quiet = took >= 0;
+        if (quiet != sc.quiet || p.events.ends(1) != sc.ends || (sc.other >= 0 && p.events.ends(sc.other) != (sc.quiet ? 1 : 0)) ) {
+            std::printf("scenario \"%s\": %s after %.2f s, NOTE_END %d, other %d\n", sc.name, quiet ? "quiet" : "sounding", took, p.events.ends(1),
+                        sc.other >= 0 ? p.events.ends(sc.other) : -1);
+            CHECK(!"note lifetime scenario");
+        }
+        if (!sc.quiet) { // what ends it: the host's all-sound-off
+            p.cc(120, 0);
+            p.blocks(8);
+            CHECK(p.voices() == 0);
+        }
+    }
+}
+
+// Random note traffic (stacked notes past the voice limit, retriggers, note-offs with wrong ids,
+// chokes, pedals, all-notes-off, a lowered voice budget), then everything released: every note-on
+// of a distinct id has had exactly one NOTE_END, and nothing sounds
+void noteBalance(const std::string& sound, bool budget, uint32_t seed)
+{
+    Probe p(sound, 128);
+    uint32_t rng = seed;
+    auto next = [&](uint32_t n) { rng = rng * 1664525u + 1013904223u; return (rng >> 8) % n; };
+    std::vector<int32_t> ids;
+    std::vector<int16_t> keys, channels;
+    int32_t id = 100;
+    uint32_t peak = 0;
+    for (int b = 0; b < 6000; ++b) {
+        if (budget && b == 2000)
+            setLimits(p.plugin, 48);
+        const uint32_t events = next(4);
+        for (uint32_t e = 0; e < events; ++e) {
+            const uint32_t what = next(100);
+            int16_t key = static_cast<int16_t>(40 + next(50)), channel = static_cast<int16_t>(next(3));
+            const uint32_t time = next(128);
+            if (b < 1500 && what >= 70)
+                continue; // the first part only piles notes up
+            if (b < 1500 ? what < 70 : what < 20) { // more notes than the voices at first
+                // one in ten repeats a live note (its id, key and channel): a retrigger; a used id
+                // is not reused otherwise (the host's reuse after NOTE_END would count twice)
+                int32_t use = id;
+                if (next(10) == 0 && !ids.empty()) {
+                    const size_t at = next(static_cast<uint32_t>(ids.size()));
+                    if (p.events.ends(ids[at]) == 0)
+                        use = ids[at], key = keys[at], channel = channels[at];
+                }
+                if (use == id) {
+                    ++id;
+                    ids.push_back(use), keys.push_back(key), channels.push_back(channel);
+                }
+                p.on(use, key, channel, 0.2 + next(80) / 100.0, time);
+            } else if (what < 75) {
+                const uint32_t how = next(4);
+                const int32_t use = ids.empty() ? -1 : ids[next(static_cast<uint32_t>(ids.size()))];
+                p.off(how == 0 ? -1 : how == 1 ? use + 7 : use, key, channel, time); // a wrong key or id is the sender's
+            } else if (what < 80)
+                p.choke(ids.empty() ? -1 : ids[next(static_cast<uint32_t>(ids.size()))], -1, -1);
+            else if (what < 83)
+                p.cc(64, next(2) ? 127 : 0, static_cast<int>(next(3)));
+            else if (what < 84)
+                p.cc(123, 0, static_cast<int>(next(3)));
+        }
+        std::stable_sort(p.events.in.begin(), p.events.in.end(), [](const std::vector<uint8_t>& a, const std::vector<uint8_t>& b) {
+            return reinterpret_cast<const clap_event_header_t*>(a.data())->time < reinterpret_cast<const clap_event_header_t*>(b.data())->time;
+        }); // the host's events come in time order
+        p.blocks(1);
+        peak = std::max(peak, p.voices());
+        CHECK(p.voices() <= 512);
+    }
+    CHECK(peak >= 200); // the voice limit and the note table were reached
+    for (int16_t c = 0; c < 3; ++c) {
+        p.cc(64, 0, c);
+        for (int16_t k = 40; k < 90; ++k)
+            p.off(-1, k, c);
+    }
+    p.cc(123, 0); // what a stuck pedal or a lost note-off needs
+    p.seconds(6);
+    CHECK(p.voices() == 0);
+    int wrong = 0;
+    for (int32_t i : ids)
+        wrong += p.events.ends(i) != 1;
+    if (wrong) {
+        std::printf("note balance: %d of %zu note ids without exactly one NOTE_END\n", wrong, ids.size());
+        int shown = 0;
+        for (int32_t i : ids)
+            if (p.events.ends(i) != 1 && shown++ < 5)
+                std::printf("  id %d: %d\n", i, p.events.ends(i));
+    }
+    CHECK(wrong == 0);
+}
+
+// A full note table: the 257th note is tracked (the oldest held note, most likely one whose
+// note-off was lost, ends with its NOTE_END), so its own note-off reaches its voices
+void fullNoteTable()
+{
+    Probe p(endless);
+    for (int i = 0; i < 256; ++i)
+        p.on(i, 40, static_cast<int16_t>(i % 16));
+    p.blocks(2);
+    p.on(1000, 60);
+    p.blocks(2);
+    CHECK(p.events.ends(0) == 1);
+    CHECK(p.events.ends(1000) == 0);
+    p.off(1000, 60);
+    p.seconds(0.3);
+    CHECK(p.events.ends(1000) == 1);
+    CHECK(p.events.ends(0) == 1);
+}
+
+// The voices and slots a pile of notes without note-offs can take, and what the host's limit does
+void stackedNotes(const std::string& sound, int notes, bool oneBlock)
+{
+    Probe p(sound);
+    uint32_t peak = 0;
+    for (int i = 0; i < notes; ++i) {
+        p.on(1000 + i, static_cast<int16_t>(36 + i % 60), static_cast<int16_t>(i % 16));
+        if (!oneBlock || i == notes - 1) {
+            p.blocks(1);
+            peak = std::max(peak, p.voices());
+        }
+    }
+    p.seconds(0.05); // a stolen voice fades over its off time (6 ms) and gives its slot back
+    CHECK(peak <= 512);
+    CHECK(p.voices() <= 256);
+    setLimits(p.plugin, 32);
+    p.seconds(0.05);
+    CHECK(p.voices() <= 32);
+    for (int i = 0; i < notes; ++i)
+        p.off(1000 + i, static_cast<int16_t>(36 + i % 60), static_cast<int16_t>(i % 16));
+    p.seconds(5);
+    CHECK(p.voices() == 0);
+}
+
 } // namespace
 
 int main(int argc, char** argv)
@@ -513,6 +769,14 @@ int main(int argc, char** argv)
             entry->deinit();
         }
     }
+    noteLifetimes();
+    for (const std::string* sound : { &endless, &loopSustain, &elements })
+        for (bool budget : { false, true })
+            noteBalance(*sound, budget, 12345 + (budget ? 1 : 0));
+    fullNoteTable();
+    stackedNotes(loopContinuous, 600, false);
+    stackedNotes(loopContinuous, 600, true);
+    stackedNotes(elements, 400, true);
     { // interface, ports
         auto* plugin = create();
         CHECK(plugin->init && plugin->destroy && plugin->activate && plugin->deactivate && plugin->start_processing

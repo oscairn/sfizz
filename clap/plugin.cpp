@@ -202,6 +202,7 @@ struct Plugin {
     uint32_t busesInUse[contextCount] {}; // buses a context's voices may be on: its own, and older ones until it is silent
     Note notes[maxNotes];
     size_t noteCount { 0 };
+    const clap_output_events_t* out { nullptr }; // the block's, for NOTE_END from event handling
     std::vector<float> left, right, mix[2 * busCount];
     oscairn_sampler::VoiceBudget budget; // the host's limits, as set_limits last gave them
     // One voice's cost in microseconds a block: a running mean of the audio thread's block time
@@ -647,28 +648,81 @@ void applyEvent(Plugin& s, const clap_event_header_t* h, int delay)
     case CLAP_EVENT_NOTE_OFF:
     case CLAP_EVENT_NOTE_CHOKE: {
         const auto* n = reinterpret_cast<const clap_event_note_t*>(h);
-        if (n->port_index > 0 || n->key > 127)
+        if (n->port_index > 0 || n->key > 127) {
+            if (h->type == CLAP_EVENT_NOTE_ON)
+                endNote(s.out, { n->note_id, n->channel, n->key, 0, true }, h->time); // never started
             return;
+        }
         const float velocity = static_cast<float>(std::min(1.0, std::max(n->velocity, 0.0)));
         if (h->type == CLAP_EVENT_NOTE_ON) {
-            if (n->channel < 0 || n->channel > 15 || n->key < 0)
+            if (n->channel < 0 || n->channel > 15 || n->key < 0) {
+                endNote(s.out, { n->note_id, n->channel, n->key, 0, true }, h->time); // never started: the host's route is freed
                 return;
+            }
             const uint32_t context = s.channelContext[n->channel];
+            Engine* e = s.contexts[context].live.load(std::memory_order_relaxed);
+            // The same note again (its id, key and channel) is one note retriggered: the voices it
+            // has fade out, and it keeps its one table entry and its one NOTE_END
+            Note* again = nullptr;
+            for (size_t i = 0; n->note_id >= 0 && i < s.noteCount && !again; ++i) {
+                Note& note = s.notes[i];
+                if (note.id == n->note_id && note.channel == n->channel && note.key == n->key && note.context == context)
+                    again = &note;
+            }
+            if (again && e)
+                e->synth.fadeOutNote(delay, n->key, static_cast<int>(s.chokeFrames));
             // A velocity-0 note-on stays a note-on (Oscairn RFC 0005); sfizz needs a velocity
             // above 0 to start a voice, so use the smallest one it distinguishes.
-            if (Engine* e = s.contexts[context].live.load(std::memory_order_relaxed)) {
+            if (e) {
                 e->synth.hdNoteOn(delay, n->key, std::max(velocity, 1.0f / 127.0f));
                 keepWithinLimits(s, context, delay);
             }
-            if (s.noteCount < maxNotes)
-                s.notes[s.noteCount++] = { n->note_id, n->channel, n->key, context, false };
+            if (again) {
+                again->released = false;
+                return;
+            }
+            if (s.noteCount == maxNotes) {
+                // Full: the oldest note still held is most likely one whose note-off was lost.
+                // It ends now (its voices fade, its NOTE_END is sent) so this note is tracked and
+                // its own note-off reaches its voices.
+                size_t victim = 0;
+                while (victim < s.noteCount && s.notes[victim].released)
+                    ++victim;
+                if (victim == s.noteCount)
+                    victim = 0;
+                const Note old = s.notes[victim];
+                if (Engine* oe = s.contexts[old.context].live.load(std::memory_order_relaxed))
+                    oe->synth.fadeOutNote(delay, old.key, static_cast<int>(s.chokeFrames));
+                endNote(s.out, old, h->time);
+                std::memmove(s.notes + victim, s.notes + victim + 1, (s.noteCount - victim - 1) * sizeof(Note));
+                --s.noteCount;
+            }
+            s.notes[s.noteCount++] = { n->note_id, n->channel, n->key, context, false };
             return;
         }
-        // Note-off and choke address the notes they match, in the context each started in
-        for (size_t i = 0; i < s.noteCount; ++i) {
+        // Note-off and choke address the notes they match, in the context each started in: those
+        // with the event's id, key and channel (-1 matches any); failing those, the note the id
+        // names (a sender that gets its key or channel wrong); failing that, the notes on the key
+        // and channel (a sender whose id is not one the plugin knows). A note already released
+        // still counts as found, so a repeated note-off ends nothing else.
+        const int32_t id = n->note_id;
+        auto addressed = [&](const Note& note, int pass) {
+            return pass == 0 ? matches(note, id, n->channel, n->key)
+                : pass == 1 ? id >= 0 && note.id == id
+                : id >= 0 && n->key >= 0 && n->channel >= 0 && note.channel == n->channel && note.key == n->key;
+        };
+        int pass = 0;
+        for (; pass < 3; ++pass) {
+            bool found = false;
+            for (size_t i = 0; i < s.noteCount && !found; ++i)
+                found = addressed(s.notes[i], pass);
+            if (found)
+                break;
+        }
+        for (size_t i = 0; i < s.noteCount && pass < 3; ++i) {
             Note& note = s.notes[i];
             Engine* e = s.contexts[note.context].live.load(std::memory_order_relaxed);
-            if (!e || note.released || !matches(note, n->note_id, n->channel, n->key))
+            if (!e || note.released || !addressed(note, pass))
                 continue;
             note.released = true;
             if (h->type == CLAP_EVENT_NOTE_OFF) {
@@ -713,7 +767,15 @@ void applyEvent(Plugin& s, const clap_event_header_t* h, int delay)
         if (!e)
             return;
         switch (kind) {
-        case 0xb0: e->synth.hdcc(delay, a, b / 127.0f); break;
+        case 0xb0:
+            e->synth.hdcc(delay, a, b / 127.0f);
+            // all sound off and all notes off end every voice of the sound, so its notes end
+            // too, including a note kept for a key-off element's note-off that may never come
+            if (a == 120 || a == 123)
+                for (size_t i = 0; i < s.noteCount; ++i)
+                    if (s.contexts[s.notes[i].context].live.load(std::memory_order_relaxed) == e)
+                        s.notes[i].released = true;
+            break;
         case 0xe0: e->synth.pitchWheel(delay, (b << 7 | a) - 8192); break;
         case 0xd0: e->synth.channelAftertouch(delay, a); break;
         case 0xa0: e->synth.polyAftertouch(delay, a, b); break;
@@ -832,6 +894,7 @@ clap_process_status process(const clap_plugin_t* p, const clap_process_t* proces
     if (process->audio_outputs_count < 1 || process->audio_outputs[0].channel_count < 2)
         return CLAP_PROCESS_ERROR;
     const clap_output_events_t* out = process->out_events;
+    s.out = out;
 
     // A new default patch: only once the main thread has collected the last replaced one
     if (!s.retired.load(std::memory_order_acquire)) {
