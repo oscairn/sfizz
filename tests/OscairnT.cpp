@@ -9,6 +9,7 @@
 
 #include "sfizz/Synth.h"
 #include "sfizz/Panning.h"
+#include "sfizz/Interpolators.h"
 #include "sfizz/Region.h"
 #include "sfizz/oscairn/ElementEnvelope.h"
 #include "sfizz/oscairn/ElementFilter.h"
@@ -1608,6 +1609,42 @@ TEST_CASE("[Oscairn] Element filter stays finite below the reference rate")
             }
         }
     }
+}
+
+TEST_CASE("[Oscairn] Hermite interpolation four outputs at a time: the same samples")
+{
+#if SFIZZ_HERMITE3_FOUR
+    // Against interpolate<kInterpolatorHermite3> one output at a time, to the bit: random and
+    // edge positions (0, just below 1, tiny), sources from silence to full scale and beyond
+    std::minstd_rand rng(7);
+    std::uniform_real_distribution<float> unit(0.0f, 1.0f), wide(-4.0f, 4.0f);
+    std::vector<float> left(4096), right(4096);
+    for (size_t i = 0; i < left.size(); ++i) {
+        left[i] = wide(rng) * (i % 7 == 0 ? 1e-6f : 1.0f);
+        right[i] = wide(rng);
+    }
+    const float edges[] = { 0.0f, 0x1.fffffep-1f, 1e-30f, 0.5f, 0.25f, 1e-7f };
+    for (int round = 0; round < 20000; ++round) {
+        int indices[4];
+        float coeffs[4], out[2][4];
+        for (int j = 0; j < 4; ++j) {
+            indices[j] = 1 + static_cast<int>(unit(rng) * 4000.0f);
+            coeffs[j] = round % 3 == 0 ? edges[(round / 3 + j) % 6] : std::min(unit(rng), 0x1.fffffep-1f);
+        }
+        const float* sources[2] = { left.data(), right.data() };
+        float* outputs[2] = { out[0], out[1] };
+        sfz::interpolateHermite3Four(sources, 2, indices, coeffs, outputs);
+        for (int j = 0; j < 4; ++j) {
+            const float l = sfz::interpolate<sfz::kInterpolatorHermite3>(&left[indices[j]], coeffs[j]);
+            const float r = sfz::interpolate<sfz::kInterpolatorHermite3>(&right[indices[j]], coeffs[j]);
+            INFO("index " << indices[j] << " coefficient " << coeffs[j]);
+            REQUIRE(std::memcmp(&l, &out[0][j], sizeof(float)) == 0);
+            REQUIRE(std::memcmp(&r, &out[1][j], sizeof(float)) == 0);
+        }
+    }
+#else
+    SUCCEED("no four-output path on this architecture");
+#endif
 }
 
 TEST_CASE("[Oscairn] Pan and width of an unmodulated voice: the same samples as per-sample")

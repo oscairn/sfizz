@@ -1621,6 +1621,19 @@ void Voice::Impl::fillInterpolated(
     auto* addingGain = addingGains.data();
     auto leftSource = source.getConstSpan(0);
     auto left = dest.getChannel(0);
+    size_t done = 0;
+#if SFIZZ_HERMITE3_FOUR
+    IF_CONSTEXPR (M == kInterpolatorHermite3 && !Adding) {
+        // four outputs at a time, the same samples as the loops below
+        const int channels = source.getNumChannels() == 1 ? 1 : 2;
+        const float* sources[2] = { leftSource.data(), channels == 2 ? source.getConstSpan(1).data() : nullptr };
+        for (; done + 4 <= indices.size(); done += 4) {
+            float* outputs[2] = { left + done, channels == 2 ? dest.getChannel(1) + done : nullptr };
+            interpolateHermite3Four(sources, channels, ind + done, coeff + done, outputs);
+        }
+        ind += done, coeff += done, left += done;
+    }
+#endif
     if (source.getNumChannels() == 1) {
         while (ind < indices.end()) {
             auto output = interpolate<M>(&leftSource[*ind], *coeff);
@@ -1633,7 +1646,7 @@ void Voice::Impl::fillInterpolated(
             incrementAll(ind, left, coeff);
         }
     } else {
-        auto right = dest.getChannel(1);
+        auto right = dest.getChannel(1) + done;
         auto rightSource = source.getConstSpan(1);
         while (ind < indices.end()) {
             auto leftOutput = interpolate<M>(&leftSource[*ind], *coeff);

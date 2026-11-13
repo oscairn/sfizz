@@ -84,6 +84,67 @@ public:
 };
 #endif
 
+#if SIMDE_NATURAL_VECTOR_SIZE_GE(128) && defined(SIMDE_ARM_NEON_A64V8_NATIVE) && defined(__GNUC__) && !defined(__clang__)
+#define SFIZZ_HERMITE3_FOUR 1
+/**
+ * @brief Four outputs of the Hermite interpolator at once, for one or two channels read at the
+ *        same positions: each is interpolate<kInterpolatorHermite3>(&sources[ch][indices[j]],
+ *        coeffs[j]) to the bit (the same weights, each tap's product rounded on its own and the
+ *        products summed in the same order), with the weights computed once for four outputs
+ *        and both channels. gcc only: clang orders the weights' arithmetic differently
+ *        under -ffast-math depending on the context, so it keeps the per-output loop
+ */
+inline void interpolateHermite3Four(const float* const* sources, int channels, const int* indices,
+    const float* coeffs, float* const* outputs) noexcept
+{
+    // The weights: hermite3x4's pieces without its selection, since the taps' distances are
+    // known: 0 and 1 are within 1 (the inner piece), -1 and 2 between 1 and 2 (the outer); a
+    // distance of exactly 1 or 2, where the selection could go the other way, gives 0 in both
+    const simde__m128 c = simde_mm_loadu_ps(coeffs);
+    auto inner = [](simde__m128 x) {
+        x = simde_x_mm_abs_ps(x);
+        const simde__m128 x2 = simde_mm_mul_ps(x, x);
+        const simde__m128 x3 = simde_mm_mul_ps(x2, x);
+        const simde__m128 q = simde_mm_mul_ps(simde_mm_set1_ps(5./2.), x2);
+        return simde__m128_to_neon_f32(simde_mm_add_ps(simde_mm_sub_ps(simde_mm_set1_ps(1), q), simde_mm_mul_ps(simde_mm_set1_ps(3./2.), x3)));
+    };
+    auto outer = [](simde__m128 x) {
+        x = simde_x_mm_abs_ps(x);
+        const simde__m128 x2 = simde_mm_mul_ps(x, x);
+        const simde__m128 x3 = simde_mm_mul_ps(x2, x);
+        const simde__m128 q = simde_mm_mul_ps(simde_mm_set1_ps(5./2.), x2);
+        return simde__m128_to_neon_f32(simde_mm_sub_ps(simde_mm_add_ps(simde_mm_sub_ps(simde_mm_set1_ps(2), simde_mm_mul_ps(simde_mm_set1_ps(4), x)), q), simde_mm_mul_ps(simde_mm_set1_ps(1./2.), x3)));
+    };
+    const float32x4_t h[4] = {
+        outer(simde_mm_sub_ps(simde_mm_set1_ps(-1.0f), c)),
+        inner(simde_mm_sub_ps(simde_mm_set1_ps(0.0f), c)),
+        inner(simde_mm_sub_ps(simde_mm_set1_ps(1.0f), c)),
+        outer(simde_mm_sub_ps(simde_mm_set1_ps(2.0f), c)),
+    };
+    for (int ch = 0; ch < channels; ++ch) {
+        const float* v = sources[ch];
+        // rows: the four taps of each output; transposed to the k-th tap of each output
+        const float32x4_t r0 = vld1q_f32(v + indices[0] - 1), r1 = vld1q_f32(v + indices[1] - 1);
+        const float32x4_t r2 = vld1q_f32(v + indices[2] - 1), r3 = vld1q_f32(v + indices[3] - 1);
+        const float64x2_t t0 = vreinterpretq_f64_f32(vtrn1q_f32(r0, r1)), t1 = vreinterpretq_f64_f32(vtrn2q_f32(r0, r1));
+        const float64x2_t t2 = vreinterpretq_f64_f32(vtrn1q_f32(r2, r3)), t3 = vreinterpretq_f64_f32(vtrn2q_f32(r2, r3));
+        float32x4_t p[4] = {
+            vmulq_f32(h[0], vreinterpretq_f32_f64(vtrn1q_f64(t0, t2))),
+            vmulq_f32(h[1], vreinterpretq_f32_f64(vtrn1q_f64(t1, t3))),
+            vmulq_f32(h[2], vreinterpretq_f32_f64(vtrn2q_f64(t0, t2))),
+            vmulq_f32(h[3], vreinterpretq_f32_f64(vtrn2q_f64(t1, t3))),
+        };
+        // the per-output sum's order, (p0 + p1) + (p2 + p3), each product and pair rounded on
+        // its own: the barriers keep -ffast-math from fusing or reordering them
+        for (auto& x : p)
+            __asm__("" : "+w"(x));
+        float32x4_t low = vaddq_f32(p[0], p[1]), high = vaddq_f32(p[2], p[3]);
+        __asm__("" : "+w"(low), "+w"(high));
+        vst1q_f32(outputs[ch], vaddq_f32(low, high));
+    }
+}
+#endif
+
 //------------------------------------------------------------------------------
 // Hermite 3rd order, generic
 
