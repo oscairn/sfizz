@@ -537,7 +537,7 @@ settings that bound it:
 
 | Part | Size | Setting |
 | --- | --- | --- |
-| Preloads | 4 bytes x (4096 + 128) frames x channels a sample file (17 KB mono), for as long as the patch is loaded; one copy per instance however many of its sounds use the file (`SharedPreloads`) | `preloadFrames` in `clap/plugin.cpp` (sfizz's own default 8192) |
+| Preloads | 4 bytes x (preload + 128) frames x channels a sample file (17 KB mono at 4096), for as long as the patch is loaded; one copy per instance however many of its sounds use the file (`SharedPreloads`) | The memory policy, below: 2048 to 16384 frames a sound (sfizz's own default 8192; 4096 before the optimisation session) |
 | Regions | About 10.5 KB a region (a 916-region part: about 10 MB) | none |
 | A sound's synth | 160 KB and 5.2 KB a frame of its render block, 3 KB and 4 bytes a frame for each of 512 voice slots, a 128 KB gather buffer, two threads with 512 KiB stacks: about 6.5 MB at 512 frames, 3.8 MB at 128 (the stacks are only resident in a locked process) | `maxRenderFrames` 512 (the host's block is split), `voicesPerSound` 256 |
 | Streamed chunks | 32 KB (mono) or 64 KB (stereo) a chunk of 8192 frames; a voice holds about five while it plays past its preload; freed 250 ms after no voice wants them (50 ms when the cache is full) | `FilePool::setStreamCacheCapacity`: the plugin sets a 64th of the machine's memory, 16 to 64 MiB, for the process; sfizz's default 64 MiB |
@@ -559,6 +559,33 @@ at the render block and its regions (a sound prepared later is counted at the cu
 region count); `asset_bytes` the preloads, each buffer once. The CLAP tests check that loading and
 activating allocate no more than the estimate and less than twice it plus 4 MB, and that `current`
 covers what the plugin holds while notes are held.
+
+**The memory policy** (optimisation session, `memoryPolicyPreload` in `clap/plugin.cpp`). Each sound
+gets its preload as it loads. `OSCAIRN_SAMPLER_MEMORY=minimal` gives 2048 frames, `generous` 16384.
+Otherwise, on Linux, the room is the kernel's MemAvailable, or what the process's cgroup limit
+(`memory.max` less `memory.current`) leaves if less, less what the process's loaded sounds already
+preload; under memory pressure (PSI `some avg10` of 10 % or more) a sound gets 2048, else the longest
+of 16384, 8192 and 4096 whose preloads, counting each of its files as stereo, take at most a 16th of
+the room, else 2048. On other systems: 4096. A sound keeps its preload until it is loaded again;
+activation (no audio running) may lower it to what the policy gives then and never raises it, since
+Oscairn limits a worker's memory from what the plugin declared before activating. The host has no
+signal of its own for "how much may I use": what the policy would want from it is a per-worker
+memory share (bytes the plugin may hold beyond what it declared) and a pressure callback on the
+main thread (shrink now), section 11.
+
+| Part (Jacob's) | Files | 2048 | 4096 | 8192 | 16384 | Regions and a synth at 128 frames |
+| --- | --- | --- | --- | --- | --- | --- |
+| Rd 73 (median, 156 regions) | 156 mono | 1.3 MiB | 2.5 MiB | 5.0 MiB | 9.6 MiB | 5.4 MiB |
+| Mellow Imperial (916 regions) | 880 mono | 7.3 MiB | 14.2 MiB | 27.9 MiB | 55.4 MiB | 13.2 MiB |
+| Nameless Piano (854 regions) | 854 stereo | 14.2 MiB | 27.5 MiB | 54.2 MiB | 107.6 MiB | 12.6 MiB |
+
+With the FANTOM's 500 MB free, the policy gives Rd 73 16384 frames (9.6 MiB of preloads) and
+Nameless Piano 4096 (27.5 MiB); under pressure both get 2048.
+
+**Element voices' sample quality.** A sound's `sample_quality` opcode sets it per sound (the
+converter can write it); `OSCAIRN_SAMPLER_ELEMENT_QUALITY` (0 to 10) sets the device's default for
+element voices with none (`Synth::setElementSampleQuality`; unset: the synth's live quality, 2, as
+before). Stock voices and offline renders are not affected (K60).
 
 **Several parts.** Sounds of one instance (parts sharing it) share preloads and the cache's
 capacity, not chunks, and each sound has its own synth and its own 256 voices, so one part cannot
@@ -935,6 +962,16 @@ Taken in the element model session (2026-11-07), for Jacob to confirm:
     one constant; a preload of 2048 would halve the largest parts' preloads again (7.5 MB for 880
     mono files) and give the loader 46 ms instead of 93 to bring a voice's first chunk.
 38. **A late chunk plays silence** and the voice goes on (K59); stock sfizz ended the voice.
+39. **Memory policy** (optimisation session): preloads of 2048 to 16384 frames from the room the
+    machine has, `OSCAIRN_SAMPLER_MEMORY` to fix it (section 5); applied as a sound loads, lowered at
+    activation, never changed while audio runs.
+40. **Element voices' sample quality** (optimisation session): Hermite (2) stays the default; linear
+    (1) per sound through `sample_quality`, or for the device through
+    `OSCAIRN_SAMPLER_ELEMENT_QUALITY`, for Jacob to choose after the A/B files in
+    `forks/measurements/sampler-quality-2026-11-13/`.
+41. **gcc stays the Linux compiler** (optimisation session): clang gives element voices about 12 %
+    fewer instructions and decodes FLAC with 22 % more (section 11); too small and mixed to move the
+    release build and its dependency check.
 
 Risks and open questions:
 
@@ -1994,6 +2031,90 @@ regions with the figures above, a locked 4-core worker, a 10-note chord): median
 files) 87 MB loaded and 90 MB with the chord before, 10 and 12 MB now; the largest (Nameless Piano,
 854 regions, about 70 voices for the chord) 143 and 345 MB before, 43 and 59 MB now.
 
+### Optimisation session (2026-11-13): idle cost, NEON, sample quality, memory policy
+
+Prompted by the FANTOM-07's measurements with 0.6.4 and 0.7.0: two Sampler parts missing deadlines
+at one note, a near-empty sound ("Init Normal (AWM2)") with 2 to 3 ms blocks at four notes, and
+worker blocks of 10 to 24 ms in the first seconds after loading or the first notes. Commits
+`4f478f99` to the plan commit; section 5 has the memory policy and the quality setting.
+
+**Measuring.** Docker linux/arm64 on an M3 Max is about as fast as the Mac and 20 to 30 times the
+A53 (device 45 to 75 us a voice, Docker 2 to 5), and its timings are noisy: a fixed 38 us workload
+showed blocks up to 2.3 ms with the Mac loaded, and a run with 2 to 28 ms blocks did not repeat once
+the Mac's load fell. So the figures here are instruction counts (callgrind, deterministic) and,
+for a block after the core has run something else, callgrind's cache model of an A53 (32 KiB L1D,
+512 KiB L2, the caches evicted between blocks), turned into time with an assumed 0.8 instructions
+a cycle, 12 cycles an L2 hit and 180 a DRAM access at 1.8 GHz. That model is an estimate, not a
+device measurement. Tools: `blockhost.cpp`, `bhcache.sh`, `hunt.cpp` in the session's scratch folder.
+
+**The idle cost was the steady cost that mattered.** A loaded sound with no note cost, a block,
+about 22,000 instructions and 1,930 DRAM accesses (the plugin's process call, Init Normal) (model: 222 us on the A53; 0.6.4: 167 us, with
+160 slots instead of 512): 880 of the accesses from `MidiState::flushEvents` resetting all 640 MIDI
+event vectors and 700 from the voice loops calling `isFree` on every one of the 512 slots (the
+render loop, the plugin's voice budget, voice count and note report, and `getNumActiveVoicesForNote`
+once per held note). Four parts at rest: 852 us of a 1.33 ms allowance. Now (`4f478f99`,
+`9ee3003c`, `f792e342`): about 8,700 instructions and 340 DRAM accesses, 42 us modelled (Jumper 1:
+37 us); four
+parts at rest 135 us. One note of Init Normal: 281 to 93 us; four notes: 417 to 204 us (model).
+
+**Per voice** (instructions a voice and block, 128 frames, callgrind; before / after):
+
+| Voice | gcc 13 | clang 18 |
+| --- | --- | --- |
+| Stock mono, quality 2 | 20,100 / 19,000 | 24,900 / 20,400 |
+| Stock stereo | 24,000 / 22,900 | 28,900 / 23,700 |
+| Element mono (Mellow Imperial's group) | 30,800 / 29,800 | 30,900 / 26,400 |
+| Element stereo | 35,700 / 34,600 | 34,800 / 29,600 |
+| Element mono at quality 1 | 28,900 / 27,900 | 29,000 / 24,400 |
+
+The NEON helpers (`8e188634`) matter for clang, whose vectorized loops go one element at a time
+when computing in place; gcc's do not. The per-voice cost did not halve: an element voice is about
+a third the element filter (`ElementFilter::process`, about 11,000 instructions at 48 kHz, where
+each integrator's delay is an allpass), a third sample reading and interpolation, the rest gains,
+pan and envelopes. The filter's 48 kHz path is the next place to look (a loop like its 44.1 kHz
+`runDirect`, the stereo channels in one NEON register). Estimated on the device (instructions
+scaled by the 45 to 75 us measured for 30,800): an element voice 44 to 73 us with gcc, so a part's
+1.33 ms holds about 18 to 29 element voices with the idle cost now 40 us (15 to 25 before).
+
+**First chord** (instructions of the block the notes start in): Init Normal, 8 notes 656,000 to
+511,000; Nameless Piano, 8 notes 566,000 to 420,000. The note-on dispatch walked all 512 slots per
+note too.
+
+**The long blocks (10 to 24 ms) on the device are not explained.** In Docker (0.7.0's code), with memory
+locked and the audio thread at SCHED_FIFO 70 on one core shared with the loader, a 21 s script
+(load, 4 and 8 notes, releases) on Init Normal had no block over 0.9 ms once the Mac was quiet; a
+33 s one on Mellow Imperial (up to 16 notes) had one block of 6.3 ms, at the 16-note chord's start,
+not explained (with the audio thread not real-time the same script's worst was 0.66 ms). Under
+callgrind no block of Init Normal took more than 1.4 times the median instructions apart from the
+first. The
+audio thread takes no blocking lock on the streaming path (`want` and `gather` use atomics, the
+garbage collection a `try_lock`); the loader runs at SCHED_RR 50 (sfizz's
+`backgroundLoaderPthreadPriority`), below the worker's audio thread (FIFO 70) but level with the
+kernel's interrupt threads, and it decodes every queued chunk in one go while holding the pool's
+file mutex. On the device that is the first suspect left (an interrupt thread on its core waits for
+the decoding to finish), with RT throttling (950 ms in 1 s) if decoding and audio together keep a
+core busy. `hunt.cpp` runs on the device as it is (a CLAP host with the worker's priority,
+memory locking and a watchdog that samples the audio thread's stack during any block over a
+threshold): that is the measurement to make next.
+
+**VmLck above VmRSS.** A locked worker counts every mapping, reserved or not; glibc gives each
+thread that allocates an arena of 64 MiB address space, mostly unbacked, and the Sampler's loader
+and garbage threads allocate (161.9 against 34.4 MB on the device is two such arenas). Nothing is
+resident there; `MALLOC_ARENA_MAX=1` (or 2) in the worker's environment would show it.
+
+**Voices.** 256 a sound stays: the slot walk makes idle cost independent of the slot count, and a
+slot costs 3.7 KB at 128 frames (512 slots: 1.9 MB a sound).
+
+**Compiler.** clang 18 against gcc 13 (Ubuntu 24.04, -O3): element voices 12 % fewer instructions,
+stock mono 7 % more, and FLAC decoding 22 % more (dr_flac, 20 of Jacob's files: 379 against 310
+million instructions; timed, both 1.1 to 1.3 us per channel-millisecond in Docker, not the factor
+of two the memory session saw). Decision 41: gcc stays.
+
+**Per-voice cost for the host.** The plugin's voice budget reports `active_voices` with a cost of 0
+(`budgetActiveVoices`). It could fill that `voice_cost` from a running mean of its own block time
+divided by its voices (one clock read a block, which the timing statistics already make), which is
+the cheap figure the host asks for, through the existing `oscairn.voice-budget` report; not built.
+
 ### Upstream merge test (2026-11-01)
 
 `upstream/develop` has no commits after `f5c6e29f`: merging it into `oscairn` is a no-op
@@ -2070,3 +2191,4 @@ repository, or the local scripts beside the renders).
 | K57 | Assign switches from Oscairn | The reference reads the switches from controllers (86 and 87 by default) at the event's time; Oscairn sets the plugin's parameters at the start of a block (its queued parameter values), so a switch and a note in one block may swap order; within a block the plugin keeps the event's frame | Host's parameter timing | Unverified in Oscairn | `clap/test.cpp` "the assignable switches" | `clap/plugin.cpp` `applySwitch` |
 | K58 | Voices | The reference's sample engine plays 128 voices for all its parts together; each Oscairn Sampler sound plays up to 256 (512 slots with fading ones), and the host's voice budget sets the limit across parts | Engine size chosen for headroom; the budget is the real limit | Accepted (memory session) | CLAP test "voices: a sound plays up to 256" | `clap/plugin.cpp` (`voicesPerSound`), `Config.h` |
 | K59 | A streamed chunk not decoded in time | In real time, the frames of a long sample whose chunk the loader has not brought yet play as silence and the voice goes on (stock sfizz ended the voice at the frames loaded so far); on the reference, not measured | Streaming in chunks (memory session); offline renders wait and are unaffected | Accepted; only under a loader that falls behind | CLAP test "a voice whose next chunk is late" | `FilePool::gather`, `Voice.cpp` |
+| K60 | Element voices at a lower sample quality | Only when a sound sets `sample_quality` 1 (or 0) or the device sets `OSCAIRN_SAMPLER_ELEMENT_QUALITY` to it: linear interpolation instead of Hermite; against Hermite the renders differ by -41 to -60 dB (RMS of the difference, four of Jacob's sounds); against the reference not measured | A setting for small devices (about 6 % of an element voice's instructions) | Off by default; for Jacob | A/B files in `forks/measurements/sampler-quality-2026-11-13/` | `Voice::Impl::getCurrentSampleQuality`, `clap/plugin.cpp` |
