@@ -490,7 +490,8 @@ draft 4 at `33206e5` in 0.4.0 with `save_sound` and `sound_values`, below):
 (all or nothing, nothing selected). The instance's synths share preloaded sample data through
 the file pool (`f0604e59`, `FilePool::setSharedPreloads`; the data is held weakly, so it lives
 while any context uses it), so a sound whose files another context holds opens no file; the
-streamed remainder of long samples is still per synth. Measured with `scratchpad
+streamed chunks of long samples are per synth (two sounds playing one file decode it each), within
+the process's one cache capacity (section 5, "Memory and streaming"). Measured with `scratchpad
 switchbench.cpp`: Rd 73 and Cant Sleep prepared beside in about 10 ms, against 33-59 ms for a
 state load into a fresh instance (98-144 ms the first time). With one Default plus seven slots,
 a one-sound snapshot needs one free slot.
@@ -518,7 +519,8 @@ in `clap/budget.cpp` behind `clap/budget.h`.
   level and velocity gain, so a new note's quiet elements can go before an older note's louder
   ones. Age: frames since it started. Mono: never (sfizz has no mono mode of its own; the host's
   mono and legato flags still protect held voices through the SDK).
-- **sfizz's own limits** (`polyphony`, `note_polyphony`, `off_by`, the engine's voice count, and
+- **sfizz's own limits** (`polyphony`, `note_polyphony`, `off_by`, the engine's voice count, 256 a
+  sound with 512 slots from `0c3ccd4f` (64 and 160 before), and
   the element envelope releasing at the off time, `2aac320e`) act first and as before; the budget
   is a further limit on top. A full pool inside one synth still steals by sfizz's own order
   (register, K43).
@@ -527,6 +529,43 @@ in `clap/budget.cpp` behind `clap/budget.h`.
   the largest of their gains (notes sharing a key in one context share them, as for K14).
   `honors_volume`: true (per-note volume scales the key's voices). `NOTE_END` comes once a note's
   last voice has ended, as before.
+
+### Memory and streaming (RFC 0025, `oscairn.memory/draft`)
+
+From `023ac572` to `e2f91c4a` (memory session, section 11). What a Sampler instance holds, and the
+settings that bound it:
+
+| Part | Size | Setting |
+| --- | --- | --- |
+| Preloads | 4 bytes x (4096 + 128) frames x channels a sample file (17 KB mono), for as long as the patch is loaded; one copy per instance however many of its sounds use the file (`SharedPreloads`) | `preloadFrames` in `clap/plugin.cpp` (sfizz's own default 8192) |
+| Regions | About 10.5 KB a region (a 916-region part: about 10 MB) | none |
+| A sound's synth | 160 KB and 5.2 KB a frame of its render block, 3 KB and 4 bytes a frame for each of 512 voice slots, a 128 KB gather buffer, two threads with 512 KiB stacks: about 6.5 MB at 512 frames, 3.8 MB at 128 (the stacks are only resident in a locked process) | `maxRenderFrames` 512 (the host's block is split), `voicesPerSound` 256 |
+| Streamed chunks | 32 KB (mono) or 64 KB (stereo) a chunk of 8192 frames; a voice holds about five while it plays past its preload; freed 250 ms after no voice wants them (50 ms when the cache is full) | `FilePool::setStreamCacheCapacity`: the plugin sets a 64th of the machine's memory, 16 to 64 MiB, for the process; sfizz's default 64 MiB |
+| Instance | `sizeof(Plugin)` and 20 buffers of the render block | none |
+
+So a part costs about preloads + regions + one synth, plus up to the cache's capacity while notes
+play, shared by every sound and instance in the process. A file longer than its preload is no
+longer decoded whole: each block a voice asks for the chunks it will read in the next 8192 frames
+and twice its block's reach, and for its loop's start; the loader decodes them, reading on from
+the last chunk or seeking exactly (WAV, FLAC; other formats read on from the start), and the voice
+reads through a window of the pool's gather buffer. A chunk not decoded in time reads as silence and
+the voice plays on (register, K59); a freewheeling render decodes what it needs on its own thread,
+so offline renders do not depend on the loader (the gate's streaming renders are bit-identical to
+stock's preloaded ones). Reversed files and `loadInRam` load whole, as before.
+
+**Declared** (`oscairn.memory`, `clap/plugin.cpp`): `shared_bytes` the instance's buffers and the
+cache (its capacity in `estimate`, what it holds in `current`); `context_bytes` one sound's synth
+at the render block and its regions (a sound prepared later is counted at the current sound's
+region count); `asset_bytes` the preloads, each buffer once. The CLAP tests check that loading and
+activating allocate no more than the estimate and less than twice it plus 4 MB, and that `current`
+covers what the plugin holds while notes are held.
+
+**Several parts.** Sounds of one instance (parts sharing it) share preloads and the cache's
+capacity, not chunks, and each sound has its own synth and its own 256 voices, so one part cannot
+take another's voices (the fault Oscairn's "engine sharing and voices" report found in FM does not
+occur here; the voice budget's per-context reserve and priority already apply). A second instance
+in its own worker process shares nothing: its own preloads, synth, threads and cache (the kernel's
+page cache of the files is the only common part).
 
 ### Parts sharing one instance (RFC 0021 slice 3)
 
@@ -891,6 +930,11 @@ Taken in the element model session (2026-11-07), for Jacob to confirm:
     the plugin asks the host for draft 3 and uses only `resolve` (draft 3's `create` stores a file
     the plugin produces, and the sampler produces none); a host answering only drafts 1 or 2 no
     longer gives it assets.
+37. **Memory bounds** (memory session): preload 4096 frames, render block 512, cache a 64th of the
+    machine's memory (16 to 64 MiB a process), chunks of 8192 frames, 256 voices a sound. Each is
+    one constant; a preload of 2048 would halve the largest parts' preloads again (7.5 MB for 880
+    mono files) and give the loader 46 ms instead of 93 to bring a voice's first chunk.
+38. **A late chunk plays silence** and the voice goes on (K59); stock sfizz ended the voice.
 
 Risks and open questions:
 
@@ -1884,6 +1928,72 @@ farthest differ from the engine by up to 10.6 ms. No change to the engine or con
 found would bring them closer. K53 has the figures; whether 12.3 ms is close enough (the 120 BPM
 probes were within 7 ms, the time-length hold-outs of K52 within 9.8 ms) is for Jacob.
 
+### Memory session (2026-11-13): streaming in chunks, `oscairn.memory`, 256 voices
+
+Prompted by the first runs on a FANTOM-07 (4x Cortex-A53, 1 GB): a Sampler worker of 200 to 290 MB
+in a Linux container for one part playing a 17 MB generated sample set, 187 to 235 MB per Sampler
+worker for Jacob's converted Performances, and a first chord on a cold instrument that went silent
+with 0 voices reported. Commits `023ac572` to `e2f91c4a`; section 5, "Memory and streaming", has
+the result.
+
+**What the memory was** (Docker, linux/arm64 on an M-series Mac, the worker's situation: memory
+locked with `mlockall`, activated at 8192 frames, 128-frame blocks; tool `memhost.cpp` in the
+session's scratch folder):
+
+| Case | 0.6.4 | Now |
+| --- | --- | --- |
+| Generated set (13 pitches x 2 layers, looped stereo, release samples), loaded | 211 MB, 17 threads | 34 MB, 3 threads |
+| The same, 8 notes (16 voices) held | 222 MB | 39 MB |
+| A 916-region part of Jacob's (NKC Christmas, Mellow Imperial), loaded | 303 MB | 60 MB |
+| The same, a 10-note chord (20 voices) held 10 s | 331 MB | 67 MB |
+
+The container's figure was mostly not samples: 15 threads' 8 MiB stacks, all resident in a locked
+process (sfizz's file loading pool had `hardware_concurrency - 2` threads, 14 in a 16-CPU
+container, 2 on the device; each synth adds a dispatch and a garbage thread), a synth's buffers
+sized to Oscairn's 8192-frame maximum block (about 43 MB a sound), and every played file decoded
+whole into floats (FLAC at about 0.22 of 16-bit PCM in Jacob's library, so a file takes about 9
+times its size once played) and kept until about 5 s after its last voice, collected only while
+the synth rendered. Unlocked and activated at 256 frames, the same container run was 18 MB loaded and 28 MB held, which is
+close to the device's 41 to 77 MiB; whether the device's workers lock their memory was not checked.
+
+**The cold chord.** A played file was decoded front to back, whole, before the loader moved to the
+next, and a voice that reached the end of what was loaded ended (stock sfizz). On the A53 a chord
+of long FLAC files queues seconds of decoding (estimate below) against a preload of 186 ms, so the
+voices ended: silence and 0 voices. Now each voice needs only its next chunk, and a late one is
+silence the voice plays through. The audio thread's own share was not found: a 916-region part's
+10-note chord takes 60 to 90 us of note-ons and a first block of 40 to 160 us on the Mac (about 0.5
+to 1 ms scaled to the A53), and blocks timed in Docker were too noisy to attribute (unverified on
+the device).
+
+**FLAC.** `dr_flac` decoding 300 of Jacob's files (1602 s of audio), one thread: 0.4 to 0.6 us per
+channel-millisecond on the Mac (Apple clang), 1.9 to 2.0 in linux/arm64 Docker built with gcc 13,
+1.0 there with clang. On an A53 (6 to 8 times slower per voice than the Mac in the device's
+measurements) that is roughly 5 to 15 us per channel-millisecond: a mono voice streaming at its
+own pitch costs 0.5 to 1.5 % of one core on the loader thread, 30 voices 15 to 45 % (an estimate,
+not measured on the device). WAV would cost a copy, but the library would grow from 870 MB of FLAC
+to 3.9 GB of 16-bit WAV. Jacob keeps FLAC.
+
+**CPU per voice** (Mac, Apple clang, 128-frame blocks at 48 kHz, 32 voices on a sample in memory,
+`voicebench.cpp`): a stock mono voice 9.1 us a block at sample quality 2 (sfizz's live default),
+7.8 at 1, 16.2 at 3; stereo 13.0; with a 2-pole low-pass 10.8; an element voice from a converted
+part 8.2, 4.7 at quality 1. So the device's 45 to 75 us a voice is sfizz's voice itself, about 6 to
+8 times the Mac. A profile of the stock voice (macOS `sample`): interpolation 16 %, the rest of
+`fillWithData` 14 %, scalar gain loops 13 % (`gain1Scalar`; sfizz has SSE versions only, so ARM
+runs the scalar ones), `exp2f` for the per-sample pitch 11 %, the amplitude envelope 8 %, clock
+reads for sfizz's timing statistics 8 %. Without changing output: NEON versions of the gain loops
+and dropping the timing reads (about a fifth together, estimated); with a change of output (for
+Jacob): sample quality 1 for element voices (about 40 % less). At 1.33 ms a block a part fits about
+18 to 30 voices on one A53 core, so the 256-voice ceiling only matters with the host's voice
+budget, and more parts need more cores.
+
+**Voices.** A voice slot costs 3.7 KB at 128-frame blocks, 4.9 KB at 512 and 35 KB at 8192; 512
+slots at 512 frames take 2.5 MB, so 256 voices a sound (512 slots) cost little at rest.
+
+**Jacob's library** (146 Sampler parts of the packed conversion, estimated from their files and
+regions with the figures above, a locked 4-core worker, a 10-note chord): median part (Rd 73, 156
+files) 87 MB loaded and 90 MB with the chord before, 10 and 12 MB now; the largest (Nameless Piano,
+854 regions, about 70 voices for the chord) 143 and 345 MB before, 43 and 59 MB now.
+
 ### Upstream merge test (2026-11-01)
 
 `upstream/develop` has no commits after `f5c6e29f`: merging it into `oscairn` is a no-op
@@ -1958,3 +2068,5 @@ repository, or the local scripts beside the renders).
 | K55 | Element limits and velocity cross fade | The element's velocity limits decide its selection; on the reference a velocity cross fade widens them for the selection too (not measured), and the engine has no velocity cross fade (dropped by the converter) | Velocity cross fade not built | Open | none | `oscairn/Elements.cpp` |
 | K56 | Elements the converter leaves out | An element with level 0, or whose wave the converter cannot find, has no regions, so it takes no part in the selection; on the reference it still takes a Cycle step, counts as a plain element for Legato and can be a Random pick | Converter | Open, for the converter | none | converter `awm2.py` |
 | K57 | Assign switches from Oscairn | The reference reads the switches from controllers (86 and 87 by default) at the event's time; Oscairn sets the plugin's parameters at the start of a block (its queued parameter values), so a switch and a note in one block may swap order; within a block the plugin keeps the event's frame | Host's parameter timing | Unverified in Oscairn | `clap/test.cpp` "the assignable switches" | `clap/plugin.cpp` `applySwitch` |
+| K58 | Voices | The reference's sample engine plays 128 voices for all its parts together; each Oscairn Sampler sound plays up to 256 (512 slots with fading ones), and the host's voice budget sets the limit across parts | Engine size chosen for headroom; the budget is the real limit | Accepted (memory session) | CLAP test "voices: a sound plays up to 256" | `clap/plugin.cpp` (`voicesPerSound`), `Config.h` |
+| K59 | A streamed chunk not decoded in time | In real time, the frames of a long sample whose chunk the loader has not brought yet play as silence and the voice goes on (stock sfizz ended the voice at the frames loaded so far); on the reference, not measured | Streaming in chunks (memory session); offline renders wait and are unaffected | Accepted; only under a loader that falls behind | CLAP test "a voice whose next chunk is late" | `FilePool::gather`, `Voice.cpp` |
