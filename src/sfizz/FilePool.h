@@ -65,6 +65,39 @@ struct FileInformation {
     absl::optional<WavetableInfo> wavetable;
 };
 
+class AudioReader;
+
+/**
+ * @brief The streamed part of a file longer than its preload: decoded in chunks of
+ * config::streamChunkFrames, only near where voices play (FilePool::want), into a cache whose
+ * total size, for the whole process, is capped (FilePool::setStreamCacheCapacity). A chunk no
+ * voice has wanted for a while is freed again.
+ */
+struct StreamChunk {
+    std::atomic<int> readers { 0 }; // audio threads copying from it now
+    std::unique_ptr<float[]> data; // planar: channels x config::streamChunkFrames
+};
+struct StreamSlot {
+    std::atomic<StreamChunk*> chunk { nullptr }; // published once decoded
+    std::atomic<int64_t> wantedAt { 0 }; // steady clock, ms
+    std::atomic<int> state { 0 }; // 0 idle, 1 requested, 2 decoding
+};
+struct StreamState {
+    StreamState(fs::path path, uint32_t frames, unsigned channels);
+    ~StreamState();
+    fs::path path;
+    uint32_t frames;
+    unsigned channels;
+    size_t numSlots;
+    std::unique_ptr<StreamSlot[]> slots;
+    // the loader's (or a freewheeling render's) decoder, read on from where it stopped
+    std::mutex decodeMutex;
+    std::unique_ptr<AudioReader> reader;
+    uint64_t readerPosition { 0 };
+    std::vector<float> decodeBuffer;
+    std::vector<StreamChunk*> retired; // unpublished, freed once nobody copies from them
+};
+
 // Strict C++11 disallows member initialization if aggregate initialization is to be used...
 struct FileData
 {
@@ -92,6 +125,7 @@ struct FileData
         information = std::move(other.information);
         preloadedData = std::move(other.preloadedData);
         fileData = std::move(other.fileData);
+        stream = std::move(other.stream);
         preloadCallCount = other.preloadCallCount;
         availableFrames = other.availableFrames.load();
         lastViewerLeftAt = other.lastViewerLeftAt;
@@ -103,6 +137,7 @@ struct FileData
         information = std::move(other.information);
         preloadedData = std::move(other.preloadedData);
         fileData = std::move(other.fileData);
+        stream = std::move(other.stream);
         preloadCallCount = other.preloadCallCount;
         availableFrames = other.availableFrames.load();
         lastViewerLeftAt = other.lastViewerLeftAt;
@@ -114,6 +149,8 @@ struct FileData
     std::shared_ptr<FileAudioBuffer> preloadedData { std::make_shared<FileAudioBuffer>() };
     FileInformation information;
     FileAudioBuffer fileData {};
+    // set when the rest of the file streams in chunks; fileData then stays empty
+    std::unique_ptr<StreamState> stream;
     int preloadCallCount { 0 };
     std::atomic<Status> status { Status::Invalid };
     bool fullyLoaded { false };
@@ -347,6 +384,26 @@ public:
      */
     void waitForBackgroundLoading() noexcept;
     /**
+     * @brief Ask for the chunks of a streamed file covering frames first to last (audio
+     * thread). Frames in the preload, and files that do not stream in chunks, need nothing.
+     */
+    void want(FileData& data, int64_t first, int64_t last) noexcept;
+    /**
+     * @brief Copy frames first to first + count - 1 of a file streamed in chunks into this
+     * pool's gather buffer and return them (audio thread; count at most getGatherFrames()).
+     * Frames outside the file read as zeros, as a fully loaded file's padding does; a chunk not
+     * decoded yet reads as zeros too, unless `wait` (a freewheeling render), which decodes it.
+     */
+    AudioSpan<const float> gather(FileData& data, int64_t first, size_t count, bool wait) noexcept;
+    static constexpr size_t getGatherFrames() noexcept { return 2 * config::streamChunkFrames; }
+    /**
+     * @brief The most memory the chunks of streamed files may take, for the whole process
+     * (config::streamCacheBytes by default), and what they take now.
+     */
+    static void setStreamCacheCapacity(size_t bytes) noexcept;
+    static size_t getStreamCacheCapacity() noexcept;
+    static size_t getStreamCacheUsage() noexcept;
+    /**
      * @brief Assign the current thread a priority which is appropriate
      * for background sample file processing.
      */
@@ -391,10 +448,29 @@ private:
     using FileQueue = atomic_queue::AtomicQueue2<QueuedFileData, config::maxVoices>;
     aligned_unique_ptr<FileQueue> filesToLoad;
 
+    // Requests for chunks of streamed files, from the audio thread
+    struct ChunkRequest {
+        StreamState* stream { nullptr };
+        uint32_t slot { 0 };
+        uint32_t generation { 0 };
+    };
+    using ChunkQueue = atomic_queue::AtomicQueue2<ChunkRequest, 4 * config::maxVoices>;
+    aligned_unique_ptr<ChunkQueue> chunksToLoad;
+    // Changed with the files, under filesMutex: a request from before belongs to no file now
+    std::atomic<uint32_t> generation { 0 };
+    // Held by the loader while it works on the files, and by changes to the set of files
+    mutable std::mutex filesMutex;
+    void decodeChunk(StreamState& stream, size_t slot) noexcept; // with decodeMutex held
+    void loadRequestedChunk(StreamState& stream, size_t slot) noexcept;
+    void loadChunkNow(StreamState& stream, size_t slot) noexcept;
+    void freeUnwantedChunks(int64_t wantedBefore) noexcept; // with filesMutex held
+    void makeStream(const FileId& fileId, FileData& data, uint32_t frames);
+
     void dispatchingJob() noexcept;
     void garbageJob() noexcept;
     void loadingJob(const QueuedFileData& data) noexcept;
     std::mutex loadingMutex; // held while a whole file loads
+    FileAudioBuffer gatherBuffer;
     // Started at the end of the constructor, once every member they use exists
     SmallStackThread dispatchThread;
     SmallStackThread garbageThread;

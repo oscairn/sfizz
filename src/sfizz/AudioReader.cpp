@@ -96,7 +96,20 @@ public:
     explicit ForwardReader(ST_AudioFile handle, std::unique_ptr<MetadataReader> mdReader);
     AudioReaderType type() const override;
     size_t readNextBlock(float* buffer, size_t frames) override;
+    bool seek(uint64_t frame) override;
 };
+
+bool ForwardReader::seek(uint64_t frame)
+{
+    // WAV and FLAC seek to the exact frame; other formats are read on to it
+#if defined(SFIZZ_USE_SNDFILE)
+    (void)frame;
+    return false;
+#else
+    const int type = handle_.get_type();
+    return (type == st_audio_file_wav || type == st_audio_file_flac) && handle_.seek(frame);
+#endif
+}
 
 ForwardReader::ForwardReader(ST_AudioFile handle, std::unique_ptr<MetadataReader> mdReader)
     : BasicSndfileReader(std::move(handle), std::move(mdReader))

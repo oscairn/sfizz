@@ -46,6 +46,38 @@
 #endif
 using namespace std::placeholders;
 
+// The chunks of streamed files, for the whole process
+static std::atomic<size_t> streamCacheCapacity { sfz::config::streamCacheBytes };
+static std::atomic<size_t> streamCacheUsage { 0 };
+static constexpr size_t chunkBytes(unsigned channels)
+{
+    return sizeof(sfz::StreamChunk) + channels * sfz::config::streamChunkFrames * sizeof(float);
+}
+static int64_t steadyMs()
+{
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+sfz::StreamState::StreamState(fs::path path, uint32_t frames, unsigned channels)
+    : path(std::move(path)), frames(frames), channels(channels),
+      numSlots((frames + config::streamChunkFrames - 1) / config::streamChunkFrames),
+      slots(new StreamSlot[numSlots])
+{
+}
+
+sfz::StreamState::~StreamState()
+{
+    for (size_t i = 0; i < numSlots; ++i)
+        retired.push_back(slots[i].chunk.exchange(nullptr));
+    for (StreamChunk* chunk : retired) {
+        if (chunk) {
+            streamCacheUsage -= chunkBytes(channels);
+            delete chunk;
+        }
+    }
+}
+
 void readBaseFile(sfz::AudioReader& reader, sfz::FileAudioBuffer& output, uint32_t numFrames)
 {
     output.reset();
@@ -118,10 +150,13 @@ void streamFromFile(sfz::AudioReader& reader, sfz::FileAudioBuffer& output, std:
 }
 
 sfz::FilePool::FilePool()
-    : filesToLoad(alignedNew<FileQueue>())
+    : filesToLoad(alignedNew<FileQueue>()),
+      chunksToLoad(alignedNew<ChunkQueue>())
 {
     lastUsedFiles.reserve(config::maxVoices);
     garbageToCollect.reserve(config::maxVoices);
+    gatherBuffer.addChannels(2);
+    gatherBuffer.resize(getGatherFrames());
     dispatchThread.start([this]() { dispatchingJob(); });
     garbageThread.start([this]() { garbageJob(); });
 }
@@ -295,6 +330,8 @@ std::string sfz::FilePool::sharedKey(const FileId& fileId) const
 
 bool sfz::FilePool::preloadFile(const FileId& fileId, uint32_t maxOffset) noexcept
 {
+    std::lock_guard<std::mutex> files { filesMutex };
+    ++generation;
     const auto loadedFile = loadedFiles.find(fileId);
     if (loadedFile != loadedFiles.end()) {
         loadedFile->second.preloadCallCount++;
@@ -365,6 +402,7 @@ bool sfz::FilePool::preloadFile(const FileId& fileId, uint32_t maxOffset) noexce
             fileData.information.maxOffset = maxOffset;
             fileData.preloadedData = load();
             fileData.fullyLoaded = frames == framesToLoad;
+            makeStream(fileId, fileData, frames);
         }
         fileData.preloadCallCount++;
     } else {
@@ -377,9 +415,20 @@ bool sfz::FilePool::preloadFile(const FileId& fileId, uint32_t maxOffset) noexce
         insertedPair.first->second.preloadCallCount++;
         insertedPair.first->second.status = FileData::Status::Preloaded;
         insertedPair.first->second.fullyLoaded = framesToLoad == frames;
+        makeStream(fileId, insertedPair.first->second, frames);
     }
 
     return true;
+}
+
+void sfz::FilePool::makeStream(const FileId& fileId, FileData& data, uint32_t frames)
+{
+    // Reversed files are read whole (the reader reverses them in memory)
+    if (data.fullyLoaded || loadInRam || fileId.isReverse())
+        data.stream.reset();
+    else
+        data.stream.reset(new StreamState(rootDirectory / fileId.filename(), frames,
+                                          data.preloadedData->getNumChannels()));
 }
 
 void sfz::FilePool::resetPreloadCallCounts() noexcept
@@ -393,6 +442,8 @@ void sfz::FilePool::resetPreloadCallCounts() noexcept
 
 void sfz::FilePool::removeUnusedPreloadedData() noexcept
 {
+    std::lock_guard<std::mutex> files { filesMutex };
+    ++generation;
     for (auto it = preloadedFiles.begin(), end = preloadedFiles.end(); it != end; ) {
         auto copyIt = it++;
         if (copyIt->second.preloadCallCount == 0) {
@@ -426,6 +477,8 @@ sfz::FileDataHolder sfz::FilePool::loadFile(const FileId& fileId) noexcept
     ++fileOpens;
     AudioReaderPtr reader = createAudioReader(file, fileId.isReverse());
 
+    std::lock_guard<std::mutex> files { filesMutex };
+    ++generation;
     const auto frames = static_cast<uint32_t>(reader->frames());
     auto insertedPair = loadedFiles.insert_or_assign(fileId, {
         std::make_shared<FileAudioBuffer>(readFromFile(*reader, frames)),
@@ -445,6 +498,8 @@ sfz::FileDataHolder sfz::FilePool::loadFromRam(const FileId& fileId, const std::
 
     auto reader = createAudioReaderFromMemory(data.data(), data.size(), fileId.isReverse());
     auto fileInformation = getReaderInformation(reader.get());
+    std::lock_guard<std::mutex> files { filesMutex };
+    ++generation;
     const auto frames = static_cast<uint32_t>(reader->frames());
     auto insertedPair = loadedFiles.insert_or_assign(fileId, {
         std::make_shared<FileAudioBuffer>(readFromFile(*reader, frames)),
@@ -470,7 +525,7 @@ sfz::FileDataHolder sfz::FilePool::getFilePromise(const std::shared_ptr<FileId>&
     }
 
     auto& fileData = preloaded->second;
-    if (!fileData.fullyLoaded) {
+    if (!fileData.fullyLoaded && !fileData.stream) {
         QueuedFileData queuedData { fileId, &fileData };
         if (!filesToLoad->try_push(queuedData)) {
             DBG("[sfizz] Could not enqueue the file to load for " << fileId << " (queue capacity " << filesToLoad->capacity() << ")");
@@ -487,6 +542,8 @@ sfz::FileDataHolder sfz::FilePool::getFilePromise(const std::shared_ptr<FileId>&
 
 void sfz::FilePool::setPreloadSize(uint32_t preloadSize) noexcept
 {
+    std::lock_guard<std::mutex> files { filesMutex };
+    ++generation;
     this->preloadSize = preloadSize;
     if (loadInRam)
         return;
@@ -502,6 +559,7 @@ void sfz::FilePool::setPreloadSize(uint32_t preloadSize) noexcept
         const auto framesToLoad = min(frames, maxOffset + preloadSize);
         fileData.preloadedData = std::make_shared<FileAudioBuffer>(readFromFile(*reader, static_cast<uint32_t>(framesToLoad)));
         fileData.fullyLoaded = frames == framesToLoad;
+        makeStream(fileId, fileData, static_cast<uint32_t>(frames));
     }
 }
 
@@ -569,6 +627,8 @@ void sfz::FilePool::loadingJob(const QueuedFileData& data) noexcept
 
 void sfz::FilePool::clear()
 {
+    std::lock_guard<std::mutex> files { filesMutex };
+    ++generation;
     std::lock_guard<SpinMutex> guard { garbageAndLastUsedMutex };
     emptyFileLoadingQueues();
     garbageToCollect.clear();
@@ -582,17 +642,247 @@ uint32_t sfz::FilePool::getPreloadSize() const noexcept
     return preloadSize;
 }
 
-// The pool's one loader thread: files load one at a time, in the order voices asked for them
+// One loader thread per pool: whole files (reversed ones), then the chunks voices asked for,
+// and, at least every 100 ms, the chunks no voice has wanted for a while are freed
 void sfz::FilePool::dispatchingJob() noexcept
 {
     raiseCurrentThreadPriority();
-    while (dispatchBarrier.wait(), dispatchFlag) {
-        std::lock_guard<std::mutex> loading { loadingMutex };
-        QueuedFileData queuedData;
-        while (filesToLoad->try_pop(queuedData))
-            loadingJob(queuedData);
+    int64_t lastSweep = steadyMs();
+    while (true) {
+        std::error_code ec;
+        dispatchBarrier.timed_wait(100, ec);
+        if (!dispatchFlag)
+            break;
+        std::lock_guard<std::mutex> files { filesMutex };
+        {
+            std::lock_guard<std::mutex> loading { loadingMutex };
+            QueuedFileData queuedData;
+            while (filesToLoad->try_pop(queuedData))
+                loadingJob(queuedData);
+        }
+        ChunkRequest request;
+        while (chunksToLoad->try_pop(request))
+            if (request.generation == generation.load())
+                loadRequestedChunk(*request.stream, request.slot);
+        const int64_t now = steadyMs();
+        if (now - lastSweep >= 100) {
+            freeUnwantedChunks(now - config::streamUnwantedMs);
+            lastSweep = now;
+        }
     }
 }
+
+void sfz::FilePool::loadRequestedChunk(StreamState& stream, size_t slot) noexcept
+{
+    StreamSlot& s = stream.slots[slot];
+    int requested = 1;
+    if (!s.state.compare_exchange_strong(requested, 2))
+        return; // a freewheeling render took it
+    if (s.chunk.load()) {
+        s.state = 0;
+        return;
+    }
+    const size_t bytes = chunkBytes(stream.channels);
+    if (streamCacheUsage + bytes > streamCacheCapacity) {
+        freeUnwantedChunks(steadyMs() - config::streamPressureMs);
+        if (streamCacheUsage + bytes > streamCacheCapacity) {
+            s.state = 0; // full of chunks voices play: asked again by the voice's next block
+            return;
+        }
+    }
+    {
+        std::lock_guard<std::mutex> decoding { stream.decodeMutex };
+        decodeChunk(stream, slot);
+    }
+    s.state = 0;
+}
+
+// A freewheeling render's: decodes the chunk on the calling thread unless the loader is at it
+void sfz::FilePool::loadChunkNow(StreamState& stream, size_t slot) noexcept
+{
+    StreamSlot& s = stream.slots[slot];
+    while (!s.chunk.load()) {
+        int state = s.state.load();
+        if (state == 2 || !s.state.compare_exchange_strong(state, 2)) {
+            std::this_thread::sleep_for(std::chrono::microseconds(50));
+            continue;
+        }
+        {
+            std::lock_guard<std::mutex> decoding { stream.decodeMutex };
+            decodeChunk(stream, slot);
+        }
+        s.state = 0;
+    }
+}
+
+void sfz::FilePool::decodeChunk(StreamState& stream, size_t slot) noexcept
+{
+    const size_t K = config::streamChunkFrames;
+    const uint64_t start = slot * K;
+    const size_t frames = std::min<size_t>(K, stream.frames - start);
+    const unsigned channels = stream.channels;
+    std::unique_ptr<StreamChunk> chunk { new StreamChunk };
+    chunk->data.reset(new float[channels * K]());
+
+    if (stream.reader && stream.readerPosition != start) {
+        if (stream.reader->seek(start))
+            stream.readerPosition = start;
+        else if (stream.readerPosition > start)
+            stream.reader.reset();
+    }
+    if (!stream.reader) {
+        std::error_code ec;
+        stream.reader = createAudioReader(stream.path, false, &ec);
+        stream.readerPosition = 0;
+        if (ec || !stream.reader || stream.reader->channels() != channels)
+            stream.reader.reset(); // a file gone or changed plays as silence
+        else if (start > 0 && stream.reader->seek(start))
+            stream.readerPosition = start;
+    }
+    const size_t block = config::fileChunkSize;
+    stream.decodeBuffer.resize(block * channels);
+    float* buffer = stream.decodeBuffer.data();
+    while (stream.reader && stream.readerPosition < start) { // formats without an exact seek
+        const size_t n = stream.reader->readNextBlock(buffer, std::min<uint64_t>(block, start - stream.readerPosition));
+        if (n == 0)
+            stream.reader.reset();
+        else
+            stream.readerPosition += n;
+    }
+    for (size_t done = 0; stream.reader && done < frames;) {
+        const size_t n = stream.reader->readNextBlock(buffer, std::min(block, frames - done));
+        if (n == 0) {
+            stream.reader.reset();
+            break;
+        }
+        for (unsigned c = 0; c < channels; ++c)
+            for (size_t i = 0; i < n; ++i)
+                chunk->data[c * K + done + i] = buffer[i * channels + c];
+        done += n;
+        stream.readerPosition += n;
+    }
+    streamCacheUsage += chunkBytes(channels);
+    stream.slots[slot].chunk.store(chunk.release());
+}
+
+void sfz::FilePool::freeUnwantedChunks(int64_t wantedBefore) noexcept
+{
+    for (auto& file : preloadedFiles) {
+        StreamState* stream = file.second.stream.get();
+        if (!stream)
+            continue;
+        bool wanted = false;
+        for (size_t i = 0; i < stream->numSlots; ++i) {
+            StreamSlot& s = stream->slots[i];
+            if (s.wantedAt.load() >= wantedBefore) {
+                wanted = true;
+                continue;
+            }
+            if (s.state.load() == 0 && s.chunk.load())
+                stream->retired.push_back(s.chunk.exchange(nullptr));
+        }
+        // freed once no audio thread copies from them (gather checks the slot after counting itself)
+        swapAndPopAll(stream->retired, [stream](StreamChunk* chunk) {
+            if (chunk && chunk->readers.load() != 0)
+                return false;
+            if (chunk) {
+                streamCacheUsage -= chunkBytes(stream->channels);
+                delete chunk;
+            }
+            return true;
+        });
+        if (!wanted && stream->reader && stream->decodeMutex.try_lock()) {
+            stream->reader.reset(); // no file stays open for a file nobody plays
+            stream->decodeMutex.unlock();
+        }
+    }
+}
+
+void sfz::FilePool::want(FileData& data, int64_t first, int64_t last) noexcept
+{
+    StreamState* stream = data.stream.get();
+    if (!stream)
+        return;
+    first = std::max<int64_t>(first, data.preloadedData->getNumFrames());
+    last = std::min<int64_t>(last, int64_t(stream->frames) - 1);
+    if (first > last)
+        return;
+    const int64_t now = steadyMs();
+    const uint32_t currentGeneration = generation.load();
+    bool queued = false;
+    for (int64_t c = first / config::streamChunkFrames; c <= last / config::streamChunkFrames; ++c) {
+        StreamSlot& s = stream->slots[c];
+        s.wantedAt.store(now, std::memory_order_relaxed);
+        int idle = 0;
+        if (s.chunk.load(std::memory_order_acquire) || !s.state.compare_exchange_strong(idle, 1))
+            continue;
+        if (chunksToLoad->try_push(ChunkRequest { stream, static_cast<uint32_t>(c), currentGeneration }))
+            queued = true;
+        else
+            s.state = 0;
+    }
+    if (queued) {
+        std::error_code ec;
+        dispatchBarrier.post(ec);
+    }
+}
+
+sfz::AudioSpan<const float> sfz::FilePool::gather(FileData& data, int64_t first, size_t count, bool wait) noexcept
+{
+    StreamState& stream = *data.stream;
+    const FileAudioBuffer& preload = *data.preloadedData;
+    const int64_t preloaded = preload.getNumFrames();
+    const int64_t frames = stream.frames;
+    const unsigned channels = stream.channels;
+    const size_t K = config::streamChunkFrames;
+    count = std::min(count, getGatherFrames());
+    for (size_t i = 0; i < count;) {
+        const int64_t frame = first + static_cast<int64_t>(i);
+        size_t run;
+        if (frame < 0 || frame >= frames) {
+            run = frame < 0 ? std::min<size_t>(count - i, static_cast<size_t>(-frame)) : count - i;
+            for (unsigned c = 0; c < channels; ++c)
+                std::fill_n(gatherBuffer.channelWriter(c) + i, run, 0.0f);
+        } else if (frame < preloaded) {
+            run = std::min<size_t>(count - i, static_cast<size_t>(preloaded - frame));
+            for (unsigned c = 0; c < channels; ++c)
+                std::copy_n(preload.channelReader(c) + frame, run, gatherBuffer.channelWriter(c) + i);
+        } else {
+            const size_t slot = static_cast<size_t>(frame) / K;
+            const size_t offset = static_cast<size_t>(frame) - slot * K;
+            run = std::min<size_t>({ count - i, K - offset, static_cast<size_t>(frames - frame) });
+            StreamSlot& s = stream.slots[slot];
+            StreamChunk* chunk = s.chunk.load(std::memory_order_acquire);
+            if (!chunk && wait) {
+                loadChunkNow(stream, slot);
+                chunk = s.chunk.load(std::memory_order_acquire);
+            }
+            if (chunk) {
+                chunk->readers.fetch_add(1);
+                if (s.chunk.load() != chunk) { // freed meanwhile
+                    chunk->readers.fetch_sub(1);
+                    chunk = nullptr;
+                }
+            }
+            for (unsigned c = 0; c < channels; ++c) {
+                if (chunk)
+                    std::copy_n(chunk->data.get() + c * K + offset, run, gatherBuffer.channelWriter(c) + i);
+                else
+                    std::fill_n(gatherBuffer.channelWriter(c) + i, run, 0.0f); // not there in time
+            }
+            if (chunk)
+                chunk->readers.fetch_sub(1);
+        }
+        i += run;
+    }
+    if (channels == 1)
+        return AudioSpan<const float>({ gatherBuffer.channelReader(0) }, count);
+    return AudioSpan<const float>({ gatherBuffer.channelReader(0), gatherBuffer.channelReader(1) }, count);
+}
+
+void sfz::FilePool::setStreamCacheCapacity(size_t bytes) noexcept { streamCacheCapacity = bytes; }
+size_t sfz::FilePool::getStreamCacheCapacity() noexcept { return streamCacheCapacity; }
+size_t sfz::FilePool::getStreamCacheUsage() noexcept { return streamCacheUsage; }
 
 void sfz::FilePool::garbageJob() noexcept
 {

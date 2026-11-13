@@ -34,6 +34,14 @@ namespace config {
     constexpr size_t maxChannels { 32 };
     constexpr int numBackgroundThreads { 4 };
     constexpr unsigned fileClearingPeriod { 5 }; // in seconds
+    // Files longer than their preload stream in chunks of this many frames, into a cache of
+    // at most streamCacheBytes for the whole process (FilePool::setStreamCacheCapacity). A
+    // chunk no voice has wanted for streamUnwantedMs is freed, or after streamPressureMs when
+    // the cache is full.
+    constexpr int streamChunkFrames { 8192 };
+    constexpr size_t streamCacheBytes { 64 << 20 };
+    constexpr int streamUnwantedMs { 250 };
+    constexpr int streamPressureMs { 50 };
     constexpr int numVoices { 64 };
     constexpr unsigned maxVoices { 256 };
     constexpr unsigned smoothingSteps { 512 };

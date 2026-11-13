@@ -79,6 +79,9 @@
 #include <memory>
 #include <string>
 #include <vector>
+#if !defined(_WIN32)
+#include <unistd.h>
+#endif
 
 namespace {
 
@@ -1597,7 +1600,16 @@ const clap_plugin_descriptor_t* pluginDescriptor(const clap_plugin_factory_t*, u
 
 const clap_plugin_factory_t factory { pluginCount, pluginDescriptor, createPlugin };
 
-bool entryInit(const char*) { return true; }
+bool entryInit(const char*)
+{
+    // The streamed chunks' cache, for the process: a 64th of the memory, from 16 to 64 MiB
+#if defined(_SC_PHYS_PAGES) && defined(_SC_PAGESIZE)
+    const long pages = sysconf(_SC_PHYS_PAGES), pageSize = sysconf(_SC_PAGESIZE);
+    if (pages > 0 && pageSize > 0)
+        sfz::FilePool::setStreamCacheCapacity(std::min<uint64_t>(64 << 20, std::max<uint64_t>(16 << 20, uint64_t(pages) * uint64_t(pageSize) / 64)));
+#endif
+    return true;
+}
 void entryDeinit() {}
 const void* entryFactory(const char* id)
 {

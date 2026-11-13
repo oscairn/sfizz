@@ -40,6 +40,8 @@ public:
     virtual unsigned channels() const = 0;
     virtual unsigned sampleRate() const = 0;
     virtual size_t readNextBlock(float* buffer, size_t frames) = 0;
+    // Go to a frame, where the format seeks exactly and fast; false: not done, read on instead
+    virtual bool seek(uint64_t) { return false; }
     virtual bool getInstrumentInfo(InstrumentInfo&) { return false; };
     virtual bool getWavetableInfo(WavetableInfo&) { return false; };
 };

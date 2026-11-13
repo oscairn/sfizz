@@ -399,6 +399,68 @@ const std::string layered =
     "<control> oscairn_profile=1\n<group> sample=*sine oscairn_ampeg_attack=0 oscairn_ampeg_release=60 oscairn_amp_velsens=32\n"
     "<region> volume=0\n<region> volume=-6\n<region> volume=-12\n<region> volume=-18\n";
 
+// Bytes malloc has handed out and not had back; 0 where unknown. Sanitizers replace malloc, so
+// their builds skip the checks that use it.
+#if defined(__SANITIZE_ADDRESS__) || defined(__SANITIZE_THREAD__)
+constexpr bool heapKnown = false;
+#elif defined(__has_feature)
+#if __has_feature(address_sanitizer) || __has_feature(thread_sanitizer)
+constexpr bool heapKnown = false;
+#else
+constexpr bool heapKnown = true;
+#endif
+#else
+constexpr bool heapKnown = true;
+#endif
+double heapMB()
+{
+#if defined(__APPLE__)
+    malloc_statistics_t st;
+    malloc_zone_statistics(nullptr, &st);
+    return st.size_in_use / 1048576.0;
+#elif defined(__GLIBC__) && (__GLIBC__ > 2 || __GLIBC_MINOR__ >= 33)
+    const struct mallinfo2 m = mallinfo2();
+    return (m.uordblks + m.hblkhd) / 1048576.0;
+#else
+    return 0;
+#endif
+}
+
+// A folder of long mono 16-bit sine files at 44.1 kHz, one a key from 48, and a patch playing
+// them (written at run time; no audio is kept in the repository)
+std::string longFiles(int count, double seconds)
+{
+    char dir[] = "/tmp/oscairn-sampler-test-XXXXXX";
+    if (!mkdtemp(dir))
+        return "";
+    const uint32_t frames = static_cast<uint32_t>(seconds * 44100);
+    std::vector<int16_t> pcm(frames);
+    std::string patch;
+    for (int i = 0; i < count; ++i) {
+        for (uint32_t n = 0; n < frames; ++n)
+            pcm[n] = static_cast<int16_t>(30000 * std::sin(2 * M_PI * (110.0 + 10 * i) * n / 44100.0));
+        const std::string name = "long" + std::to_string(i) + ".wav";
+        std::ofstream f(std::string(dir) + "/" + name, std::ios::binary);
+        auto u32 = [&f](uint32_t v) { f.write(reinterpret_cast<const char*>(&v), 4); };
+        auto u16 = [&f](uint16_t v) { f.write(reinterpret_cast<const char*>(&v), 2); };
+        f.write("RIFF", 4); u32(36 + 2 * frames); f.write("WAVEfmt ", 8); u32(16); u16(1); u16(1);
+        u32(44100); u32(88200); u16(2); u16(16); f.write("data", 4); u32(2 * frames);
+        f.write(reinterpret_cast<const char*>(pcm.data()), 2 * frames);
+        patch += "<region> key=" + std::to_string(48 + i) + " amp_veltrack=0 sample=" + name + "\n";
+    }
+    std::ofstream(std::string(dir) + "/patch.sfz") << patch;
+    return dir;
+}
+void removeFiles(const std::string& dir)
+{
+    if (DIR* d = opendir(dir.c_str())) {
+        while (dirent* e = readdir(d))
+            if (e->d_name[0] != '.')
+                std::remove((dir + "/" + e->d_name).c_str());
+        closedir(d);
+    }
+    rmdir(dir.c_str());
+}
 // The process's threads
 int threadCount()
 {
@@ -1775,6 +1837,64 @@ int main(int argc, char** argv)
         CHECK(threadCount() - before == 2);
         plugin->destroy(plugin);
         CHECK(threadCount() == before);
+    }
+    { // memory while notes are held on long files is bounded: a file streams in chunks near where
+      // its voices play, not whole (sixteen 20 s files would be 56 MB decoded)
+        const std::string dir = longFiles(16, 20.0);
+        CHECK(!dir.empty());
+        const double before = heapMB();
+        auto* plugin = create();
+        CHECK(load(plugin, stateFor(readFile(dir + "/patch.sfz"), "", "", dir)));
+        CHECK(plugin->activate(plugin, 48000, 1, 128));
+        const double loaded = heapMB() - before;
+        Run run { plugin };
+        Events events;
+        for (int k = 0; k < 16; ++k)
+            events.note(CLAP_EVENT_NOTE_ON, 0, k, static_cast<int16_t>(48 + k), 1.0);
+        double held = 0;
+        for (int b = 0; b < 700; ++b) { // 1.9 s of sound, at a little over real time
+            run.block(events, 128);
+            std::this_thread::sleep_for(std::chrono::microseconds(1500));
+            if (b % 50 == 49)
+                held = std::max(held, heapMB() - before);
+        }
+        CHECK(run.peak > 0.05f && activeVoices(plugin) == 16);
+        std::printf("held notes: %.1f MB after loading, %.1f MB at most while held\n", loaded, held);
+        CHECK(held < loaded + 12);
+        CHECK(sfz::FilePool::getStreamCacheUsage() <= sfz::FilePool::getStreamCacheCapacity());
+        plugin->deactivate(plugin);
+        plugin->destroy(plugin);
+        removeFiles(dir);
+    }
+    { // a voice whose next chunk is late plays silence and goes on, rather than ending: with no
+      // room for chunks at all it holds past its preload, and sounds again once there is room
+        const std::string dir = longFiles(1, 10.0);
+        auto* plugin = create(); // the entry sets the capacity from the machine's memory
+        const size_t capacity = sfz::FilePool::getStreamCacheCapacity();
+        sfz::FilePool::setStreamCacheCapacity(0);
+        CHECK(load(plugin, stateFor(readFile(dir + "/patch.sfz"), "", "", dir)));
+        CHECK(plugin->activate(plugin, 48000, 1, 128));
+        Run run { plugin };
+        Events events;
+        events.note(CLAP_EVENT_NOTE_ON, 0, 1, 48, 1.0);
+        run.block(events, 128);
+        CHECK(run.peak > 0.05f); // the preload
+        for (int b = 0; b < 100; ++b) { // 0.27 s: past its preload
+            run.block(events, 128);
+            std::this_thread::sleep_for(std::chrono::microseconds(500));
+        }
+        CHECK(run.peak == 0.0f && activeVoices(plugin) == 1 && events.ends(1) == 0);
+        sfz::FilePool::setStreamCacheCapacity(capacity);
+        float peak = 0;
+        for (int b = 0; b < 100; ++b) {
+            run.block(events, 128);
+            peak = std::max(peak, run.peak);
+            std::this_thread::sleep_for(std::chrono::microseconds(2000));
+        }
+        CHECK(peak > 0.05f && activeVoices(plugin) == 1);
+        plugin->deactivate(plugin);
+        plugin->destroy(plugin);
+        removeFiles(dir);
     }
     // No allocation in any process call above
     CHECK(guardedAllocations.load() == 0);

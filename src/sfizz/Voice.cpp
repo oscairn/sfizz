@@ -96,6 +96,16 @@ struct Voice::Impl
         absl::Span<const float> addingGains, int quality);
 
     /**
+     * @brief fillInterpolatedWithQuality from the current file; one streamed in chunks is read
+     *        through the file pool's gather buffer, a window at a time (indices are restored).
+     */
+    template <bool Adding>
+    void fillFromFile(
+        const AudioSpan<const float>& source, const AudioSpan<float>& dest,
+        absl::Span<int> indices, absl::Span<const float> coeffs,
+        absl::Span<const float> addingGains, int quality) noexcept;
+
+    /**
      * @brief Get a S-shaped curve that is applicable to loop crossfading.
      */
     static const Curve& getSCurve();
@@ -1262,6 +1272,9 @@ void Voice::Impl::fillWithData(AudioSpan<float> buffer) noexcept
         DBG("[Voice] Empty source in promise");
         return;
     }
+    // A file streamed in chunks reads as the whole file (a chunk not there in time as silence)
+    const bool chunked = currentPromise_->stream != nullptr;
+    const size_t sourceFrames = chunked ? static_cast<size_t>(currentPromise_->information.end) + 1 : source.getNumFrames();
 
     BufferPool& bufferPool = resources_.getBufferPool();
     const CurveSet& curves = resources_.getCurves();
@@ -1309,12 +1322,12 @@ void Voice::Impl::fillWithData(AudioSpan<float> buffer) noexcept
     // While the file is still streaming in, the interpolator's taps stay within the frames
     // the loader has published: it reads up to `reach` frames past an index
     const int quality = getCurrentSampleQuality();
-    const bool streaming = source.getNumFrames() <= static_cast<size_t>(currentPromise_->information.end);
+    const bool streaming = sourceFrames <= static_cast<size_t>(currentPromise_->information.end);
     static constexpr int reachByQuality[11] = { 1, 1, 2, 4, 6, 8, 12, 18, 24, 30, 36 };
     const int reach = streaming ? reachByQuality[clamp(quality, 0, 10)] : 0;
 
     // Looping logic
-    const bool hasLoopSamples = static_cast<size_t>(loop.end + reach) < source.getNumFrames();
+    const bool hasLoopSamples = static_cast<size_t>(loop.end + reach) < sourceFrames;
     const bool loopCountReached = region_->loopCount && loop_.restarts >= *region_->loopCount;
     const bool loopContinuous = (region_->loopMode == LoopMode::loop_continuous);
     const bool loopSustain = (region_->loopMode == LoopMode::loop_sustain) && !released();
@@ -1358,7 +1371,7 @@ void Voice::Impl::fillWithData(AudioSpan<float> buffer) noexcept
         numPartitions = 1;
     }
 
-    const auto sampleEnd = max(0, min( int(sampleEnd_), int(currentPromise_->information.end), int(source.getNumFrames()) - reach) - 1);
+    const auto sampleEnd = max(0, min( int(sampleEnd_), int(currentPromise_->information.end), int(sourceFrames) - reach) - 1);
 
     int blockRestarts { 0 };
     int oldIndex {};
@@ -1430,6 +1443,18 @@ void Voice::Impl::fillWithData(AudioSpan<float> buffer) noexcept
         }
     }
 
+    // A file streamed in chunks: ask for what this block reads and what the next ones will
+    if (chunked) {
+        FilePool& filePool = resources_.getFilePool();
+        const auto range = std::minmax_element(indices->begin(), indices->end());
+        const int pad = 40; // the longest interpolator's taps
+        const int ahead = config::streamChunkFrames + 2 * (*range.second - *range.first + 1);
+        const int last = *range.second + pad + ahead;
+        filePool.want(*currentPromise_, *range.first - pad, shouldLoop ? std::min(last, loop.end + pad) : last);
+        if (shouldLoop)
+            filePool.want(*currentPromise_, std::min(loop.start, loop.xfInStart) - pad, loop.start + ahead);
+    }
+
     // interpolation processing
 
     for (unsigned ptNo = 0; ptNo < numPartitions; ++ptNo) {
@@ -1441,10 +1466,10 @@ void Voice::Impl::fillWithData(AudioSpan<float> buffer) noexcept
 
         // partition spans
         AudioSpan<float> ptBuffer = buffer.subspan(ptStart, ptSize);
-        absl::Span<const int> ptIndices = indices->subspan(ptStart, ptSize);
+        absl::Span<int> ptIndices = indices->subspan(ptStart, ptSize);
         absl::Span<const float> ptCoeffs = coeffs->subspan(ptStart, ptSize);
 
-        fillInterpolatedWithQuality<false>(
+        fillFromFile<false>(
             source, ptBuffer, ptIndices, ptCoeffs, {}, quality);
 
         if (ptType == kPartitionLoopXfade) {
@@ -1534,7 +1559,7 @@ void Voice::Impl::fillWithData(AudioSpan<float> buffer) noexcept
                         xfCurve[i] = clamp(xfInCurvePos[i], 0.0f, 1.0f);
                 }
                 // apply in curve
-                fillInterpolatedWithQuality<true>(
+                fillFromFile<true>(
                     source, xfInBuffer, xfInIndices, xfInCoeffs, xfCurve, quality);
             }
         }
@@ -1590,6 +1615,36 @@ void Voice::Impl::fillInterpolated(
             }
             incrementAll(ind, left, right, coeff);
         }
+    }
+}
+
+template <bool Adding>
+void Voice::Impl::fillFromFile(
+    const AudioSpan<const float>& source, const AudioSpan<float>& dest,
+    absl::Span<int> indices, absl::Span<const float> coeffs,
+    absl::Span<const float> addingGains, int quality) noexcept
+{
+    if (!currentPromise_->stream) {
+        fillInterpolatedWithQuality<Adding>(source, dest, indices, coeffs, addingGains, quality);
+        return;
+    }
+    // Indices only grow within a partition; each window covers a run of them and the taps
+    FilePool& filePool = resources_.getFilePool();
+    const bool wait = resources_.getSynthConfig().freeWheeling;
+    const int pad = 40;
+    const int width = static_cast<int>(FilePool::getGatherFrames()) - 2 * pad - 1;
+    for (size_t start = 0, n = indices.size(); start < n;) {
+        size_t end = start + 1;
+        while (end < n && indices[end] - indices[start] <= width)
+            ++end;
+        const int base = indices[start] - pad;
+        const auto window = filePool.gather(*currentPromise_, base, static_cast<size_t>(indices[end - 1] + pad + 1 - base), wait);
+        const auto part = indices.subspan(start, end - start);
+        subtract1<int>(base, part);
+        fillInterpolatedWithQuality<Adding>(window, dest.subspan(start, end - start), part,
+            coeffs.subspan(start, end - start), Adding ? addingGains.subspan(start, end - start) : addingGains, quality);
+        add1<int>(base, part);
+        start = end;
     }
 }
 
