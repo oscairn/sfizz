@@ -41,6 +41,13 @@ inline void pan(absl::Span<const float> panEnvelope, absl::Span<float> leftBuffe
  * @param size
  */
 void width(const float* widthEnvelope, float* leftBuffer, float* rightBuffer, unsigned size) noexcept;
+
+/**
+ * @brief pan() and width() for an envelope holding one value throughout: the same output, with
+ *        the pan table read once instead of per sample
+ */
+void panConstant(const float* panEnvelope, float* leftBuffer, float* rightBuffer, unsigned size) noexcept;
+void widthConstant(const float* widthEnvelope, float* leftBuffer, float* rightBuffer, unsigned size) noexcept;
 inline void width(absl::Span<const float> widthEnvelope, absl::Span<float> leftBuffer, absl::Span<float> rightBuffer) noexcept
 {
     CHECK_SPAN_SIZES(widthEnvelope, leftBuffer, rightBuffer);

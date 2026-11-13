@@ -165,4 +165,101 @@ void width(const float* widthEnvelope, float* leftBuffer, float* rightBuffer, un
     }
 }
 
+// pan() and width() for an envelope whose every value is panEnvelope[0] (no modulation): the
+// same paths and arithmetic with the table read once for each, so the output is the same to
+// the bit
+void panConstant(const float* panEnvelope, float* leftBuffer, float* rightBuffer, unsigned size) noexcept
+{
+    const auto* sentinel = panEnvelope + size;
+    float leftGain = 1.0f, rightGain = 1.0f;
+    tickPan(panEnvelope, &leftGain, &rightGain);
+
+#if SFIZZ_HAVE_NEON
+    const auto* firstAligned = prevAligned<ByteAlignment>(panEnvelope + TypeAlignment - 1);
+
+    if (willAlign<ByteAlignment>(panEnvelope, leftBuffer, rightBuffer) && (firstAligned < sentinel)) {
+        while (panEnvelope < firstAligned) {
+            *leftBuffer *= leftGain;
+            *rightBuffer *= rightGain;
+            incrementAll(panEnvelope, leftBuffer, rightBuffer);
+        }
+
+        float32x4_t mmPan = vdupq_n_f32(*panEnvelope);
+        mmPan = vaddq_f32(mmPan, vdupq_n_f32(1.0f));
+        mmPan = vmulq_n_f32(mmPan, 0.5f * panSize);
+        mmPan = vaddq_f32(mmPan, vdupq_n_f32(0.5f));
+        uint32x4_t mmIdx = vcvtq_u32_f32(mmPan);
+        mmIdx = vminq_u32(mmIdx, vdupq_n_u32(panSize - 1));
+        mmIdx = vmaxq_u32(mmIdx, vdupq_n_u32(0));
+        const uint32_t index = vgetq_lane_u32(mmIdx, 0);
+        const float32x4_t leftPan = vdupq_n_f32(panData[index]);
+        const float32x4_t rightPan = vdupq_n_f32(panData[panSize - index - 1]);
+        const auto* lastAligned = prevAligned<ByteAlignment>(sentinel);
+        while (panEnvelope < lastAligned) {
+            vst1q_f32(leftBuffer, vmulq_f32(vld1q_f32(leftBuffer), leftPan));
+            vst1q_f32(rightBuffer, vmulq_f32(vld1q_f32(rightBuffer), rightPan));
+            incrementAll<TypeAlignment>(panEnvelope, leftBuffer, rightBuffer);
+        }
+    }
+#endif
+
+    while (panEnvelope < sentinel) {
+        *leftBuffer *= leftGain;
+        *rightBuffer *= rightGain;
+        incrementAll(panEnvelope, leftBuffer, rightBuffer);
+    }
+}
+
+void widthConstant(const float* widthEnvelope, float* leftBuffer, float* rightBuffer, unsigned size) noexcept
+{
+    const auto* sentinel = widthEnvelope + size;
+    float w = (*widthEnvelope + 1.0f) * 0.5f;
+    w = clamp(w, 0.0f, 1.0f);
+    const auto tickCoeff1 = panLookup(w);
+    const auto tickCoeff2 = panLookup(1 - w);
+    auto tick = [&]() {
+        const auto l = *leftBuffer;
+        const auto r = *rightBuffer;
+        *leftBuffer = l * tickCoeff2 + r * tickCoeff1;
+        *rightBuffer = l * tickCoeff1 + r * tickCoeff2;
+    };
+
+#if SFIZZ_HAVE_NEON
+    const auto* firstAligned = prevAligned<ByteAlignment>(widthEnvelope + TypeAlignment  - 1);
+
+    if (willAlign<ByteAlignment>(widthEnvelope, leftBuffer, rightBuffer) && firstAligned < sentinel) {
+        while (widthEnvelope < firstAligned) {
+            tick();
+            incrementAll(widthEnvelope, leftBuffer, rightBuffer);
+        }
+
+        float32x4_t mmWidth = vdupq_n_f32(*widthEnvelope);
+        mmWidth = vaddq_f32(mmWidth, vdupq_n_f32(1.0f));
+        mmWidth = vmulq_n_f32(mmWidth, 0.5f * panSize);
+        mmWidth = vaddq_f32(mmWidth, vdupq_n_f32(0.5f));
+        uint32x4_t mmIdx = vcvtq_u32_f32(mmWidth);
+        mmIdx = vminq_u32(mmIdx, vdupq_n_u32(panSize - 1));
+        mmIdx = vmaxq_u32(mmIdx, vdupq_n_u32(0));
+        const uint32_t index = vgetq_lane_u32(mmIdx, 0);
+        const float32x4_t mmCoeff1 = vdupq_n_f32(panData[index]);
+        const float32x4_t mmCoeff2 = vdupq_n_f32(panData[panSize - index - 1]);
+        const auto* lastAligned = prevAligned<ByteAlignment>(sentinel);
+        while (widthEnvelope < lastAligned) {
+            float32x4_t mmLeft = vld1q_f32(leftBuffer);
+            float32x4_t mmRight = vld1q_f32(rightBuffer);
+
+            vst1q_f32(leftBuffer, vaddq_f32(vmulq_f32(mmCoeff2, mmLeft), vmulq_f32(mmCoeff1, mmRight)));
+            vst1q_f32(rightBuffer, vaddq_f32(vmulq_f32(mmCoeff1, mmLeft), vmulq_f32(mmCoeff2, mmRight)));
+
+            incrementAll<TypeAlignment>(widthEnvelope, leftBuffer, rightBuffer);
+        }
+    }
+#endif // SFIZZ_HAVE_NEON
+
+    while (widthEnvelope < sentinel) {
+        tick();
+        incrementAll(widthEnvelope, leftBuffer, rightBuffer);
+    }
+}
+
 }

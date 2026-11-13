@@ -1126,6 +1126,19 @@ void Voice::Impl::ampStageStereo(AudioSpan<float> buffer) noexcept
         lastGain_ = modulationSpan->back();
 }
 
+namespace {
+// Whether every value of a span is its first (an envelope that does not move); no early exit,
+// so that the loop vectorizes
+bool isConstant(absl::Span<const float> span) noexcept
+{
+    const float first = span.empty() ? 0.0f : span.front();
+    unsigned differs = 0;
+    for (float x : span)
+        differs |= x != first;
+    return differs == 0;
+}
+} // namespace
+
 void Voice::Impl::panStageMono(AudioSpan<float> buffer) noexcept
 {
     ScopedTiming logger { panningDuration_, ScopedTiming::Operation::replaceDuration, resources_.getSynthConfig().voiceTimings };
@@ -1147,11 +1160,15 @@ void Voice::Impl::panStageMono(AudioSpan<float> buffer) noexcept
 
     // Apply panning
     fill(*modulationSpan, region_->pan);
-    if (float* mod = mm.getModulation(panTarget_)) {
+    float* panMod = mm.getModulation(panTarget_);
+    if (panMod) {
         for (size_t i = 0; i < numSamples; ++i)
-            (*modulationSpan)[i] += mod[i];
+            (*modulationSpan)[i] += panMod[i];
     }
-    pan(*modulationSpan, leftBuffer, rightBuffer);
+    if (!panMod || isConstant(*modulationSpan))
+        panConstant(modulationSpan->data(), leftBuffer.data(), rightBuffer.data(), static_cast<unsigned>(numSamples));
+    else
+        pan(*modulationSpan, leftBuffer, rightBuffer);
 
     // add +3dB (10^(3/20)) to compensate for the pan stage (-3dB per stage)
     applyGain1(1.4125375446227544f, leftBuffer);
@@ -1175,26 +1192,38 @@ void Voice::Impl::panStageStereo(AudioSpan<float> buffer) noexcept
 
     // Apply panning
     fill(*modulationSpan, region_->pan);
-    if (float* mod = mm.getModulation(panTarget_)) {
+    float* panMod = mm.getModulation(panTarget_);
+    if (panMod) {
         for (size_t i = 0; i < numSamples; ++i)
-            (*modulationSpan)[i] += mod[i];
+            (*modulationSpan)[i] += panMod[i];
     }
-    pan(*modulationSpan, leftBuffer, rightBuffer);
+    if (!panMod || isConstant(*modulationSpan))
+        panConstant(modulationSpan->data(), leftBuffer.data(), rightBuffer.data(), static_cast<unsigned>(numSamples));
+    else
+        pan(*modulationSpan, leftBuffer, rightBuffer);
 
     // Apply the width/position process
     fill(*modulationSpan, region_->width);
-    if (float* mod = mm.getModulation(widthTarget_)) {
+    float* widthMod = mm.getModulation(widthTarget_);
+    if (widthMod) {
         for (size_t i = 0; i < numSamples; ++i)
-            (*modulationSpan)[i] += mod[i];
+            (*modulationSpan)[i] += widthMod[i];
     }
-    width(*modulationSpan, leftBuffer, rightBuffer);
+    if (!widthMod || isConstant(*modulationSpan))
+        widthConstant(modulationSpan->data(), leftBuffer.data(), rightBuffer.data(), static_cast<unsigned>(numSamples));
+    else
+        width(*modulationSpan, leftBuffer, rightBuffer);
 
     fill(*modulationSpan, region_->position);
-    if (float* mod = mm.getModulation(positionTarget_)) {
+    float* positionMod = mm.getModulation(positionTarget_);
+    if (positionMod) {
         for (size_t i = 0; i < numSamples; ++i)
-            (*modulationSpan)[i] += mod[i];
+            (*modulationSpan)[i] += positionMod[i];
     }
-    pan(*modulationSpan, leftBuffer, rightBuffer);
+    if (!positionMod || isConstant(*modulationSpan))
+        panConstant(modulationSpan->data(), leftBuffer.data(), rightBuffer.data(), static_cast<unsigned>(numSamples));
+    else
+        pan(*modulationSpan, leftBuffer, rightBuffer);
 
     // add +6dB (10^(6/20)) to compensate for the 2 pan stages (-3dB per stage)
     applyGain1(1.9952623149688797f, leftBuffer);

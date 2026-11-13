@@ -8,6 +8,7 @@
 // amplitude envelope.
 
 #include "sfizz/Synth.h"
+#include "sfizz/Panning.h"
 #include "sfizz/Region.h"
 #include "sfizz/oscairn/ElementEnvelope.h"
 #include "sfizz/oscairn/ElementFilter.h"
@@ -1604,6 +1605,40 @@ TEST_CASE("[Oscairn] Element filter stays finite below the reference rate")
                 INFO("rate " << rate << " type " << type << " cutoff " << cutoff);
                 REQUIRE(std::isfinite(peak));
                 REQUIRE(peak < 1e3f);
+            }
+        }
+    }
+}
+
+TEST_CASE("[Oscairn] Pan and width of an unmodulated voice: the same samples as per-sample")
+{
+    // panConstant and widthConstant (the pan stages without modulation) against pan() and
+    // width() with the envelope filled, to the bit: every 1/4096 of the range and the values
+    // between table steps, at every alignment and at lengths around the vector size
+    alignas(16) float env[160], l0[160], r0[160], l1[160], r1[160];
+    std::minstd_rand rng(1);
+    std::uniform_real_distribution<float> noise(-1.0f, 1.0f);
+    for (int width = 0; width < 2; ++width) {
+        for (int step = -4200; step <= 4200; ++step) {
+            const float value = static_cast<float>(step) / 4096.0f + (step % 3) * 0.37f / 4096.0f;
+            for (unsigned offset : { 0u, 1u, 3u }) {
+                for (unsigned size : { 1u, 3u, 4u, 7u, 128u }) {
+                    for (unsigned i = 0; i < 160; ++i) {
+                        env[i] = value;
+                        l0[i] = l1[i] = noise(rng);
+                        r0[i] = r1[i] = noise(rng);
+                    }
+                    if (width) {
+                        sfz::width(env + offset, l0 + offset, r0 + offset, size);
+                        sfz::widthConstant(env + offset, l1 + offset, r1 + offset, size);
+                    } else {
+                        sfz::pan(env + offset, l0 + offset, r0 + offset, size);
+                        sfz::panConstant(env + offset, l1 + offset, r1 + offset, size);
+                    }
+                    INFO("width " << width << " value " << value << " offset " << offset << " size " << size);
+                    REQUIRE(std::memcmp(l0, l1, sizeof(l0)) == 0);
+                    REQUIRE(std::memcmp(r0, r1, sizeof(r0)) == 0);
+                }
             }
         }
     }
