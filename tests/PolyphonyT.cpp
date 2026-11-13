@@ -657,3 +657,44 @@ TEST_CASE("[Polyphony] A note coming one sample before another note cannot choke
     synth.renderBlock(buffer);
     REQUIRE( playingSamples(synth) == std::vector<std::string> { "kick.wav", "snare.wav" } );
 }
+
+TEST_CASE("[Polyphony] The walk over active voice slots visits the voices that are not free, in slot order")
+{
+    sfz::Synth synth;
+    synth.setSamplesPerBlock(64);
+    sfz::AudioBuffer<float> buffer { 2, 64 };
+    synth.setNumVoices(96);
+    synth.loadSfzString(fs::current_path() / "tests/TestFiles/active_slots.sfz", R"(
+        <region> sample=*sine ampeg_release=0.05 key=60
+        <region> sample=*saw ampeg_attack=0.01 ampeg_release=0.2 lokey=61 hikey=100
+        <region> sample=*sine trigger=release ampeg_release=0.02 lokey=61 hikey=100
+        <region> sample=*noise group=2 off_by=3 lokey=101 hikey=110 ampeg_release=0.01
+        <region> sample=*noise group=3 lokey=111 hikey=127 ampeg_release=0.01
+    )");
+    auto check = [&]() {
+        std::vector<int> scan, walk;
+        for (int k = 0; k < synth.getNumVoiceSlots(); ++k)
+            if (!synth.getVoiceSlot(k)->isFree())
+                scan.push_back(k);
+        for (int k = synth.nextActiveVoiceSlot(-1); k >= 0; k = synth.nextActiveVoiceSlot(k))
+            walk.push_back(k);
+        REQUIRE(walk == scan);
+        return scan.size();
+    };
+    uint32_t seed = 1;
+    auto next = [&](int n) { seed = seed * 1664525u + 1013904223u; return static_cast<int>((seed >> 8) % static_cast<uint32_t>(n)); };
+    size_t most = 0;
+    for (int step = 0; step < 3000; ++step) {
+        const int key = 60 + next(68);
+        if (next(3) == 0)
+            synth.noteOff(next(64), key, 0);
+        else
+            synth.noteOn(next(64), key, 1 + next(127));
+        if (next(4) == 0)
+            synth.renderBlock(buffer);
+        most = std::max(most, check());
+    }
+    REQUIRE(most > 64); // past the first word of the set
+    synth.allSoundOff();
+    REQUIRE(check() == 0);
+}

@@ -46,6 +46,15 @@
 
 namespace sfz {
 
+// Each voice that is not free, in slot order: what a loop over every slot that skips the free ones
+// visits, without touching the free ones (on a small device, a cache miss each)
+template <class F>
+static void forEachActiveVoice(VoiceManager& voices, F&& f)
+{
+    for (int k = voices.nextActiveSlot(-1); k >= 0; k = voices.nextActiveSlot(k))
+        f(voices[static_cast<size_t>(k)]);
+}
+
 // unless set to permissive, the loader rejects sfz files with errors
 static constexpr bool loaderParsesPermissively = true;
 
@@ -1176,9 +1185,9 @@ void Synth::renderBlock(AudioSpan<float> buffer, float* const* busChannels, int 
     { // Main render block
         ScopedTiming logger { callbackBreakdown.renderMethod, ScopedTiming::Operation::addToDuration };
 
-        for (auto& voice : impl.voiceManager_) {
+        forEachActiveVoice(impl.voiceManager_, [&](Voice& voice) {
             if (voice.isFree())
-                continue;
+                return;
 
             mm.beginVoice(voice.getId(), voice.getRegion()->getId(), voice.getTriggerEvent().value);
 
@@ -1209,7 +1218,7 @@ void Synth::renderBlock(AudioSpan<float> buffer, float* const* busChannels, int 
 
             if (voice.toBeCleanedUp())
                 voice.reset();
-        }
+        });
     }
 
     { // Apply effect buses
@@ -1313,8 +1322,9 @@ void Synth::hdNoteOff(int delay, int noteNumber, float normalizedVelocity) noexc
 
     const auto replacedVelocity = midiState.getNoteVelocity(noteNumber);
 
-    for (auto& voice : impl.voiceManager_)
+    forEachActiveVoice(impl.voiceManager_, [&](Voice& voice) {
         voice.registerNoteOff(delay, noteNumber, replacedVelocity);
+    });
 
     impl.noteOffDispatch(delay, noteNumber, replacedVelocity);
     impl.oscairnMonoNoteOff(delay, noteNumber);
@@ -1337,13 +1347,13 @@ void Synth::Impl::startVoice(Layer* layer, int delay, const TriggerEvent& trigge
 
 void Synth::Impl::checkOffGroups(const Region* region, int delay, int number, bool chokedByCC)
 {
-    for (auto& voice : voiceManager_) {
+    forEachActiveVoice(voiceManager_, [&](Voice& voice) {
         if (voice.checkOffGroup(region, delay, number)) {
             const TriggerEvent& event = voice.getTriggerEvent();
             if (event.type == TriggerEventType::NoteOn && !chokedByCC)
                 noteOffDispatch(delay, event.number, event.value);
         }
-    }
+    });
 }
 
 void Synth::Impl::noteOffDispatch(int delay, int noteNumber, float velocity) noexcept
@@ -1420,11 +1430,11 @@ void Synth::Impl::oscairnSelect(int delay, int noteNumber, float velocity) noexc
         return;
     const MidiState& midiState = resources_.getMidiState();
     if (elements_.mono()) {
-        for (auto& voice : voiceManager_) {
+        forEachActiveVoice(voiceManager_, [&](Voice& voice) {
             const Region* region = voice.getRegion();
             if (!voice.isFree() && region && region->oscairn.element.number > 0)
                 voice.off(delay, true);
-        }
+        });
         oscairnSounding_ = noteNumber;
     }
     // the keys held besides this one; a held key started again counts itself
@@ -1560,8 +1570,9 @@ void Synth::Impl::performHdcc(int delay, int ccNumber, float normValue, bool asM
         }
     }
 
-    for (auto& voice : voiceManager_)
+    forEachActiveVoice(voiceManager_, [&](Voice& voice) {
         voice.registerCC(delay, ccNumber, normValue);
+    });
 
     ccDispatch(delay, ccNumber, normValue, extendedArg);
     midiState.ccEvent(delay, ccNumber, normValue);
@@ -1607,9 +1618,9 @@ void Synth::hdPitchWheel(int delay, float normalizedPitch) noexcept
         layer->registerPitchWheel(normalizedPitch);
     }
 
-    for (auto& voice : impl.voiceManager_) {
+    forEachActiveVoice(impl.voiceManager_, [&](Voice& voice) {
         voice.registerPitchWheel(delay, normalizedPitch);
-    }
+    });
 
     impl.performHdcc(delay, ExtendedCCs::pitchBend, normalizedPitch, false);
 }
@@ -1640,9 +1651,9 @@ void Synth::hdChannelAftertouch(int delay, float normAftertouch) noexcept
         layerPtr->registerAftertouch(normAftertouch);
     }
 
-    for (auto& voice : impl.voiceManager_) {
+    forEachActiveVoice(impl.voiceManager_, [&](Voice& voice) {
         voice.registerAftertouch(delay, normAftertouch);
-    }
+    });
 
     impl.performHdcc(delay, ExtendedCCs::channelAftertouch, normAftertouch, false);
 }
@@ -1660,8 +1671,9 @@ void Synth::hdPolyAftertouch(int delay, int noteNumber, float normAftertouch) no
 
     impl.resources_.getMidiState().polyAftertouchEvent(delay, noteNumber, normAftertouch);
 
-    for (auto& voice : impl.voiceManager_)
+    forEachActiveVoice(impl.voiceManager_, [&](Voice& voice) {
         voice.registerPolyAftertouch(delay, noteNumber, normAftertouch);
+    });
 
     impl.performHdcc(delay, ExtendedCCs::polyphonicAftertouch, normAftertouch, false, noteNumber);
 }
@@ -1902,31 +1914,40 @@ int Synth::getNumActiveVoicesForNote(int noteNumber) const noexcept
 {
     const Impl& impl = *impl_;
     int count = 0;
-    for (auto v = impl.voiceManager_.cbegin(); v != impl.voiceManager_.cend(); ++v)
-        count += !v->isFree() && v->getTriggerEvent().number == noteNumber;
+    VoiceManager& voices = const_cast<VoiceManager&>(impl.voiceManager_);
+    forEachActiveVoice(voices, [&](const Voice& v) {
+        count += !v.isFree() && v.getTriggerEvent().number == noteNumber;
+    });
     return count;
 }
 
 void Synth::setNoteGain(int noteNumber, float gain) noexcept
 {
     Impl& impl = *impl_;
-    for (Voice& v : impl.voiceManager_)
+    forEachActiveVoice(impl.voiceManager_, [&](Voice& v) {
         if (!v.isFree() && v.getTriggerEvent().number == noteNumber)
             v.setHostGain(gain);
+    });
 }
 
 void Synth::fadeOutNote(int delay, int noteNumber, int frames) noexcept
 {
     Impl& impl = *impl_;
-    for (Voice& v : impl.voiceManager_)
+    forEachActiveVoice(impl.voiceManager_, [&](Voice& v) {
         if (!v.isFree() && v.getTriggerEvent().number == noteNumber)
             v.fadeOut(delay, frames);
+    });
 }
 
 int Synth::getNumVoiceSlots() const noexcept
 {
     const Impl& impl = *impl_;
     return static_cast<int>(impl.voiceManager_.cend() - impl.voiceManager_.cbegin());
+}
+
+int Synth::nextActiveVoiceSlot(int slot) const noexcept
+{
+    return impl_->voiceManager_.nextActiveSlot(slot);
 }
 
 Voice* Synth::getVoiceSlot(int idx) noexcept

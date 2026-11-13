@@ -707,6 +707,11 @@ public:
      * @brief A voice slot, to inspect or fade out one voice (a host's voice budget).
      */
     Voice* getVoiceSlot(int idx) noexcept;
+    /**
+     * @brief The first slot after `slot` whose voice is not free, or -1: going through the
+     *        slots with it skips the free ones without touching them.
+     */
+    int nextActiveVoiceSlot(int slot) const noexcept;
 
     /**
      * @brief The host output bus the voices started from now on play on (0 at first); a voice

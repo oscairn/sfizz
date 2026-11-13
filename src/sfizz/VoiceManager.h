@@ -13,6 +13,7 @@
 #include "Resources.h"
 #include "Voice.h"
 #include "VoiceStealing.h"
+#include <array>
 #include <vector>
 
 namespace sfz {
@@ -117,6 +118,13 @@ struct VoiceManager final : public Voice::StateListener
     size_t getNumActiveVoices() const { return activeVoices_.size(); }
 
     /**
+     * @brief The first voice slot after `slot` holding a voice that is not free, or -1. Going
+     *        through the slots this way visits what a loop over every slot that skips the free
+     *        ones visits, in the same order, without touching the free ones.
+     */
+    int nextActiveSlot(int slot) const noexcept;
+
+    /**
      * @brief Get the number of polyphony groups
      *
      * @return size_t
@@ -153,6 +161,8 @@ private:
     int numRequiredVoices_ { config::numVoices };
     std::vector<Voice> list_;
     std::vector<Voice*> activeVoices_;
+    // The slots of activeVoices_, a bit each
+    std::array<uint64_t, (config::maxVoices + 63) / 64> activeSlots_ {};
     std::vector<Voice*> temp_;
     // These are the `group=` groups where you can off voices
     absl::flat_hash_map<int, PolyphonyGroup> polyphonyGroups_;

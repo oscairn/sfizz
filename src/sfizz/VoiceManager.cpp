@@ -8,6 +8,7 @@
 #include "SisterVoiceRing.h"
 #include "RegionSet.h"
 #include <absl/algorithm/container.h>
+#include <absl/numeric/bits.h>
 
 namespace sfz {
 
@@ -19,6 +20,7 @@ void VoiceManager::onVoiceStateChanging(NumericId<Voice> id, Voice::State state)
         const uint32_t group = region->group;
         RegionSet::removeVoiceFromHierarchy(region, voice);
         swapAndPopFirst(activeVoices_, [voice](const Voice* v) { return v == voice; });
+        activeSlots_[id.number() / 64] &= ~(uint64_t { 1 } << (id.number() % 64));
         ASSERT(polyphonyGroups_.contains(group));
         polyphonyGroups_[group].removeVoice(voice);
     } else if (state == Voice::State::playing) {
@@ -26,6 +28,7 @@ void VoiceManager::onVoiceStateChanging(NumericId<Voice> id, Voice::State state)
         const Region* region = voice->getRegion();
         const uint32_t group = region->group;
         activeVoices_.push_back(voice);
+        activeSlots_[id.number() / 64] |= uint64_t { 1 } << (id.number() % 64);
         RegionSet::registerVoiceInHierarchy(region, voice);
         ASSERT(polyphonyGroups_.contains(group));
         polyphonyGroups_[group].registerVoice(voice);
@@ -104,6 +107,17 @@ const PolyphonyGroup* VoiceManager::getPolyphonyGroupView(int idx) noexcept
     return &polyphonyGroups_[idx];
 }
 
+int VoiceManager::nextActiveSlot(int slot) const noexcept
+{
+    const int size = static_cast<int>(list_.size());
+    for (int i = slot + 1; i < size; i = (i / 64 + 1) * 64) {
+        const uint64_t bits = activeSlots_[static_cast<size_t>(i / 64)] >> (i % 64);
+        if (bits != 0)
+            return i + absl::countr_zero(bits);
+    }
+    return -1;
+}
+
 std::vector<const Voice*> VoiceManager::getActiveVoices() const noexcept
 {
     std::vector<const Voice*> returned;
@@ -118,6 +132,7 @@ void VoiceManager::clear()
         pg.second.removeAllVoices();
     list_.clear();
     activeVoices_.clear();
+    activeSlots_.fill(0);
 }
 
 void VoiceManager::setStealingAlgorithm(StealingAlgorithm algorithm)

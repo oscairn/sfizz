@@ -412,7 +412,7 @@ void keepWithinLimits(Plugin& s, uint32_t incoming, int delay)
             continue;
         const bool selected = s.contexts[i].selectedChannels.load(std::memory_order_relaxed) != 0;
         const sfz::MidiState& midi = e->synth.getResources().getMidiState();
-        for (int k = 0, slots = e->synth.getNumVoiceSlots(); k < slots; ++k) {
+        for (int k = e->synth.nextActiveVoiceSlot(-1); k >= 0; k = e->synth.nextActiveVoiceSlot(k)) {
             const sfz::Voice& v = *e->synth.getVoiceSlot(k);
             if (v.isFree())
                 continue;
@@ -1386,7 +1386,7 @@ uint32_t budgetActiveVoices(const clap_plugin_t* p, double* voiceCost)
     uint32_t n = 0;
     for (uint32_t i = 0; i < contextCount; ++i)
         if (Engine* e = rendered(s, i))
-            for (int k = 0, slots = e->synth.getNumVoiceSlots(); k < slots; ++k)
+            for (int k = e->synth.nextActiveVoiceSlot(-1); k >= 0; k = e->synth.nextActiveVoiceSlot(k))
                 n += !e->synth.getVoiceSlot(k)->isFree();
     return n;
 }
@@ -1402,7 +1402,7 @@ uint32_t budgetNotes(const clap_plugin_t* p, oscairn_voice_budget_note_t* out, u
             continue;
         uint32_t voices[128] {};
         float gain[128] {};
-        for (int k = 0, slots = e->synth.getNumVoiceSlots(); k < slots; ++k) {
+        for (int k = e->synth.nextActiveVoiceSlot(-1); k >= 0; k = e->synth.nextActiveVoiceSlot(k)) {
             const sfz::Voice& v = *e->synth.getVoiceSlot(k);
             const int key = v.getTriggerEvent().number;
             if (v.isFree() || v.getTriggerEvent().type == sfz::TriggerEventType::CC || key < 0 || key > 127)
