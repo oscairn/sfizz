@@ -575,6 +575,28 @@ little less each (256 voices 7.0 million). A device core several times slower pu
 beyond the 2.67 ms period; the default of 256 stays (a lower one is proposed in the session's
 report, not made).
 
+**The device's voice cap** (0.8.3). `OSCAIRN_SAMPLER_MAX_VOICES` (1 to 256, read when an instance
+is created; anything else is ignored) is the most voices the instance plays: it stands as the
+voice budget's limit when the host sets none and bounds the host's limit when that is higher (a
+lower host limit stands). Past it the voice budget's order applies, at each note-on and at the
+start of each block: releasing voices before held ones, then the quieter, then the older; the
+excess fades over 3 ms and frees its slot (so the voices rendering are at most the cap plus the
+ones fading). Unset, nothing changes: 256 a sound. The host sets a limit through
+`oscairn.voice-budget` `set_limits(plugin, limit, contexts, count)`: `limit` for the instance,
+`contexts[i].limit`, `.reserve` and `.priority` per sound; a limit lowered below what sounds sheds
+at the next block's start (0.3.0 on; tested).
+
+**Long releases.** Release index 127 of the element envelope is 118.9 s per 60 dB (the table is
+measured to 121 and doubles per 8 indices beyond, `ElementTables.cpp`), so a pad released at 127
+rings for about 180 s before its envelope reaches the -90 dB floor, and the voice stays until
+then. Chords of two-region pad notes every half bar at 84 BPM pile up 100 or more such voices in
+20 s (Jacob's "ST Final" "Pad" and "Pad 2": 170 voices after 20 s of playing, all releasing, still
+170 after 60 s of silence, 22 million instructions a block against 3.3 million with a cap of 28),
+and each holds its host note slot until its NOTE_END. That is the reference's model working as
+designed, not a leak; the cap and the voice budget are the bound. The element envelope already
+ends a voice at -90 dB (stock sfizz ends its envelope at -80 dB); a higher threshold would end
+only the last tenth of a release.
+
 **What the host reads.** `oscairn.voice-budget` `active_voices`: every voice not free in the sounds
 the plugin renders (releasing, fading and stolen-but-fading ones included), summed over the
 sounds, with the per-voice cost in microseconds in `*voice_cost`; per sound,
@@ -2351,3 +2373,4 @@ repository, or the local scripts beside the renders).
 | K62 | A note-off addressed by a wrong id, key or channel | A note-off whose id names no note ends the notes on its key and channel; one whose id names a note ends that note whatever its key and channel (the CLAP host's id is the note's name). Stock sfizz has no ids: it ends every voice on a key. A stale note-off (for a note that already ended, or never started) can end another note on its key | Robustness against senders that lose or mangle ids | Deliberate; no reference | `clap/test.cpp` `noteLifetimes` | `clap/plugin.cpp` `applyEvent` |
 | K63 | A full note table | The 257th note ends the oldest held note (fading its key's voices, sending its NOTE_END) so that the new one is tracked | Only 256 notes are tracked | Deliberate | `clap/test.cpp` `fullNoteTable` | `clap/plugin.cpp` `applyEvent` |
 | K64 | An element with zero constant gain | Ends at the end of its first block (nothing could ever sound); the reference's behaviour for a velocity that mutes an element is not measured (K4 for velocity 1 only) | Looping an unheard voice costs CPU | Deliberate | `clap/test.cpp` `silentElements` | `src/sfizz/Voice.cpp` |
+| K65 | Voice stealing order with a device cap | With `OSCAIRN_SAMPLER_MAX_VOICES` (or a host limit) the voice budget's order decides which voice goes: releasing before held, then the quieter, then the older. Stock sfizz's engine limit steals the oldest voice whether held or releasing (the fork's 256 voices still do) | The device cannot render the reference's 128 voices | Deliberate; unset, stock's order | `clap/test.cpp` `voiceCap` | `clap/plugin.cpp` `budgetSetLimits` |

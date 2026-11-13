@@ -205,7 +205,8 @@ struct Plugin {
     size_t noteCount { 0 };
     const clap_output_events_t* out { nullptr }; // the block's, for NOTE_END from event handling
     std::vector<float> left, right, mix[2 * busCount];
-    oscairn_sampler::VoiceBudget budget; // the host's limits, as set_limits last gave them
+    oscairn_sampler::VoiceBudget budget; // the host's limits, as set_limits last gave them, under deviceCap
+    uint32_t deviceCap { 0 }; // OSCAIRN_SAMPLER_MAX_VOICES at creation: voices the instance plays at most (0: the host's limit alone)
     // One voice's cost in microseconds a block: a running mean of the audio thread's block time
     // over the voices of the block, kept through blocks with none; 0 before any voice. Written by
     // process(), read by active_voices from the host's audio thread.
@@ -1581,7 +1582,9 @@ bool budgetHonorsVolume(const clap_plugin_t*) { return true; }
 
 void budgetSetLimits(const clap_plugin_t* p, uint32_t limit, const oscairn_voice_budget_context_t* contexts, uint32_t count)
 {
-    self(p).budget.setLimits(limit, contexts, count);
+    auto& s = self(p);
+    // the device's cap bounds the host's limit (and stands when the host sets none)
+    s.budget.setLimits(s.deviceCap && (!limit || limit > s.deviceCap) ? s.deviceCap : limit, contexts, count);
 }
 
 uint32_t budgetActiveVoices(const clap_plugin_t* p, double* voiceCost)
@@ -1864,6 +1867,15 @@ const clap_plugin_t* createPlugin(const clap_plugin_factory_t*, const clap_host_
         return nullptr;
     applyLoaderScheduling();
     auto* s = new Plugin;
+    // The device's voice cap: what its cores render in a block (a pad voice costs about 40 us on
+    // a FANTOM-07's Cortex-A53); the same voice budget order then sheds the excess
+    const char* cap = std::getenv("OSCAIRN_SAMPLER_MAX_VOICES");
+    char* capEnd = nullptr;
+    const long capValue = cap && *cap ? std::strtol(cap, &capEnd, 10) : 0;
+    if (cap && *cap && !*capEnd && capValue >= 1 && capValue <= static_cast<long>(voicesPerSound)) {
+        s->deviceCap = static_cast<uint32_t>(capValue);
+        s->budget.setLimits(s->deviceCap, nullptr, 0);
+    }
     s->host = host;
     s->plugin.desc = &descriptor;
     s->plugin.plugin_data = s;

@@ -32,6 +32,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <memory>
 #include <fstream>
 #include <sstream>
 #include <string>
@@ -769,6 +770,113 @@ void silentElements()
     CHECK(p.voices() == 1 && p.events.ends(2) == 0);
 }
 
+// A voice cap (the device's OSCAIRN_SAMPLER_MAX_VOICES, read when the instance is created, or the
+// host's limit; the lower stands): the voices an instance renders stay at the cap, the excess
+// fading over 3 ms, releasing voices going before held ones, the quietest and oldest first
+struct CapEnvironment {
+    explicit CapEnvironment(const char* value) { setenv("OSCAIRN_SAMPLER_MAX_VOICES", value, 1); }
+    ~CapEnvironment() { unsetenv("OSCAIRN_SAMPLER_MAX_VOICES"); }
+};
+void voiceCap()
+{
+    const std::string longRelease = "<region> sample=*sine amp_veltrack=0 ampeg_release=5\n";
+    { // 20 held notes, one a block, against a cap of 8
+        CapEnvironment cap("8");
+        Probe p(longRelease);
+        uint32_t most = 0;
+        for (int i = 0; i < 20; ++i) {
+            p.on(i, static_cast<int16_t>(40 + i));
+            p.blocks(1);
+            most = std::max(most, p.voices());
+        }
+        p.blocks(2); // the last fade (3 ms)
+        CHECK(most <= 8 + 2 && p.voices() == 8);
+    }
+    { // a cap above the host's limit gives way to it; the host's limit above the cap does not lift it
+        CapEnvironment cap("8");
+        Probe p(longRelease);
+        setLimits(p.plugin, 4);
+        for (int i = 0; i < 10; ++i)
+            p.on(i, static_cast<int16_t>(40 + i));
+        p.blocks(4);
+        CHECK(p.voices() == 4);
+        setLimits(p.plugin, 100);
+        p.blocks(1);
+        for (int i = 10; i < 20; ++i)
+            p.on(i, static_cast<int16_t>(40 + i));
+        p.blocks(4);
+        CHECK(p.voices() == 8);
+        setLimits(p.plugin, 2); // lowered below what sounds: it sheds at the next block
+        p.blocks(4);
+        CHECK(p.voices() == 2);
+    }
+    for (const char* bad : { "0", "-3", "x", "9999", "" }) { // not a cap: ignored
+        CapEnvironment cap(bad);
+        Probe p(longRelease);
+        for (int i = 0; i < 20; ++i)
+            p.on(i, static_cast<int16_t>(40 + i));
+        p.blocks(4);
+        CHECK(p.voices() == 20);
+    }
+    { // releasing voices go before held ones, whatever their age
+        CapEnvironment cap("4");
+        Probe p(longRelease);
+        p.on(0, 40);
+        p.on(1, 41);
+        p.blocks(2);
+        p.on(2, 42);
+        p.on(3, 43);
+        p.blocks(2);
+        p.off(2, 42);
+        p.off(3, 43); // two held (the oldest), two releasing
+        p.blocks(2);
+        for (int i = 4; i < 8; ++i) { // four new notes, held: the releasing ones go first, then each other
+            p.on(i, static_cast<int16_t>(40 + i));
+            p.blocks(4);
+            BudgetNotes notes(p.plugin);
+            CHECK(notes.voices(0) == 1 && notes.voices(1) == 1 || i >= 6); // no held old note goes while a releasing one is left
+            if (i == 4)
+                CHECK(notes.voices(2) + notes.voices(3) == 1 && notes.voices(4) == 1);
+            if (i == 5)
+                CHECK(notes.voices(2) + notes.voices(3) == 0 && notes.voices(0) == 1 && notes.voices(1) == 1);
+        }
+        CHECK(p.voices() == 4);
+    }
+    { // a pad: chords every half bar at 84 BPM (1.43 s), a release of 104 s per 60 dB, so every note
+      // rings on; uncapped the voices pile up, capped they stay at the cap
+        const std::string pad = "<control> oscairn_profile=1\n<global> amp_veltrack=0 sample=*sine oscairn_ampeg_attack=30 oscairn_ampeg_release=127\n"
+            "<region> pan=-100\n<region> pan=100\n";
+        const int16_t chords[4][4] = { { 57, 60, 64, 69 }, { 53, 57, 60, 65 }, { 48, 55, 60, 64 }, { 55, 59, 62, 67 } };
+        auto run = [&](const char* cap, uint32_t& median, uint32_t& most) {
+            std::unique_ptr<CapEnvironment> environment;
+            if (cap)
+                environment.reset(new CapEnvironment(cap));
+            Probe p(pad);
+            std::vector<uint32_t> seen;
+            for (int chord = 0; chord < 14; ++chord) { // 20 s
+                for (int k = 0; k < 4; ++k) {
+                    if (chord)
+                        p.off(chord * 10 + k - 10, chords[(chord - 1) % 4][k]);
+                    p.on(chord * 10 + k, chords[chord % 4][k], 0, 0.8);
+                }
+                for (int b = 0; b < 536; ++b) { // 1.43 s
+                    p.blocks(1);
+                    seen.push_back(p.voices());
+                }
+            }
+            std::sort(seen.begin(), seen.end());
+            median = seen[seen.size() / 2];
+            most = seen.back();
+        };
+        uint32_t median = 0, most = 0, cappedMedian = 0, cappedMost = 0;
+        run(nullptr, median, most);
+        run("28", cappedMedian, cappedMost);
+        std::printf("pad, 20 s of chords: uncapped voices median %u, most %u; capped at 28: median %u, most %u\n", median, most, cappedMedian, cappedMost);
+        CHECK(most >= 100 && median >= 50); // nothing ends: the release is 104 s
+        CHECK(cappedMost <= 28 + 8 && cappedMedian <= 28);
+    }
+}
+
 // The voices and slots a pile of notes without note-offs can take, and what the host's limit does
 void stackedNotes(const std::string& sound, int notes, bool oneBlock)
 {
@@ -815,6 +923,7 @@ int main(int argc, char** argv)
         for (bool budget : { false, true })
             noteBalance(*sound, budget, 12345 + (budget ? 1 : 0));
     fullNoteTable();
+    voiceCap();
     voiceCounts();
     silentElements();
     stackedNotes(loopContinuous, 600, false);
