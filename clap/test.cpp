@@ -1880,6 +1880,7 @@ int main(int argc, char** argv)
     { // a voice whose next chunk is late plays silence and goes on, rather than ending: with no
       // room for chunks at all it holds past its preload, and sounds again once there is room
         const std::string dir = longFiles(1, 10.0);
+        setenv("OSCAIRN_SAMPLER_MEMORY", "minimal", 1); // 2048 frames: the voice is past them below
         auto* plugin = create(); // the entry sets the capacity from the machine's memory
         const size_t capacity = sfz::FilePool::getStreamCacheCapacity();
         sfz::FilePool::setStreamCacheCapacity(0);
@@ -1905,6 +1906,7 @@ int main(int argc, char** argv)
         CHECK(peak > 0.05f && activeVoices(plugin) == 1);
         plugin->deactivate(plugin);
         plugin->destroy(plugin);
+        unsetenv("OSCAIRN_SAMPLER_MEMORY");
         removeFiles(dir);
     }
     { // voices: a sound plays up to 256 at once (sfizz's own default is 64), and the host's
@@ -1947,6 +1949,38 @@ int main(int argc, char** argv)
         CHECK(run.peak > 0.1f && run.left[100] != 0.0f && run.left[8000] != 0.0f);
         plugin->deactivate(plugin);
         plugin->destroy(plugin);
+    }
+    { // the memory policy: a sound preloads 2048 frames a file when told "minimal", 16384 when
+      // told "generous", and its declaration follows; activating only ever lowers what it holds
+        const std::string dir = longFiles(4, 2.0);
+        uint64_t assets[2] {};
+        int i = 0;
+        for (const char* policy : { "minimal", "generous" }) {
+            setenv("OSCAIRN_SAMPLER_MEMORY", policy, 1);
+            auto* plugin = create();
+            CHECK(load(plugin, stateFor(readFile(dir + "/patch.sfz"), "", "", dir)));
+            oscairn_memory_t estimate {};
+            CHECK(memoryOf(plugin) && memoryOf(plugin)->estimate(plugin, 48000, 128, &estimate));
+            assets[i++] = estimate.asset_bytes;
+            if (!std::strcmp(policy, "generous")) {
+                setenv("OSCAIRN_SAMPLER_MEMORY", "minimal", 1);
+                CHECK(plugin->activate(plugin, 48000, 1, 128));
+                CHECK(memoryOf(plugin)->estimate(plugin, 48000, 128, &estimate));
+                CHECK(estimate.asset_bytes == assets[0]);
+                plugin->deactivate(plugin);
+                setenv("OSCAIRN_SAMPLER_MEMORY", "generous", 1);
+                CHECK(plugin->activate(plugin, 48000, 1, 128));
+                CHECK(memoryOf(plugin)->estimate(plugin, 48000, 128, &estimate));
+                CHECK(estimate.asset_bytes == assets[0]); // not raised again
+                plugin->deactivate(plugin);
+            }
+            plugin->destroy(plugin);
+        }
+        unsetenv("OSCAIRN_SAMPLER_MEMORY");
+        CHECK(assets[0] >= 4 * 2048 * sizeof(float));
+        CHECK(assets[0] < 4 * 4096 * sizeof(float));
+        CHECK(assets[1] >= 4 * 16384 * sizeof(float));
+        removeFiles(dir);
     }
     { // oscairn.memory: the declaration before activating covers what loading and activating
       // take, without counting it twice, and what the plugin says it holds while notes are held

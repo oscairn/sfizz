@@ -106,8 +106,9 @@ constexpr int voicesPerSound = static_cast<int>(sfz::config::maxPolyphony);
 // (about 5 KB a frame), and a host may offer blocks of thousands of frames
 constexpr uint32_t maxRenderFrames = 512;
 // Frames of each sample file held in memory from loading (sfizz's own default is 8192): the time
-// the loader has to bring a played file's next chunk, 93 ms at 44.1 kHz and the sample's own pitch
-constexpr uint32_t preloadFrames = 4096;
+// the loader has to bring a played file's next chunk (4096: 93 ms at 44.1 kHz and the sample's
+// own pitch). The memory policy (memoryPolicyPreload) picks one of these per sound as it loads.
+constexpr uint32_t minimalPreloadFrames = 2048, preloadFrames = 4096, generousPreloadFrames = 16384;
 static_assert(busCount <= 10, "a bus is saved as one digit");
 static_assert(contextCount * maxSlots <= oscairn_sampler::maxBudgetVoices && maxNotes <= oscairn_sampler::maxBudgetNotes, "budget.h");
 
@@ -119,9 +120,15 @@ struct Patch {
     uint32_t bus { 0 };    // as read from a state or snapshot; the playing one is Context::bus
 };
 
+// What every loaded sound of the process preloads, for the memory policy
+std::atomic<uint64_t> processPreloadBytes { 0 };
+
 struct Engine {
+    ~Engine() { processPreloadBytes -= preloadBytes; }
     Patch patch;
     sfz::Synth synth;
+    uint64_t preloadBytes { 0 }; // counted in processPreloadBytes
+    uint32_t preloadFrames { 0 }; // the policy's choice when it loaded
     std::vector<oscairn_asset_ref_t> assets; // resolved through the host, for dependencies
     std::bitset<128> releaseKeys; // keys a release region may still play on at note-off
     uint32_t id { 0 };            // its context's ID, set before the audio thread sees it
@@ -218,12 +225,69 @@ int elementSampleQuality()
     return quality;
 }
 
-void configure(const Plugin& s, sfz::Synth& synth)
+// A number from a /proc or cgroup file: the first after `key` (empty: the file's first), or -1
+int64_t readNumber(const char* path, const char* key)
+{
+    std::FILE* f = std::fopen(path, "r");
+    if (!f)
+        return -1;
+    char text[4096];
+    const size_t n = std::fread(text, 1, sizeof(text) - 1, f);
+    std::fclose(f);
+    text[n] = 0;
+    const char* at = *key ? std::strstr(text, key) : text;
+    if (!at)
+        return -1;
+    at += std::strlen(key);
+    while (*at == ' ' || *at == '\t')
+        ++at;
+    if (*at < '0' || *at > '9')
+        return -1; // "max": no limit
+    return std::strtoll(at, nullptr, 10);
+}
+
+// The memory policy: how many frames of each sample file a sound loads. OSCAIRN_SAMPLER_MEMORY
+// set to "minimal" or "generous" fixes it. Otherwise it follows the room the machine has: what
+// the kernel says is available (MemAvailable), or what the process's cgroup limit leaves if less,
+// less what the process's loaded sounds already preload. Under memory pressure (the kernel's PSI,
+// "some" stalls over 10 % of the last 10 s): minimal, 2048 frames. Else the longest of 16384,
+// 8192 and 4096 frames whose preloads, counting every file as stereo, take at most a 16th of the
+// room, or 2048. Without these figures (not Linux): 4096. Longer preloads give the loader more
+// time to bring a voice's next chunk, so first notes and fast passages survive a slow loader;
+// shorter ones leave memory to other parts. `files`: the sound's sample files (0: unknown).
+uint32_t memoryPolicyPreload(size_t files)
+{
+    if (const char* v = std::getenv("OSCAIRN_SAMPLER_MEMORY")) {
+        if (!std::strcmp(v, "minimal"))
+            return minimalPreloadFrames;
+        if (!std::strcmp(v, "generous"))
+            return generousPreloadFrames;
+    }
+    int64_t room = readNumber("/proc/meminfo", "MemAvailable:");
+    if (room < 0)
+        return preloadFrames;
+    room *= 1024;
+    const int64_t limit = readNumber("/sys/fs/cgroup/memory.max", ""), used = readNumber("/sys/fs/cgroup/memory.current", "");
+    if (limit > 0 && used >= 0)
+        room = std::min(room, limit - used);
+    room -= static_cast<int64_t>(processPreloadBytes.load());
+    // "some avg10=12.34": stalls in percent; the integer part is enough
+    const int64_t pressure = readNumber("/proc/pressure/memory", "some avg10=");
+    if (pressure >= 10)
+        return minimalPreloadFrames;
+    const int64_t share = room / 16, perFrame = 2 * sizeof(float) * static_cast<int64_t>(std::max<size_t>(files, 1));
+    for (uint32_t frames : { generousPreloadFrames, 8192u, preloadFrames })
+        if (perFrame * frames <= share)
+            return frames;
+    return minimalPreloadFrames;
+}
+
+void configure(const Plugin& s, sfz::Synth& synth, uint32_t preload)
 {
     synth.setSampleRate(static_cast<float>(s.sampleRate));
     synth.setSamplesPerBlock(static_cast<int>(s.maxFrames));
     synth.setNumVoices(voicesPerSound);
-    synth.setPreloadSize(preloadFrames);
+    synth.setPreloadSize(preload);
     synth.setVoiceTimings(false); // nothing reads them, and each costs a voice two clock reads a block
     synth.setElementSampleQuality(elementSampleQuality());
 }
@@ -246,7 +310,15 @@ struct SampleCollector : sfz::Parser::Listener {
 
 bool loadPatch(const Plugin& s, Engine& e, const oscairn_asset_ref_t* base, std::string& message)
 {
-    configure(s, e.synth);
+    {
+        SampleCollector scan;
+        sfz::Parser parser;
+        parser.setListener(&scan);
+        parser.parseString("/nonexistent-oscairn-policy/patch.sfz", e.patch.text);
+        std::sort(scan.samples.begin(), scan.samples.end());
+        e.preloadFrames = memoryPolicyPreload(static_cast<size_t>(std::unique(scan.samples.begin(), scan.samples.end()) - scan.samples.begin()));
+    }
+    configure(s, e.synth, e.preloadFrames);
     e.synth.getResources().getFilePool().setSharedPreloads(s.sharedPreloads);
     if (e.patch.text.empty())
         return true;
@@ -312,6 +384,9 @@ bool loadPatch(const Plugin& s, Engine& e, const oscairn_asset_ref_t* base, std:
             for (int k = std::max(0, int(r->keyRange.getStart())); k <= std::min(127, int(r->keyRange.getEnd())); ++k)
                 e.releaseKeys.set(static_cast<size_t>(k));
     }
+    std::set<const void*> counted;
+    e.preloadBytes = e.synth.getResources().getFilePool().getPreloadedBytes(counted);
+    processPreloadBytes += e.preloadBytes;
     return true;
 }
 
@@ -665,7 +740,18 @@ bool activate(const clap_plugin_t* p, double rate, uint32_t, uint32_t maxFrames)
         v.assign(s.maxFrames, 0.0f);
     for (uint32_t i = 0; i < contextCount; ++i)
         if (Engine* e = s.contexts[i].engine.get()) {
-            configure(s, e->synth);
+            // no audio runs now: a sound loaded with more than the policy gives it today keeps
+            // what it was declared with or less, never more (the host set its limit from that)
+            const uint32_t preload = std::min(e->preloadFrames, memoryPolicyPreload(e->synth.getNumPreloadedSamples()));
+            configure(s, e->synth, preload);
+            if (preload != e->preloadFrames && !e->patch.text.empty()) {
+                e->preloadFrames = preload;
+                std::set<const void*> counted;
+                const uint64_t bytes = e->synth.getResources().getFilePool().getPreloadedBytes(counted);
+                processPreloadBytes += bytes;
+                processPreloadBytes -= e->preloadBytes;
+                e->preloadBytes = bytes;
+            }
             clearContext(s, i, *e);
         }
     s.stale = 0;
