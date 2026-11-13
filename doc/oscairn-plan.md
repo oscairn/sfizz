@@ -585,6 +585,9 @@ Absolute paths and escapes from the library are rejected, as in the Sampler.
 
 ### Releasing
 
+A plugin's version changes whenever its shipped binary does, so every release (including
+the first workflow build after hand-built packages) bumps it.
+
 The package version is the plugin descriptor's version (`clap/plugin.cpp`; the published
 release carries the same number, and the release scripts read it from there — libsfizz's own
 CMake version is upstream's and stays untouched). Bump it, commit, then tag the package
