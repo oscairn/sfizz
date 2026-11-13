@@ -752,6 +752,20 @@ void voiceCounts()
     CHECK(p.voices() == 0 && ctx->get(p.plugin, 0, &info) && info.active_voices == 0);
 }
 
+// An element whose velocity sensitivity mutes the velocity is silent for good: it ends (with its
+// NOTE_END) rather than looping unheard; at a velocity it does not mute it sounds
+void silentElements()
+{
+    const std::string head = "<control> oscairn_profile=1\n<global> sample=*sine oscairn_ampeg_attack=0 oscairn_ampeg_release=40\n";
+    Probe p(head + "<region> oscairn_amp_velsens=-64\n");
+    p.on(1, 60, 0, 100 / 127.0);
+    p.seconds(0.1);
+    CHECK(p.voices() == 0 && p.events.ends(1) == 1 && p.run.peak == 0.0f);
+    p.on(2, 60, 0, 1 / 127.0); // velocity 1 stays audible (K4)
+    p.seconds(0.1);
+    CHECK(p.voices() == 1 && p.events.ends(2) == 0);
+}
+
 // The voices and slots a pile of notes without note-offs can take, and what the host's limit does
 void stackedNotes(const std::string& sound, int notes, bool oneBlock)
 {
@@ -799,6 +813,7 @@ int main(int argc, char** argv)
             noteBalance(*sound, budget, 12345 + (budget ? 1 : 0));
     fullNoteTable();
     voiceCounts();
+    silentElements();
     stackedNotes(loopContinuous, 600, false);
     stackedNotes(loopContinuous, 600, true);
     stackedNotes(elements, 400, true);

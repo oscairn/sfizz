@@ -951,7 +951,9 @@ void Voice::renderBlock(AudioSpan<float, 2> buffer) noexcept
     }
 
     if (region->oscairn.ampegEnabled) {
-        if (impl.oscairnAmpEG_.isFinished())
+        // finished, or silent for good: the voice's constant gain is zero (a velocity sensitivity that
+        // mutes this velocity) and every other stage multiplies it
+        if (impl.oscairnAmpEG_.isFinished() || impl.baseGain_ == 0.0f)
             impl.switchState(State::cleanMeUp);
     }
     else if (!region->flexAmpEG) {
