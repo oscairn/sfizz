@@ -923,6 +923,23 @@ void sfz::FilePool::waitForBackgroundLoading() noexcept
         loadingJob(queuedData);
 }
 
+static std::atomic<int> loaderMode { 0 }; // FilePool::LoaderScheduling
+static std::atomic<int> loaderPriority { 0 };
+static std::atomic<int> appliedPolicy { -1 };
+static std::atomic<int> appliedPriority { -1 };
+
+void sfz::FilePool::setLoaderScheduling(LoaderScheduling mode, int priority) noexcept
+{
+    loaderPriority = priority;
+    loaderMode = static_cast<int>(mode);
+}
+
+void sfz::FilePool::lastLoaderScheduling(int& policy, int& priority) noexcept
+{
+    policy = appliedPolicy;
+    priority = appliedPriority;
+}
+
 void sfz::FilePool::raiseCurrentThreadPriority() noexcept
 {
 #if defined(_WIN32)
@@ -942,14 +959,30 @@ void sfz::FilePool::raiseCurrentThreadPriority() noexcept
         return;
     }
 
-    policy = SCHED_RR;
-    const int minprio = sched_get_priority_min(policy);
-    const int maxprio = sched_get_priority_max(policy);
-    param.sched_priority = minprio + config::backgroundLoaderPthreadPriority * (maxprio - minprio) / 100;
+    const auto mode = static_cast<LoaderScheduling>(loaderMode.load());
+    const int inheritedPolicy = policy;
+    const int minprio = sched_get_priority_min(SCHED_RR);
+    const int maxprio = sched_get_priority_max(SCHED_RR);
+    if (mode == LoaderScheduling::Normal) {
+        // explicitly: a thread inherits the policy of the thread that made it
+        policy = SCHED_OTHER;
+        param.sched_priority = 0;
+    } else if (mode == LoaderScheduling::Stock) {
+        policy = SCHED_RR;
+        param.sched_priority = minprio + config::backgroundLoaderPthreadPriority * (maxprio - minprio) / 100;
+    } else {
+        policy = mode == LoaderScheduling::Fifo ? SCHED_FIFO : SCHED_RR;
+        param.sched_priority = std::max(sched_get_priority_min(policy), std::min(loaderPriority.load(), sched_get_priority_max(policy)));
+    }
 
-    if (pthread_setschedparam(thread, policy, &param) != 0) {
+    if (mode == LoaderScheduling::Normal && inheritedPolicy == SCHED_OTHER) {
+        // already ordinary: nothing to set
+    } else if (pthread_setschedparam(thread, policy, &param) != 0) {
         DBG("[sfizz] Cannot set current thread scheduling parameters");
-        return;
+    }
+    if (pthread_getschedparam(thread, &policy, &param) == 0) {
+        appliedPolicy = policy;
+        appliedPriority = param.sched_priority;
     }
 #endif
 }

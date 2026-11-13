@@ -417,6 +417,18 @@ public:
      */
     static void raiseCurrentThreadPriority() noexcept;
     /**
+     * @brief Oscairn: what raiseCurrentThreadPriority gives the loader. Stock (the default) is
+     * sfizz's own SCHED_RR at backgroundLoaderPthreadPriority; Normal makes it SCHED_OTHER; RoundRobin
+     * and Fifo take an absolute priority. Read when a pool's threads start.
+     */
+    enum class LoaderScheduling { Stock, Normal, RoundRobin, Fifo };
+    static void setLoaderScheduling(LoaderScheduling mode, int priority = 0) noexcept;
+    /**
+     * @brief The policy and priority the last loader thread found itself with after
+     * raiseCurrentThreadPriority (the OS's values, -1 before any), for tests.
+     */
+    static void lastLoaderScheduling(int& policy, int& priority) noexcept;
+    /**
      * @brief Change whether all samples are loaded in ram.
      * This will trigger a purge and reloading.
      *

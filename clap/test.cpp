@@ -14,6 +14,8 @@
 #include <oscairn-clap/voice-budget.h>
 #include "sfizz/FilePool.h"
 #include <dirent.h>
+#include <pthread.h>
+#include <sched.h>
 #include <dlfcn.h>
 #include <unistd.h>
 #if defined(__APPLE__)
@@ -1243,6 +1245,70 @@ int main(int argc, char** argv)
         CHECK(vb && vb->honors_volume && vb->set_limits && vb->active_voices && vb->notes);
         CHECK(vb && vb->honors_volume(plugin));
         plugin->destroy(plugin);
+    }
+    { // the sample loader thread is an ordinary thread by default; OSCAIRN_SAMPLER_LOADER_PRIORITY
+      // asks for a real-time one (which only a process allowed to can have)
+        const auto loaderPolicy = [](const char* setting, int wanted, int tries) {
+            if (setting) setenv("OSCAIRN_SAMPLER_LOADER_PRIORITY", setting, 1); else unsetenv("OSCAIRN_SAMPLER_LOADER_PRIORITY");
+            auto* plugin = create();
+            CHECK(load(plugin, stateFor(sine)));
+            int policy = -1, priority = -1;
+            for (int i = 0; i < tries; ++i) { // the loader thread starts with the synth
+                sfz::FilePool::lastLoaderScheduling(policy, priority);
+                if (policy == wanted)
+                    break;
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            }
+            plugin->destroy(plugin);
+            unsetenv("OSCAIRN_SAMPLER_LOADER_PRIORITY");
+            return policy;
+        };
+        CHECK(loaderPolicy(nullptr, SCHED_OTHER, 100) == SCHED_OTHER);
+        CHECK(loaderPolicy("normal", SCHED_OTHER, 100) == SCHED_OTHER);
+        CHECK(loaderPolicy("rr:", SCHED_OTHER, 100) == SCHED_OTHER); // not a policy: normal
+        { // whether this process may have a real-time thread at all
+            bool allowed = false;
+            std::thread([&] {
+                sched_param param {};
+                param.sched_priority = sched_get_priority_min(SCHED_RR);
+                allowed = pthread_setschedparam(pthread_self(), SCHED_RR, &param) == 0;
+            }).join();
+            if (allowed) {
+                CHECK(loaderPolicy("rr:1", SCHED_RR, 200) == SCHED_RR);
+                CHECK(loaderPolicy("fifo:1", SCHED_FIFO, 200) == SCHED_FIFO);
+                CHECK(loaderPolicy("stock", SCHED_RR, 200) == SCHED_RR);
+                CHECK(loaderPolicy(nullptr, SCHED_OTHER, 200) == SCHED_OTHER); // and back
+            } else
+                std::printf("loader priority: real-time policies not permitted here, rr/fifo/stock unchecked\n");
+        }
+#ifdef __linux__
+        { // no thread of the process but those of the host is real-time by default
+            auto* plugin = create();
+            CHECK(load(plugin, stateFor(sine)));
+            CHECK(plugin->activate(plugin, 48000, 1, 256));
+            Run run { plugin };
+            Events events;
+            events.note(CLAP_EVENT_NOTE_ON, 0, 1, 60, 1.0);
+            for (int b = 0; b < 20; ++b)
+                run.block(events, 256);
+            std::this_thread::sleep_for(std::chrono::milliseconds(200));
+            int threads = 0;
+            if (DIR* d = opendir("/proc/self/task")) {
+                while (const dirent* e = readdir(d)) {
+                    const int tid = std::atoi(e->d_name);
+                    if (tid <= 0)
+                        continue;
+                    ++threads;
+                    const int policy = sched_getscheduler(tid);
+                    CHECK(policy == SCHED_OTHER || policy == SCHED_BATCH || policy == SCHED_IDLE);
+                }
+                closedir(d);
+            }
+            CHECK(threads >= 2);
+            plugin->deactivate(plugin);
+            plugin->destroy(plugin);
+        }
+#endif
     }
     { // voice budget, the gate of Oscairn RFC 0018 step 4: a layered sound under pressure gives up
       // quiet elements before whole notes; a note ends only once its last voice has

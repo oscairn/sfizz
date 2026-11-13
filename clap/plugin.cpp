@@ -225,6 +225,25 @@ int elementSampleQuality()
     return quality;
 }
 
+// The sample loader's scheduling, OSCAIRN_SAMPLER_LOADER_PRIORITY: unset or "normal" is an ordinary
+// thread (sfizz's own SCHED_RR 50 can hold a core against the kernel's interrupt threads, and the
+// audio thread's, while it decodes chunks); "rr:<n>" or "fifo:<n>" is that real-time policy at
+// priority n; "stock" is sfizz's default. Anything else is "normal".
+void applyLoaderScheduling()
+{
+    using LS = sfz::FilePool::LoaderScheduling;
+    const char* v = std::getenv("OSCAIRN_SAMPLER_LOADER_PRIORITY");
+    char* end = nullptr;
+    if (v && !std::strcmp(v, "stock"))
+        sfz::FilePool::setLoaderScheduling(LS::Stock);
+    else if (v && (!std::strncmp(v, "rr:", 3) || !std::strncmp(v, "fifo:", 5))) {
+        const bool fifo = v[0] == 'f';
+        const long n = std::strtol(v + (fifo ? 5 : 3), &end, 10);
+        sfz::FilePool::setLoaderScheduling(*end || end == v + (fifo ? 5 : 3) ? LS::Normal : fifo ? LS::Fifo : LS::RoundRobin, static_cast<int>(n));
+    } else
+        sfz::FilePool::setLoaderScheduling(LS::Normal);
+}
+
 // A number from a /proc or cgroup file: the first after `key` (empty: the file's first), or -1
 int64_t readNumber(const char* path, const char* key)
 {
@@ -1759,6 +1778,7 @@ const clap_plugin_t* createPlugin(const clap_plugin_factory_t*, const clap_host_
 {
     if (!host || !id || std::strcmp(id, descriptor.id))
         return nullptr;
+    applyLoaderScheduling();
     auto* s = new Plugin;
     s->host = host;
     s->plugin.desc = &descriptor;
