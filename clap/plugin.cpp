@@ -96,6 +96,12 @@ constexpr const char* freshPatch = "<region> sample=*sine\n"; // a fresh instanc
 constexpr uint32_t selectionCapacity = 32;
 constexpr int16_t chokeMark = -2; // a queued choke_retiring, in place of a channel
 constexpr size_t maxSlots = sfz::config::maxVoices; // voice slots a synth has at most
+// Synths render at most this many frames at a time: a synth's buffers grow with its block
+// (about 5 KB a frame), and a host may offer blocks of thousands of frames
+constexpr uint32_t maxRenderFrames = 512;
+// Frames of each sample file held in memory from loading (sfizz's own default is 8192): the time
+// the loader has to bring a played file's next chunk, 93 ms at 44.1 kHz and the sample's own pitch
+constexpr uint32_t preloadFrames = 4096;
 static_assert(busCount <= 10, "a bus is saved as one digit");
 static_assert(contextCount * maxSlots <= oscairn_sampler::maxBudgetVoices && maxNotes <= oscairn_sampler::maxBudgetNotes, "budget.h");
 
@@ -196,6 +202,7 @@ void configure(const Plugin& s, sfz::Synth& synth)
 {
     synth.setSampleRate(static_cast<float>(s.sampleRate));
     synth.setSamplesPerBlock(static_cast<int>(s.maxFrames));
+    synth.setPreloadSize(preloadFrames);
 }
 
 // The sample files a patch names, relative to its directory (default_path applied)
@@ -626,7 +633,7 @@ bool activate(const clap_plugin_t* p, double rate, uint32_t, uint32_t maxFrames)
 {
     auto& s = self(p);
     s.sampleRate = rate;
-    s.maxFrames = std::max<uint32_t>(1, maxFrames);
+    s.maxFrames = std::min(std::max<uint32_t>(1, maxFrames), maxRenderFrames);
     // A choke fades over 3 ms (Oscairn RFC 0018)
     s.chokeFrames = std::max<uint32_t>(1, static_cast<uint32_t>(rate * 0.003 + 0.5));
     s.left.assign(s.maxFrames, 0.0f);

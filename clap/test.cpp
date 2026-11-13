@@ -1896,6 +1896,21 @@ int main(int argc, char** argv)
         plugin->destroy(plugin);
         removeFiles(dir);
     }
+    { // a host's large maximum block costs no more than 512 frames' worth: the synths render at
+      // most that many at a time (Oscairn's workers offer 8192)
+        auto* plugin = create();
+        CHECK(load(plugin, stateFor(sine)));
+        const double before = heapMB();
+        CHECK(plugin->activate(plugin, 48000, 1, 8192));
+        CHECK(heapMB() - before < 8);
+        Run run { plugin };
+        Events events;
+        events.note(CLAP_EVENT_NOTE_ON, 0, 1, 60, 1.0);
+        run.block(events, 8192);
+        CHECK(run.peak > 0.1f && run.left[100] != 0.0f && run.left[8000] != 0.0f);
+        plugin->deactivate(plugin);
+        plugin->destroy(plugin);
+    }
     // No allocation in any process call above
     CHECK(guardedAllocations.load() == 0);
     if (guardedAllocations.load())
