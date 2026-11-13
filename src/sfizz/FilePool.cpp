@@ -31,7 +31,6 @@
 #include "Config.h"
 #include "utility/SwapAndPop.h"
 #include "utility/Debug.h"
-#include <ThreadPool.h>
 #include <absl/types/span.h>
 #include <absl/strings/match.h>
 #include <absl/memory/memory.h>
@@ -46,29 +45,6 @@
 #include <pthread.h>
 #endif
 using namespace std::placeholders;
-
-static std::weak_ptr<ThreadPool> globalThreadPoolWeakPtr;
-static std::mutex globalThreadPoolMutex;
-
-static std::shared_ptr<ThreadPool> globalThreadPool()
-{
-    std::shared_ptr<ThreadPool> threadPool;
-
-    threadPool = globalThreadPoolWeakPtr.lock();
-    if (threadPool)
-        return threadPool;
-
-    std::lock_guard<std::mutex> lock(globalThreadPoolMutex);
-    threadPool = globalThreadPoolWeakPtr.lock();
-    if (threadPool)
-        return threadPool;
-
-    unsigned numThreads = std::thread::hardware_concurrency();
-    numThreads = (numThreads > 2) ? (numThreads - 2) : 1;
-    threadPool.reset(new ThreadPool(numThreads));
-    globalThreadPoolWeakPtr = threadPool;
-    return threadPool;
-}
 
 void readBaseFile(sfz::AudioReader& reader, sfz::FileAudioBuffer& output, uint32_t numFrames)
 {
@@ -142,14 +118,12 @@ void streamFromFile(sfz::AudioReader& reader, sfz::FileAudioBuffer& output, std:
 }
 
 sfz::FilePool::FilePool()
-    : filesToLoad(alignedNew<FileQueue>()),
-      threadPool(globalThreadPool())
+    : filesToLoad(alignedNew<FileQueue>())
 {
-    loadingJobs.reserve(config::maxVoices);
     lastUsedFiles.reserve(config::maxVoices);
     garbageToCollect.reserve(config::maxVoices);
-    dispatchThread = std::thread(&FilePool::dispatchingJob, this);
-    garbageThread = std::thread(&FilePool::garbageJob, this);
+    dispatchThread.start([this]() { dispatchingJob(); });
+    garbageThread.start([this]() { garbageJob(); });
 }
 
 sfz::FilePool::~FilePool()
@@ -163,9 +137,6 @@ sfz::FilePool::~FilePool()
     dispatchFlag = false;
     dispatchBarrier.post(ec);
     dispatchThread.join();
-
-    for (auto& job : loadingJobs)
-        job.wait();
 }
 
 bool sfz::FilePool::checkSample(std::string& filename) const noexcept
@@ -611,36 +582,15 @@ uint32_t sfz::FilePool::getPreloadSize() const noexcept
     return preloadSize;
 }
 
-template <typename R>
-bool is_ready(std::future<R> const& f)
-{
-    return f.wait_for(std::chrono::seconds(0)) == std::future_status::ready;
-}
-
-void sfz::FilePool::dispatchQueuedFiles() noexcept
-{
-    QueuedFileData queuedData;
-    while (filesToLoad->try_pop(queuedData)) {
-        if (queuedData.id.expired()) {
-            // file ID was nulled, it means the region was deleted, ignore
-        }
-        else
-            loadingJobs.push_back(
-                threadPool->enqueue([this](const QueuedFileData& data) { loadingJob(data); }, std::move(queuedData)));
-    }
-}
-
+// The pool's one loader thread: files load one at a time, in the order voices asked for them
 void sfz::FilePool::dispatchingJob() noexcept
 {
+    raiseCurrentThreadPriority();
     while (dispatchBarrier.wait(), dispatchFlag) {
-        std::lock_guard<std::mutex> guard { loadingJobsMutex };
-
-        dispatchQueuedFiles();
-
-        // Clear finished jobs
-        swapAndPopAll(loadingJobs, [](std::future<void>& future) {
-            return is_ready(future);
-        });
+        std::lock_guard<std::mutex> loading { loadingMutex };
+        QueuedFileData queuedData;
+        while (filesToLoad->try_pop(queuedData))
+            loadingJob(queuedData);
     }
 }
 
@@ -654,15 +604,11 @@ void sfz::FilePool::garbageJob() noexcept
 
 void sfz::FilePool::waitForBackgroundLoading() noexcept
 {
-    std::lock_guard<std::mutex> guard { loadingJobsMutex };
-
-    // Files queued by the notes just dispatched may not have reached the dispatch thread yet
-    dispatchQueuedFiles();
-
-    for (auto& job : loadingJobs)
-        job.wait();
-
-    loadingJobs.clear();
+    // Whole files the notes queued load here, or have loaded once the loader lets go
+    std::lock_guard<std::mutex> loading { loadingMutex };
+    QueuedFileData queuedData;
+    while (filesToLoad->try_pop(queuedData))
+        loadingJob(queuedData);
 }
 
 void sfz::FilePool::raiseCurrentThreadPriority() noexcept

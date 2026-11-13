@@ -11,9 +11,18 @@
 #include <oscairn-clap/sound-contexts.h>
 #include <oscairn-clap/ui.h>
 #include <oscairn-clap/voice-budget.h>
+#include "sfizz/FilePool.h"
 #include <dirent.h>
 #include <dlfcn.h>
+#include <unistd.h>
+#if defined(__APPLE__)
+#include <mach/mach.h>
+#include <malloc/malloc.h>
+#elif defined(__GLIBC__)
+#include <malloc.h>
+#endif
 #include <atomic>
+#include <chrono>
 #include <cstdlib>
 #include <new>
 #include <algorithm>
@@ -390,6 +399,27 @@ const std::string layered =
     "<control> oscairn_profile=1\n<group> sample=*sine oscairn_ampeg_attack=0 oscairn_ampeg_release=60 oscairn_amp_velsens=32\n"
     "<region> volume=0\n<region> volume=-6\n<region> volume=-12\n<region> volume=-18\n";
 
+// The process's threads
+int threadCount()
+{
+#if defined(__APPLE__)
+    thread_act_array_t threads;
+    mach_msg_type_number_t count = 0;
+    if (task_threads(mach_task_self(), &threads, &count) != KERN_SUCCESS)
+        return -1;
+    for (mach_msg_type_number_t i = 0; i < count; ++i)
+        mach_port_deallocate(mach_task_self(), threads[i]);
+    vm_deallocate(mach_task_self(), reinterpret_cast<vm_address_t>(threads), count * sizeof(thread_act_t));
+    return static_cast<int>(count);
+#else
+    std::ifstream f("/proc/self/status");
+    std::string line;
+    while (std::getline(f, line))
+        if (line.compare(0, 8, "Threads:") == 0)
+            return std::atoi(line.c_str() + 8);
+    return -1;
+#endif
+}
 } // namespace
 
 int main(int argc, char** argv)
@@ -1736,6 +1766,15 @@ int main(int argc, char** argv)
         CHECK(events.ends(1) == 1 && run.peak == 0.0f);
         plugin->deactivate(plugin);
         plugin->destroy(plugin);
+    }
+    { // threads: a sound's synth adds its loader and its garbage collector, whatever the machine's
+      // cores (a process that locks its memory holds every thread's stack)
+        const int before = threadCount();
+        auto* plugin = create();
+        CHECK(load(plugin, stateFor(sine)));
+        CHECK(threadCount() - before == 2);
+        plugin->destroy(plugin);
+        CHECK(threadCount() == before);
     }
     // No allocation in any process call above
     CHECK(guardedAllocations.load() == 0);

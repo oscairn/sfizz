@@ -46,7 +46,7 @@
 #include <future>
 #include <mutex>
 #include <memory>
-class ThreadPool;
+#include "utility/SmallStackThread.h"
 
 namespace sfz {
 using FileAudioBuffer = AudioBuffer<float, 2, config::defaultAlignment,
@@ -392,20 +392,16 @@ private:
     aligned_unique_ptr<FileQueue> filesToLoad;
 
     void dispatchingJob() noexcept;
-    void dispatchQueuedFiles() noexcept; // with loadingJobsMutex held
     void garbageJob() noexcept;
     void loadingJob(const QueuedFileData& data) noexcept;
-    std::mutex loadingJobsMutex;
-    std::vector<std::future<void>> loadingJobs;
+    std::mutex loadingMutex; // held while a whole file loads
     // Started at the end of the constructor, once every member they use exists
-    std::thread dispatchThread;
-    std::thread garbageThread;
+    SmallStackThread dispatchThread;
+    SmallStackThread garbageThread;
 
     SpinMutex garbageAndLastUsedMutex;
     std::vector<FileId> lastUsedFiles;
     std::vector<FileAudioBuffer> garbageToCollect;
-
-    std::shared_ptr<ThreadPool> threadPool;
 
     std::shared_ptr<SharedPreloads> sharedPreloads;
     size_t fileOpens { 0 };
