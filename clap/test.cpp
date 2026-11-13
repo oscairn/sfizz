@@ -681,9 +681,12 @@ void noteBalance(const std::string& sound, bool budget, uint32_t seed)
             else if (what < 84)
                 p.cc(123, 0, static_cast<int>(next(3)));
         }
-        std::stable_sort(p.events.in.begin(), p.events.in.end(), [](const std::vector<uint8_t>& a, const std::vector<uint8_t>& b) {
-            return reinterpret_cast<const clap_event_header_t*>(a.data())->time < reinterpret_cast<const clap_event_header_t*>(b.data())->time;
-        }); // the host's events come in time order
+        // the host's events come in time order (an insertion sort: std::stable_sort allocates with
+        // the nothrow operator new, which the allocation guard does not replace)
+        auto timeOf = [](const std::vector<uint8_t>& e) { return reinterpret_cast<const clap_event_header_t*>(e.data())->time; };
+        for (size_t i = 1; i < p.events.in.size(); ++i)
+            for (size_t j = i; j > 0 && timeOf(p.events.in[j]) < timeOf(p.events.in[j - 1]); --j)
+                std::swap(p.events.in[j], p.events.in[j - 1]);
         p.blocks(1);
         peak = std::max(peak, p.voices());
         CHECK(p.voices() <= 512);
