@@ -357,6 +357,7 @@ void setLimits(const clap_plugin_t* p, uint32_t limit, std::vector<oscairn_voice
         budgetOf(p)->set_limits(p, limit, contexts.data(), static_cast<uint32_t>(contexts.size()));
     guarded = false;
 }
+double lastCost = -1; // the voice cost the last activeVoices() call reported
 uint32_t activeVoices(const clap_plugin_t* p)
 {
     if (!budgetOf(p))
@@ -365,7 +366,7 @@ uint32_t activeVoices(const clap_plugin_t* p)
     guarded = true;
     const uint32_t n = budgetOf(p)->active_voices(p, &cost);
     guarded = false;
-    CHECK(cost == 0); // no estimate
+    lastCost = cost;
     return n;
 }
 struct BudgetNotes {
@@ -1244,6 +1245,34 @@ int main(int argc, char** argv)
         auto* vb = budgetOf(plugin);
         CHECK(vb && vb->honors_volume && vb->set_limits && vb->active_voices && vb->notes);
         CHECK(vb && vb->honors_volume(plugin));
+        plugin->destroy(plugin);
+    }
+    { // voice budget: the per-voice cost estimate: 0 before any voice, positive and plausible while
+      // voices sound, kept (not 0, not a jump) once they stop
+        auto* plugin = create();
+        CHECK(load(plugin, stateFor(sine)));
+        CHECK(plugin->activate(plugin, 48000, 1, 256));
+        Run run { plugin };
+        Events events;
+        for (int b = 0; b < 4; ++b)
+            run.block(events, 256);
+        CHECK(activeVoices(plugin) == 0 && lastCost == 0);
+        events.note(CLAP_EVENT_NOTE_ON, 0, 1, 60, 1.0);
+        events.note(CLAP_EVENT_NOTE_ON, 0, 2, 64, 1.0);
+        for (int b = 0; b < 40; ++b)
+            run.block(events, 256);
+        CHECK(activeVoices(plugin) == 2);
+        const double sounding = lastCost;
+        CHECK(sounding > 0.01 && sounding < 100000); // microseconds a block for one voice
+        events.note(CLAP_EVENT_NOTE_OFF, 0, 1, 60, 0.0);
+        events.note(CLAP_EVENT_NOTE_OFF, 0, 2, 64, 0.0);
+        for (int b = 0; b < 2000 && run.status != CLAP_PROCESS_SLEEP; ++b)
+            run.block(events, 256);
+        for (int b = 0; b < 8; ++b)
+            run.block(events, 256);
+        CHECK(activeVoices(plugin) == 0);
+        CHECK(lastCost > 0.01 && lastCost < 100000 && lastCost < 20 * sounding && lastCost > sounding / 20);
+        plugin->deactivate(plugin);
         plugin->destroy(plugin);
     }
     { // the sample loader thread is an ordinary thread by default; OSCAIRN_SAMPLER_LOADER_PRIORITY

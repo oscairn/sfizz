@@ -73,6 +73,7 @@
 #include <algorithm>
 #include <atomic>
 #include <bitset>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -203,6 +204,10 @@ struct Plugin {
     size_t noteCount { 0 };
     std::vector<float> left, right, mix[2 * busCount];
     oscairn_sampler::VoiceBudget budget; // the host's limits, as set_limits last gave them
+    // One voice's cost in microseconds a block: a running mean of the audio thread's block time
+    // over the voices of the block, kept through blocks with none; 0 before any voice. Written by
+    // process(), read by active_voices from the host's audio thread.
+    std::atomic<double> voiceCost { 0 };
     // Contexts a reset found idle, which the main thread may be replacing: each is cleared when
     // next rendered, at the start of a process call, before any event
     uint32_t stale { 0 };
@@ -818,6 +823,7 @@ void reset(const clap_plugin_t* p)
 clap_process_status process(const clap_plugin_t* p, const clap_process_t* process)
 {
     auto& s = self(p);
+    const auto blockStart = std::chrono::steady_clock::now(); // the block's two clock reads, none per voice
     // valid for this process() only
     const clap_audio_buffer_t* ringOut = s.ringOut;
     s.ringOut = nullptr;
@@ -939,19 +945,27 @@ clap_process_status process(const clap_plugin_t* p, const clap_process_t* proces
     for (size_t i = 0; i < s.noteCount; ++i)
         ++notesPerContext[s.notes[i].context];
     bool anySound = false;
+    uint32_t voices = 0;
     for (uint32_t i = 0; i < contextCount; ++i) {
         Context& c = s.contexts[i];
         const bool rendered = c.selectedChannels.load(std::memory_order_acquire) || c.sounding.load(std::memory_order_relaxed);
         if (!rendered && !notesPerContext[i])
             continue;
         Engine* e = c.live.load(std::memory_order_relaxed);
-        const bool sounding = notesPerContext[i] > 0 || (e && e->synth.getNumActiveVoices() > 0);
+        const int active = e ? e->synth.getNumActiveVoices() : 0;
+        voices += static_cast<uint32_t>(active);
+        const bool sounding = notesPerContext[i] > 0 || active > 0;
         c.sounding.store(sounding ? 1 : 0, std::memory_order_release);
         if (!sounding) {
             s.fading[i] = false;
             s.busesInUse[i] = 0; // no voice left on an older bus
         }
         anySound = anySound || sounding;
+    }
+    if (voices) { // voices that ended in the block are not counted, so the figure errs high
+        const double us = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - blockStart).count() / voices;
+        const double last = s.voiceCost.load(std::memory_order_relaxed);
+        s.voiceCost.store(last > 0 ? last + 0.1 * (us - last) : us, std::memory_order_relaxed);
     }
     return anySound ? CLAP_PROCESS_CONTINUE : CLAP_PROCESS_SLEEP;
 }
@@ -1504,7 +1518,7 @@ uint32_t budgetActiveVoices(const clap_plugin_t* p, double* voiceCost)
 {
     auto& s = self(p);
     if (voiceCost)
-        *voiceCost = 0; // no estimate: the host measures the instance
+        *voiceCost = s.voiceCost.load(std::memory_order_relaxed);
     uint32_t n = 0;
     for (uint32_t i = 0; i < contextCount; ++i)
         if (Engine* e = rendered(s, i))
