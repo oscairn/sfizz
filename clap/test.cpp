@@ -1896,6 +1896,32 @@ int main(int argc, char** argv)
         plugin->destroy(plugin);
         removeFiles(dir);
     }
+    { // voices: a sound plays up to 256 at once (sfizz's own default is 64), and the host's
+      // voice budget is the limit below that
+        const std::string two = "<region> sample=*sine amp_veltrack=0 ampeg_release=0.01\n<region> sample=*saw amp_veltrack=0 ampeg_release=0.01\n";
+        auto* plugin = create();
+        CHECK(load(plugin, stateFor(two)));
+        CHECK(plugin->activate(plugin, 48000, 1, 128));
+        Run run { plugin };
+        Events events;
+        for (int k = 0; k < 120; ++k)
+            events.note(CLAP_EVENT_NOTE_ON, 0, k, static_cast<int16_t>(4 + k), 1.0);
+        for (int b = 0; b < 20; ++b) // past any steal's fade
+            run.block(events, 128);
+        CHECK(activeVoices(plugin) == 240);
+        setLimits(plugin, 100, { selectedEntry(0, 0, 5) });
+        for (int b = 0; b < 20; ++b)
+            run.block(events, 128);
+        CHECK(activeVoices(plugin) == 100);
+        setLimits(plugin, 0);
+        for (int k = 0; k < 120; ++k)
+            events.note(CLAP_EVENT_NOTE_OFF, 0, k, static_cast<int16_t>(4 + k), 0.0);
+        for (int b = 0; b < 200 && run.status != CLAP_PROCESS_SLEEP; ++b)
+            run.block(events, 128);
+        CHECK(activeVoices(plugin) == 0);
+        plugin->deactivate(plugin);
+        plugin->destroy(plugin);
+    }
     { // a host's large maximum block costs no more than 512 frames' worth: the synths render at
       // most that many at a time (Oscairn's workers offer 8192)
         auto* plugin = create();

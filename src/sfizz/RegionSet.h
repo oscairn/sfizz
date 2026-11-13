@@ -128,7 +128,7 @@ private:
     std::vector<Region*> regions;
     std::vector<RegionSet*> subsets;
     std::vector<Voice*> voices;
-    unsigned polyphonyLimit { config::maxVoices };
+    unsigned polyphonyLimit { config::maxPolyphony };
 };
 
 }

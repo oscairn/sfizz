@@ -216,7 +216,7 @@ void Synth::Impl::buildRegion(const std::vector<Opcode>& regionOpcodes)
         setCurrentSwitch(*lastRegion->defaultSwitch);
 
     // There was a combination of group= and polyphony= on a region, so set the group polyphony
-    if (lastRegion->group != Default::group && lastRegion->polyphony != config::maxVoices) {
+    if (lastRegion->group != Default::group && lastRegion->polyphony != config::maxPolyphony) {
         voiceManager_.setGroupPolyphony(lastRegion->group, lastRegion->polyphony);
     } else {
         // Just check that there are enough polyphony groups

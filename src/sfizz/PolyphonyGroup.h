@@ -68,7 +68,7 @@ public:
     unsigned getMostRecentStartTimestamp() const noexcept { return mostRecentStartStamp_; }
 
 private:
-    unsigned polyphonyLimit { config::maxVoices };
+    unsigned polyphonyLimit { config::maxPolyphony };
     std::vector<Voice*> voices;
     unsigned mostRecentStartStamp_ { 0 };
 };

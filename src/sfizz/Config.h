@@ -43,7 +43,10 @@ namespace config {
     constexpr int streamUnwantedMs { 250 };
     constexpr int streamPressureMs { 50 };
     constexpr int numVoices { 64 };
-    constexpr unsigned maxVoices { 256 };
+    // The most voices the engine plays (setNumVoices) and the bound of polyphony opcodes
+    constexpr unsigned maxPolyphony { 256 };
+    // The most voice slots a synth has: up to maxPolyphony playing, and as many fading out
+    constexpr unsigned maxVoices { 2 * maxPolyphony };
     constexpr unsigned smoothingSteps { 512 };
     constexpr uint16_t xfadeSmoothing { 5 };
     constexpr uint16_t gainSmoothing { 0 };

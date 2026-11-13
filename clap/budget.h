@@ -17,7 +17,7 @@
 
 namespace oscairn_sampler {
 
-constexpr size_t maxBudgetVoices = 8 * 256; // candidates: eight contexts of 256 voice slots
+constexpr size_t maxBudgetVoices = 8 * 512; // candidates: eight contexts of 512 voice slots
 constexpr uint32_t maxBudgetNotes = 256;
 
 // A voice as the SDK's order sees it (oscairn::voices::Candidate)

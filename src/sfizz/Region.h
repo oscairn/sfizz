@@ -269,7 +269,7 @@ struct Region {
     OffMode offMode { Default::offMode }; // off_mode
     float offTime { Default::offTime }; // off_mode
     absl::optional<uint32_t> notePolyphony {}; // note_polyphony
-    uint32_t polyphony { config::maxVoices }; // polyphony
+    uint32_t polyphony { config::maxPolyphony }; // polyphony
     SelfMask selfMask { Default::selfMask };
     bool rtDead { Default::rtDead };
 

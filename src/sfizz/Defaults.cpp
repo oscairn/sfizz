@@ -43,8 +43,8 @@ FloatSpec oscillatorModDepthMod { 0.0f, {0.0f, 10000.0f}, kNormalizePercent|kPer
 Int64Spec group { 0, {-int32_t_max, uint32_t_max}, 0 };
 UInt16Spec output { 0, {0, config::maxChannels / 2 - 1}, kEnforceBounds };
 FloatSpec offTime { 6e-3f, {0.0f, 100.0f}, kPermissiveBounds };
-UInt32Spec polyphony { config::maxVoices, {0, config::maxVoices}, kEnforceBounds };
-UInt32Spec notePolyphony { config::maxVoices, {1, config::maxVoices}, kEnforceBounds };
+UInt32Spec polyphony { config::maxPolyphony, {0, config::maxPolyphony}, kEnforceBounds };
+UInt32Spec notePolyphony { config::maxPolyphony, {1, config::maxPolyphony}, kEnforceBounds };
 UInt8Spec key { 60, {0, 127}, kCanBeNote };
 UInt8Spec loKey { 0, {0, 127}, kCanBeNote };
 UInt8Spec hiKey { 127, {0, 127}, kCanBeNote };

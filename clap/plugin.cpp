@@ -96,6 +96,9 @@ constexpr const char* freshPatch = "<region> sample=*sine\n"; // a fresh instanc
 constexpr uint32_t selectionCapacity = 32;
 constexpr int16_t chokeMark = -2; // a queued choke_retiring, in place of a channel
 constexpr size_t maxSlots = sfz::config::maxVoices; // voice slots a synth has at most
+// Voices each sound plays at most (sfizz's engine polyphony): the host's voice budget and the
+// patch's own polyphony opcodes are the limits below it. As many slots again hold fading voices.
+constexpr int voicesPerSound = static_cast<int>(sfz::config::maxPolyphony);
 // Synths render at most this many frames at a time: a synth's buffers grow with its block
 // (about 5 KB a frame), and a host may offer blocks of thousands of frames
 constexpr uint32_t maxRenderFrames = 512;
@@ -202,6 +205,7 @@ void configure(const Plugin& s, sfz::Synth& synth)
 {
     synth.setSampleRate(static_cast<float>(s.sampleRate));
     synth.setSamplesPerBlock(static_cast<int>(s.maxFrames));
+    synth.setNumVoices(voicesPerSound);
     synth.setPreloadSize(preloadFrames);
 }
 
