@@ -728,6 +728,30 @@ void fullNoteTable()
     CHECK(p.events.ends(0) == 1);
 }
 
+// What the host reads: the voice budget's active_voices is every voice not free in the sounds the
+// plugin renders (releasing ones too); a sound context's own active_voices is its share of that
+void voiceCounts()
+{
+    Probe p(elements);
+    auto* ctx = static_cast<const oscairn_plugin_sound_contexts_t*>(p.plugin->get_extension(p.plugin, OSCAIRN_EXT_SOUND_CONTEXTS));
+    oscairn_sound_context_info_t info {};
+    for (int i = 0; i < 5; ++i)
+        p.on(i, static_cast<int16_t>(60 + i));
+    p.seconds(0.2);
+    CHECK(p.voices() == 10); // two sustained elements a note
+    CHECK(ctx->get(p.plugin, 0, &info) && info.active_voices == 10 && !info.idle);
+    p.off(0, 60);
+    p.off(1, 61);
+    p.blocks(1);
+    CHECK(p.voices() == 10 + 2); // releasing voices count, and a key-off element starts with each note-off
+    CHECK(ctx->get(p.plugin, 0, &info) && info.active_voices == p.voices());
+    p.seconds(3);
+    CHECK(p.voices() == 6 && ctx->get(p.plugin, 0, &info) && info.active_voices == 6);
+    p.cc(123, 0);
+    p.seconds(0.1);
+    CHECK(p.voices() == 0 && ctx->get(p.plugin, 0, &info) && info.active_voices == 0);
+}
+
 // The voices and slots a pile of notes without note-offs can take, and what the host's limit does
 void stackedNotes(const std::string& sound, int notes, bool oneBlock)
 {
@@ -774,6 +798,7 @@ int main(int argc, char** argv)
         for (bool budget : { false, true })
             noteBalance(*sound, budget, 12345 + (budget ? 1 : 0));
     fullNoteTable();
+    voiceCounts();
     stackedNotes(loopContinuous, 600, false);
     stackedNotes(loopContinuous, 600, true);
     stackedNotes(elements, 400, true);

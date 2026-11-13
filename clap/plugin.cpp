@@ -155,6 +155,7 @@ struct Context {
     std::atomic<uint32_t> selectedChannels { 0 }; // written by the audio thread
     std::atomic<uint32_t> queued { 0 };           // selections not yet applied
     std::atomic<uint32_t> sounding { 0 };         // notes or voices left, audio thread
+    std::atomic<uint32_t> voices { 0 };           // voices not free at the last block's end, audio thread
     std::atomic<uint32_t> bus { 0 };              // the output bus new voices take
     std::atomic<uint32_t> switches { 0 };         // Assign Switch 1 and 2 (bits 0 and 1), as last set
 };
@@ -589,6 +590,7 @@ void clearContext(Plugin& s, uint32_t i, Engine& e)
     e.synth.restart();
     applySwitches(s.contexts[i], e);
     s.contexts[i].sounding.store(0, std::memory_order_release);
+    s.contexts[i].voices.store(0, std::memory_order_relaxed);
 }
 
 // An Assign Switch event: the switch of the sound its channel selects, or of every selected
@@ -1012,11 +1014,14 @@ clap_process_status process(const clap_plugin_t* p, const clap_process_t* proces
     for (uint32_t i = 0; i < contextCount; ++i) {
         Context& c = s.contexts[i];
         const bool rendered = c.selectedChannels.load(std::memory_order_acquire) || c.sounding.load(std::memory_order_relaxed);
-        if (!rendered && !notesPerContext[i])
+        if (!rendered && !notesPerContext[i]) {
+            c.voices.store(0, std::memory_order_relaxed);
             continue;
+        }
         Engine* e = c.live.load(std::memory_order_relaxed);
         const int active = e ? e->synth.getNumActiveVoices() : 0;
         voices += static_cast<uint32_t>(active);
+        c.voices.store(static_cast<uint32_t>(active), std::memory_order_relaxed);
         const bool sounding = notesPerContext[i] > 0 || active > 0;
         c.sounding.store(sounding ? 1 : 0, std::memory_order_release);
         if (!sounding) {
@@ -1211,9 +1216,10 @@ bool contextGet(const clap_plugin_t* p, uint32_t slot, oscairn_sound_context_inf
     info->id = c.id;
     std::memcpy(info->name, c.name, sizeof(c.name));
     info->selected_channels = c.selectedChannels.load(std::memory_order_acquire);
-    // shortcut: 1 while the context sounds, not a voice count
-    info->active_voices = c.sounding.load(std::memory_order_acquire);
-    info->idle = !info->selected_channels && !c.queued.load(std::memory_order_acquire) && !info->active_voices;
+    // the voices the context had at the last block's end, every one not free (releasing and
+    // fading ones too); 0 once its notes and voices are gone
+    info->active_voices = c.voices.load(std::memory_order_relaxed);
+    info->idle = !info->selected_channels && !c.queued.load(std::memory_order_acquire) && !c.sounding.load(std::memory_order_acquire);
     return true;
 }
 
@@ -1429,6 +1435,7 @@ bool snapshotLoad(const clap_plugin_t* p, const clap_istream_t* stream)
         std::snprintf(c.name, sizeof(c.name), "%s", used[i] ? names[i].c_str() : "");
         c.queued = 0;
         c.sounding = 0;
+        c.voices = 0;
         s.fading[&c - s.contexts] = false;
         c.selectedChannels = 0;
     }
