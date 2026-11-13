@@ -620,8 +620,13 @@ bool Voice::startVoice(Layer* layer, int delay, const TriggerEvent& event) noexc
 
 int Voice::Impl::getCurrentSampleQuality() const noexcept
 {
-    return (region_ && region_->sampleQuality) ?
-        *region_->sampleQuality : resources_.getSynthConfig().currentSampleQuality();
+    if (region_ && region_->sampleQuality)
+        return *region_->sampleQuality;
+    const SynthConfig& config = resources_.getSynthConfig();
+    if (region_ && !config.freeWheeling && config.liveElementSampleQuality >= 0
+        && (region_->oscairn.ampegEnabled || region_->oscairn.pegEnabled))
+        return config.liveElementSampleQuality;
+    return config.currentSampleQuality();
 }
 
 int Voice::getCurrentSampleQuality() const noexcept

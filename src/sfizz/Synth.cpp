@@ -2061,6 +2061,11 @@ void Synth::setSustainCancelsRelease(bool value)
     impl_->resources_.getSynthConfig().sustainCancelsRelease = value;
 }
 
+void Synth::setElementSampleQuality(int quality) noexcept
+{
+    impl_->resources_.getSynthConfig().liveElementSampleQuality = quality < 0 ? -1 : clamp(quality, 0, 10);
+}
+
 void Synth::setVoiceTimings(bool value) noexcept
 {
     impl_->resources_.getSynthConfig().voiceTimings = value;

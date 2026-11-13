@@ -75,6 +75,7 @@
 #include <bitset>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <memory>
@@ -203,6 +204,20 @@ struct Plugin {
 
 Plugin& self(const clap_plugin_t* p) { return *static_cast<Plugin*>(p->plugin_data); }
 
+// Element voices' live sample quality when a sound sets none (sfizz's sample_quality opcode sets
+// it per sound): the device's choice through OSCAIRN_SAMPLER_ELEMENT_QUALITY (0 to 10; 1 linear,
+// 2 the default Hermite), read once
+int elementSampleQuality()
+{
+    static const int quality = [] {
+        const char* v = std::getenv("OSCAIRN_SAMPLER_ELEMENT_QUALITY");
+        char* end = nullptr;
+        const long q = v && *v ? std::strtol(v, &end, 10) : -1;
+        return v && *v && *end == 0 && q >= 0 && q <= 10 ? static_cast<int>(q) : -1;
+    }();
+    return quality;
+}
+
 void configure(const Plugin& s, sfz::Synth& synth)
 {
     synth.setSampleRate(static_cast<float>(s.sampleRate));
@@ -210,6 +225,7 @@ void configure(const Plugin& s, sfz::Synth& synth)
     synth.setNumVoices(voicesPerSound);
     synth.setPreloadSize(preloadFrames);
     synth.setVoiceTimings(false); // nothing reads them, and each costs a voice two clock reads a block
+    synth.setElementSampleQuality(elementSampleQuality());
 }
 
 // The sample files a patch names, relative to its directory (default_path applied)

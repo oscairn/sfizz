@@ -1889,3 +1889,37 @@ TEST_CASE("[Oscairn] Key On Delay: time length and tempo-synced note length")
     // released before the delay ends, it never sounds (xa1 kod_short)
     REQUIRE(onset("oscairn_delay=80", 48000.0, 5.0, 0.0f, 0.1) < 0.0);
 }
+
+TEST_CASE("[Oscairn] Element voices take the element sample quality when they set none")
+{
+    sfz::Synth synth;
+    synth.loadSfzString(fs::current_path() / "tests/TestFiles/element_quality.sfz", R"(
+        <region> key=60 sample=*sine
+        <region> key=62 sample=*sine sample_quality=4
+        <control> oscairn_profile=1
+        <group> oscairn_ampeg_attack=0 oscairn_ampeg_decay1=0 oscairn_ampeg_decay2=0 oscairn_ampeg_release=0
+        <region> key=64 sample=*sine
+        <region> key=65 sample=*sine sample_quality=3
+    )");
+    auto quality = [&](int key) {
+        synth.allSoundOff();
+        synth.noteOn(0, key, 100);
+        for (int i = 0; i < synth.getNumVoices(); ++i)
+            if (const sfz::Voice* v = synth.getVoiceView(i))
+                if (!v->isFree())
+                    return v->getCurrentSampleQuality();
+        return -1;
+    };
+    const int live = synth.getSampleQuality(sfz::Synth::ProcessLive);
+    REQUIRE(quality(64) == live); // unset: as every voice
+    synth.setElementSampleQuality(1);
+    REQUIRE(quality(64) == 1);
+    REQUIRE(quality(65) == 3); // the sound's own sample_quality comes first
+    REQUIRE(quality(60) == live); // a stock voice keeps the synth's quality
+    REQUIRE(quality(62) == 4);
+    synth.enableFreeWheeling(); // offline renders keep the freewheeling quality
+    REQUIRE(quality(64) == synth.getSampleQuality(sfz::Synth::ProcessFreewheeling));
+    synth.disableFreeWheeling();
+    synth.setElementSampleQuality(-1);
+    REQUIRE(quality(64) == live);
+}

@@ -320,6 +320,13 @@ public:
      */
     void setSampleQuality(ProcessMode mode, int quality);
     /**
+     * @brief Set the live sample quality of element voices (oscairn profile: a region with the
+     *        element amplitude or pitch envelope) that set no sample_quality of their own.
+     *
+     * @param quality 0 to 10, or -1 for the live sample quality other voices use (the default)
+     */
+    void setElementSampleQuality(int quality) noexcept;
+    /**
      * @brief Get the default oscillator quality for the given mode.
      *
      * @param mode the processing mode

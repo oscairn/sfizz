@@ -14,6 +14,9 @@ struct SynthConfig
     bool freeWheeling { false };
 
     int liveSampleQuality { Default::sampleQuality };
+    // Live sample quality of element voices (a region with the element amplitude or pitch
+    // envelope) without a sample_quality of their own; -1: liveSampleQuality, as other voices
+    int liveElementSampleQuality { -1 };
     int freeWheelingSampleQuality { Default::freewheelingSampleQuality };
 
     int liveOscillatorQuality { Default::oscillatorQuality };
