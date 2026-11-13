@@ -13,6 +13,8 @@
 #include <absl/types/span.h>
 #include <algorithm>
 #include <array>
+#include <cstring>
+#include <functional>
 #include <iostream>
 #include <jsl/allocator>
 using namespace Catch::literals;
@@ -950,4 +952,44 @@ TEST_CASE("[Helpers] allWithin")
     REQUIRE( !sfz::allWithin<float>(input, 2.5f, 8.0f) );
     REQUIRE( !sfz::allWithin<float>(input, 0.0f, 5.0f) );
     REQUIRE( !sfz::allWithin<float>(input, -1.0f, 7.0f) );
+}
+
+TEST_CASE("[Helpers] Each SIMD version gives the scalar version's output, bit for bit, in place too")
+{
+    using sfz::SIMDOps;
+    std::vector<float> a(259), b(259), c(259);
+    uint32_t seed = 7;
+    auto next = [&]() { seed = seed * 1664525u + 1013904223u; return static_cast<float>(static_cast<int32_t>(seed)) * 0x1p-28f; };
+    for (size_t i = 0; i < a.size(); ++i)
+        a[i] = next(), b[i] = next(), c[i] = next();
+    const float g = next();
+    struct Case { SIMDOps op; std::function<void(float*, const float*, const float*, unsigned)> run; };
+    const Case cases[] = {
+        { SIMDOps::gain, [](float* o, const float* x, const float* y, unsigned n) { sfz::applyGain<float>(x, y, o, n); } },
+        { SIMDOps::gain1, [g](float* o, const float* x, const float*, unsigned n) { sfz::applyGain1<float>(g, x, o, n); } },
+        { SIMDOps::multiplyAdd, [](float* o, const float* x, const float* y, unsigned n) { sfz::multiplyAdd<float>(x, y, o, n); } },
+        { SIMDOps::multiplyAdd1, [g](float* o, const float* x, const float*, unsigned n) { sfz::multiplyAdd1<float>(g, x, o, n); } },
+        { SIMDOps::add, [](float* o, const float* x, const float*, unsigned n) { sfz::add<float>(x, o, n); } },
+        { SIMDOps::add1, [g](float* o, const float*, const float*, unsigned n) { sfz::add1<float>(g, o, n); } },
+        { SIMDOps::subtract, [](float* o, const float* x, const float*, unsigned n) { sfz::subtract<float>(x, o, n); } },
+        { SIMDOps::subtract1, [g](float* o, const float*, const float*, unsigned n) { sfz::subtract1<float>(g, o, n); } },
+    };
+    for (const Case& k : cases) {
+        for (unsigned n : { 0u, 1u, 3u, 4u, 7u, 128u, 255u }) {
+            for (unsigned offset : { 0u, 1u, 2u }) {
+                for (bool inPlace : { false, true }) {
+                    std::vector<float> out[2];
+                    for (int simd = 0; simd < 2; ++simd) {
+                        sfz::setSIMDOpStatus<float>(k.op, simd == 1);
+                        out[simd] = c;
+                        float* o = out[simd].data() + offset;
+                        k.run(o, inPlace ? o : a.data() + offset, b.data() + offset, n);
+                    }
+                    sfz::resetSIMDOpStatus<float>();
+                    INFO("op " << static_cast<int>(k.op) << " size " << n << " offset " << offset << " in place " << inPlace);
+                    REQUIRE(std::memcmp(out[0].data(), out[1].data(), out[0].size() * sizeof(float)) == 0);
+                }
+            }
+        }
+    }
 }

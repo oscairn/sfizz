@@ -9,6 +9,7 @@
 #include "utility/Debug.h"
 #include "simd/HelpersSSE.h"
 #include "simd/HelpersAVX.h"
+#include "simd/HelpersNEON.h"
 #include "cpuid/cpuinfo.hpp"
 #include <array>
 #include <mutex>
@@ -138,9 +139,18 @@ void SIMDDispatch<float>::setStatus(SIMDOps op, bool enable)
 
 #if SFIZZ_CPU_FAMILY_AARCH64 || SFIZZ_CPU_FAMILY_ARM
 #define SIMD_OP(opname) case SIMDOps::opname : (opname) = opname ## NEON; return;
-    if (info.has_neon()) {
+    // NEON is part of AArch64, which cpuid does not report on every system (macOS)
+    if (SFIZZ_HAVE_NEON || info.has_neon()) {
         switch (op) {
             default: break;
+            SIMD_OP(gain)
+            SIMD_OP(gain1)
+            SIMD_OP(multiplyAdd)
+            SIMD_OP(multiplyAdd1)
+            SIMD_OP(add)
+            SIMD_OP(add1)
+            SIMD_OP(subtract)
+            SIMD_OP(subtract1)
         }
     }
 #undef SIMD_OP
@@ -175,6 +185,13 @@ void SIMDDispatch<float>::resetStatus()
     setStatus(SIMDOps::upsampling, true);
     setStatus(SIMDOps::clampAll, false);
     setStatus(SIMDOps::allWithin, true);
+#if SFIZZ_HAVE_NEON
+    // The NEON versions give the scalar output, faster (the scalar ones go one element at a
+    // time when computing in place)
+    for (SIMDOps op : { SIMDOps::gain, SIMDOps::gain1, SIMDOps::multiplyAdd, SIMDOps::multiplyAdd1,
+             SIMDOps::add, SIMDOps::add1, SIMDOps::subtract, SIMDOps::subtract1 })
+        setStatus(op, true);
+#endif
 }
 
 ///
