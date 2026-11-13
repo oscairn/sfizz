@@ -8,6 +8,7 @@
 
 #include "plugin.h"
 #include <oscairn-clap/assets.h>
+#include <oscairn-clap/memory.h>
 #include <oscairn-clap/sound-contexts.h>
 #include <oscairn-clap/ui.h>
 #include <oscairn-clap/voice-budget.h>
@@ -482,6 +483,16 @@ int threadCount()
     return -1;
 #endif
 }
+const oscairn_plugin_memory_t* memoryOf(const clap_plugin_t* p)
+{
+    return static_cast<const oscairn_plugin_memory_t*>(p->get_extension(p, OSCAIRN_EXT_MEMORY));
+}
+double totalMB(const oscairn_memory_t& m, bool withCache)
+{
+    const double cache = withCache ? 0 : sfz::FilePool::getStreamCacheCapacity();
+    return (m.shared_bytes - cache + m.context_bytes + m.asset_bytes) / 1048576.0;
+}
+
 } // namespace
 
 int main(int argc, char** argv)
@@ -1936,6 +1947,40 @@ int main(int argc, char** argv)
         CHECK(run.peak > 0.1f && run.left[100] != 0.0f && run.left[8000] != 0.0f);
         plugin->deactivate(plugin);
         plugin->destroy(plugin);
+    }
+    { // oscairn.memory: the declaration before activating covers what loading and activating
+      // take, without counting it twice, and what the plugin says it holds while notes are held
+      // covers what it holds
+        const std::string dir = longFiles(8, 10.0);
+        const double before = heapMB();
+        auto* plugin = create();
+        CHECK(memoryOf(plugin) && memoryOf(plugin)->estimate && memoryOf(plugin)->current);
+        CHECK(load(plugin, stateFor(readFile(dir + "/patch.sfz"), "", "", dir)));
+        oscairn_memory_t estimate {}, now {};
+        CHECK(memoryOf(plugin) && memoryOf(plugin)->estimate(plugin, 48000, 8192, &estimate));
+        CHECK(plugin->activate(plugin, 48000, 1, 8192));
+        const double loaded = heapMB() - before;
+        CHECK(totalMB(estimate, false) >= loaded);
+        CHECK(!heapKnown || totalMB(estimate, false) <= 2 * loaded + 4);
+        CHECK(estimate.shared_bytes >= sfz::FilePool::getStreamCacheCapacity()); // the cache, at its capacity
+        CHECK(estimate.asset_bytes > 8 * 4096 * sizeof(float)); // the preloads
+        Run run { plugin };
+        Events events;
+        for (int k = 0; k < 8; ++k)
+            events.note(CLAP_EVENT_NOTE_ON, 0, k, static_cast<int16_t>(48 + k), 1.0);
+        for (int b = 0; b < 400; ++b) {
+            run.block(events, 128);
+            std::this_thread::sleep_for(std::chrono::microseconds(1500));
+            if (b % 50 == 49) {
+                CHECK(memoryOf(plugin) && memoryOf(plugin)->current(plugin, &now));
+                CHECK(totalMB(now, true) >= heapMB() - before); // the chunks it holds included
+            }
+        }
+        std::printf("memory: %.1f MB after loading, declared %.1f MB and the %.0f MB cache; %.1f MB held at the end, %.1f MB said\n",
+                    loaded, totalMB(estimate, false), sfz::FilePool::getStreamCacheCapacity() / 1048576.0, heapMB() - before, totalMB(now, true));
+        plugin->deactivate(plugin);
+        plugin->destroy(plugin);
+        removeFiles(dir);
     }
     // No allocation in any process call above
     CHECK(guardedAllocations.load() == 0);

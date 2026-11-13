@@ -46,6 +46,7 @@
 #include <future>
 #include <mutex>
 #include <memory>
+#include <set>
 #include "utility/SmallStackThread.h"
 
 namespace sfz {
@@ -403,6 +404,13 @@ public:
     static void setStreamCacheCapacity(size_t bytes) noexcept;
     static size_t getStreamCacheCapacity() noexcept;
     static size_t getStreamCacheUsage() noexcept;
+    /**
+     * @brief Bytes this pool holds in preloaded and fully loaded sample data (not streamed
+     * chunks). Buffers already in `counted` (shared with another pool) are skipped, and the
+     * others added to it.
+     */
+    size_t getPreloadedBytes(std::set<const void*>& counted) const noexcept;
+    static size_t getFixedBytes() noexcept;
     /**
      * @brief Assign the current thread a priority which is appropriate
      * for background sample file processing.

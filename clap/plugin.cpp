@@ -66,6 +66,7 @@
 #include "sfizz/parser/Parser.h"
 #include "sfizz/parser/ParserListener.h"
 #include <oscairn-clap/assets.h>
+#include <oscairn-clap/memory.h>
 #include <oscairn-clap/sound-contexts.h>
 #include <oscairn-clap/ui.h>
 
@@ -77,6 +78,7 @@
 #include <cstring>
 #include <limits>
 #include <memory>
+#include <set>
 #include <string>
 #include <vector>
 #if !defined(_WIN32)
@@ -1529,6 +1531,72 @@ bool renderSet(const clap_plugin_t* p, clap_plugin_render_mode mode)
 
 const clap_plugin_render_t render { [](const clap_plugin_t*) { return false; }, renderSet };
 
+// oscairn.memory (RFC 0025). A sound's synth, by allocation measured on macOS arm64
+// (doc/oscairn-plan.md, "Memory"), rounded up: 160 KiB and 5.4 KB a frame of its block, for
+// each voice slot 3 KiB and 8 bytes a frame, its file pool's gather buffer and two threads,
+// and 12 KiB a region (a converted 916-region part measured 10.5)
+uint64_t soundBytes(uint32_t frames, uint64_t regions)
+{
+    const uint64_t slots = std::min<uint64_t>(maxSlots, 2 * voicesPerSound);
+    return (160 << 10) + 5400ull * frames + slots * ((3 << 10) + 8ull * frames) + sfz::FilePool::getFixedBytes()
+        + regions * (12 << 10);
+}
+
+// The instance's own: its buffers and the streamed chunks' cache (for the whole process: its
+// capacity in an estimate, what it holds now otherwise)
+uint64_t instanceBytes(uint32_t frames, bool capacity)
+{
+    return sizeof(Plugin) + (2 + 2 * busCount) * frames * sizeof(float)
+        + (capacity ? sfz::FilePool::getStreamCacheCapacity() : sfz::FilePool::getStreamCacheUsage());
+}
+
+// Every engine the main thread holds (the contexts', a pending default, a retired one)
+template <class F> void forEachEngine(const Plugin& s, F&& f)
+{
+    for (const Context& c : s.contexts)
+        if (c.engine)
+            f(*c.engine);
+    if (const Engine* e = s.pendingDefault.load())
+        f(*e);
+    if (const Engine* e = s.retired.load())
+        f(*e);
+}
+
+bool memoryEstimate(const clap_plugin_t* p, double, uint32_t maxFrames, oscairn_memory_t* out)
+{
+    const auto& s = self(p);
+    const uint32_t frames = std::min(std::max<uint32_t>(1, maxFrames), maxRenderFrames);
+    std::set<const void*> counted;
+    uint64_t assets = 0, regions = 0;
+    forEachEngine(s, [&](const Engine& e) {
+        assets += e.synth.getResources().getFilePool().getPreloadedBytes(counted);
+        regions = std::max<uint64_t>(regions, e.synth.getNumRegions());
+    });
+    // A sound prepared later is counted at this one's regions: the host admits it before
+    // the plugin reads its patch
+    out->shared_bytes = instanceBytes(frames, true);
+    out->context_bytes = soundBytes(frames, regions);
+    out->asset_bytes = assets;
+    return true;
+}
+
+bool memoryCurrent(const clap_plugin_t* p, oscairn_memory_t* out)
+{
+    const auto& s = self(p);
+    std::set<const void*> counted;
+    uint64_t assets = 0, sounds = 0;
+    forEachEngine(s, [&](const Engine& e) {
+        assets += e.synth.getResources().getFilePool().getPreloadedBytes(counted);
+        sounds += soundBytes(s.maxFrames, e.synth.getNumRegions());
+    });
+    out->shared_bytes = instanceBytes(s.maxFrames, false);
+    out->context_bytes = sounds;
+    out->asset_bytes = assets;
+    return true;
+}
+
+const oscairn_plugin_memory_t memory { memoryEstimate, memoryCurrent };
+
 const void* getExtension(const clap_plugin_t*, const char* id)
 {
     if (!std::strcmp(id, CLAP_EXT_AUDIO_PORTS))
@@ -1551,6 +1619,8 @@ const void* getExtension(const clap_plugin_t*, const char* id)
         return &ui;
     if (!std::strcmp(id, CLAP_EXT_RENDER))
         return &render;
+    if (!std::strcmp(id, OSCAIRN_EXT_MEMORY))
+        return &memory;
     return nullptr;
 }
 

@@ -884,6 +884,28 @@ void sfz::FilePool::setStreamCacheCapacity(size_t bytes) noexcept { streamCacheC
 size_t sfz::FilePool::getStreamCacheCapacity() noexcept { return streamCacheCapacity; }
 size_t sfz::FilePool::getStreamCacheUsage() noexcept { return streamCacheUsage; }
 
+size_t sfz::FilePool::getPreloadedBytes(std::set<const void*>& counted) const noexcept
+{
+    std::lock_guard<std::mutex> files { filesMutex };
+    size_t bytes = 0;
+    auto add = [&bytes, &counted](const FileAudioBuffer& b) {
+        if (b.getNumFrames() > 0 && counted.insert(&b).second)
+            bytes += b.getNumChannels() * (b.getNumFrames() + 2 * config::excessFileFrames) * sizeof(float);
+    };
+    for (auto* map : { &preloadedFiles, &loadedFiles })
+        for (auto& file : *map) {
+            add(*file.second.preloadedData);
+            add(file.second.fileData);
+        }
+    return bytes;
+}
+
+size_t sfz::FilePool::getFixedBytes() noexcept
+{
+    // the gather buffer and the two threads' stacks
+    return 2 * (getGatherFrames() + 2 * config::excessFileFrames) * sizeof(float) + 2 * SmallStackThread::stackBytes;
+}
+
 void sfz::FilePool::garbageJob() noexcept
 {
     while (semGarbageBarrier.wait(), garbageFlag) {
