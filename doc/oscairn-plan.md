@@ -2142,6 +2142,65 @@ it as it was, 0 before any voice. It is an `std::atomic<double>` the audio threa
 host's `active_voices` call reads. Voices that ended inside the block are not counted, so it errs
 high, and it includes the block's event handling and mixing.
 
+### Voice cost round (2026-11-13): element filter, pan stages, Hermite
+
+Part A of the round Jacob approved (`5376d8dc`, `1036474f`, `ce572e05`); quality by transposition,
+oversampled storage and the second recordings were held by Jacob before they were committed.
+Measured as in the optimisation session: callgrind, Docker linux/arm64, gcc 13, instructions a
+voice and 128-frame block at 48 kHz (32 voices, `vb.cpp`).
+
+| Voice | Before | Filter | Pan | Hermite |
+| --- | --- | --- | --- | --- |
+| Stock mono, quality 2 | 19,043 | 19,043 | 18,268 | 16,906 (-11 %) |
+| Stock stereo | 22,916 | 22,916 | 20,096 | 19,402 (-15 %) |
+| Element mono (Mellow Imperial's group) | 29,809 | 23,608 | 22,831 | 21,469 (-28 %) |
+| Element stereo | 34,561 | 29,223 | 26,401 | 25,707 (-26 %) |
+
+- **Element filter** (`5376d8dc`). The 48 kHz loop (`runDirect`, both sections in turn on a pair of
+  channels) spilled its 30 coefficients to the stack: 72 instructions a sample for a mono voice.
+  Now the two sections step together in vector lanes, the second one sample behind on the
+  first's previous output (two lanes for mono, four for stereo), and a run lasts until the next
+  16-sample interval whose cutoff moves instead of 16 samples: the filter of a mono element voice
+  went from 11,000 to about 4,700 instructions a block, stereo from 11,800 to 6,300. The rates
+  with a delay line (44.1, 88.2, 176.4, 192 kHz) had the per-sample `run()` with its branches; they
+  now have a loop without branches, the channels in lanes: an element mono voice at 44.1 kHz
+  39,200 to 24,600 instructions, at 192 kHz 43,400 to 30,000. `ElementFilter::setLaneLoops(false)`
+  keeps the earlier loops for the tests.
+- **Pan stages** (`1036474f`, stock code). sfizz's pan and width stages read the pan table per
+  sample even when the envelope holds one value (every voice whose pan, width and position are not
+  modulated; pan always has CC 10's connection, so the stage checks the summed envelope).
+  `panConstant`/`widthConstant` take the same paths with the table read once.
+- **Hermite interpolation** (`ce572e05`, stock code). Four outputs at a time on AArch64 with gcc,
+  the weights computed once for four outputs and both channels; inline-asm barriers keep
+  `-ffast-math` from fusing or reordering the products and pair sums, so each output is
+  `interpolate<kInterpolatorHermite3>`'s. Not on clang: there the weights' arithmetic is ordered
+  differently in the two contexts, so clang keeps the per-output loop. Linear and the sincs were
+  not changed: linear now costs within 600 instructions of Hermite, and the sincs' cost is their
+  per-tap table reads, which four outputs at a time do not remove.
+
+**Exactness.** With gcc on Linux ARM64 (the device's build), renders of eleven of Jacob's parts
+(`parts.txt` of the optimisation session) at 44.1, 48, 96 and 192 kHz, 128-frame blocks, and at
+44.1 kHz with 100-frame blocks are bit-identical to the build before the round, and the stock gate
+passes in Docker (159 renders, 106 streaming renders). On macOS (clang) the stock gate passes (run with the filter and pan changes;
+the Hermite path is not compiled there) and the pan change is exact, but the filter's lane loops
+round differently: the same eleven parts differ from the earlier build by -107 to -137 dB at
+48 kHz and -132 dB or less at 44.1 kHz (RMS of the difference against the render's), a rounding-level
+change. The tests: the pan and Hermite paths against the per-sample code to the bit; the filter's
+loops against the earlier ones with a level (more than 85 dB below the output, every type, rate,
+mono and stereo; clang's worst was -97 dB), because whether they are bit-identical depends on how
+the compiler orders sums under `-ffast-math`.
+
+**Voices that fit** a part's allowance, with about 40 us of idle cost and the optimisation
+session's scaling (30,800 instructions measured as 45 to 75 us on the device): element mono
+24 to 41 voices in 1.33 ms (17 to 29 before), 75 to 126 in 4.0 ms, 101 to 168 in 5.33 ms; element
+stereo 20 to 34, 63 to 105, 84 to 140; stock mono 31 to 52, 96 to 160, 128 to 214. The unit's own
+figure with huge pages off (Oscairn's worker, 0.7.0, "Init Normal" at 16 notes, about 1.15 ms
+median a block) suggests the device is faster than that scaling (about 1.1 ns an instruction
+against 1.5 to 2.4), if its voices cost what the bench's do: unverified.
+
+**Next places** (not done): the per-sample loop partitioning in `fillWithData` (about 3,300
+instructions a voice, integer only), the element envelope's per-sample `double` decay (800).
+
 ### Upstream merge test (2026-11-01)
 
 `upstream/develop` has no commits after `f5c6e29f`: merging it into `oscairn` is a no-op
