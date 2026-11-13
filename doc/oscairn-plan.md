@@ -530,6 +530,56 @@ in `clap/budget.cpp` behind `clap/budget.h`.
   `honors_volume`: true (per-note volume scales the key's voices). `NOTE_END` comes once a note's
   last voice has ended, as before.
 
+### Note lifetimes (plugin 0.8.3)
+
+Written after a device run in which a Sampler worker kept rendering about 4 ms a 128-frame block
+(the period is 2.67 ms) with no key held until the host's Panic: looped, sustained organ samples
+that no note-off ended. `clap/test.cpp` (`noteLifetimes`, `noteBalance`, `fullNoteTable`,
+`stackedNotes`, `voiceCounts`, `silentElements`) holds the table of sequences and what each does.
+
+**What ends a voice.** The note-off of its key (by key and release, as SFZ: `loop_continuous`,
+`loop_sustain` and one-shot regions as stock; a sustain or sostenuto pedal holds it, as stock);
+its envelope reaching the end of its release or level 0 (an element held at level 0, and from
+0.8.3 an element whose constant gain is zero, end); a choke (3 ms fade); sfizz's own limits
+(`polyphony`, `note_polyphony`, `off_by`, the engine's 256 voices: the oldest, fading over the
+6 ms off time and freeing its slot); the host's voice budget (3 ms fade); CC 120 and CC 123
+(every voice of the sound at once, as stock, with the sound's notes ended); `reset()`,
+activation and deactivation (every voice at once). Nothing else: a voice whose note-off never
+arrives, a pedal left down, or a sostenuto that caught the note sounds until one of the others
+(by SFZ's own rules, stock sfizz is the same).
+
+**How the plugin addresses a note-off or choke** (0.8.3): the notes with its id, key and channel
+(-1 matches any); failing those, the note its id names, whatever its key and channel; failing
+those, the notes on its key and channel (an id the plugin does not know); failing all, nothing (a
+note-off with no note sounds nothing and starts no release region). The voices of a key are
+sfizz's, so a note-off ends every voice on its key, as stock; notes sharing a key end together
+(K14). A repeated note-on with a sounding note's id, key and channel is that note retriggered: its
+voices fade and it keeps its one note. A full note table (256) ends its oldest note, with its
+NOTE_END, so a new note is always tracked and its note-off reaches its voices.
+
+**NOTE_END.** Once per note, when its key has no voice left in its context (and, for a key with a
+release region, after its note-off), with its id, key and channel: after natural end, release,
+stealing, budget fades, chokes and off groups, CC 120/123, a retrigger, a note no region covers (tested) or
+whose sample is not loaded yet or whose chunk is late (K59; by the voice count, not exercised in a test), a note whose
+element voices end at different times (once, when the last ends), a context switch (the note ends
+in the context it began in), a note-off with a mismatched or -1 id, and at once for a note-on the
+plugin cannot start (a channel outside 0-15, a key above 127, a port other than 0). After
+`reset()` and deactivation no NOTE_END is sent for the notes they ended: the host ends those.
+
+**What bounds the voices.** A sound plays 256 voices (512 slots, the other half for fading ones:
+a burst of 600 note-ons in one block peaks below 512 and is at or below 256 within 50 ms); the
+host's limit, reserve and priority act below that, from the next block. On an Apple M-series
+core, one block of 128 frames at 48 kHz, looped stereo samples: 64 voices 1.8 million
+instructions (119 us), 256 voices 9.3 million (730 to 890 us); an element sound's voices cost a
+little less each (256 voices 7.0 million). A device core several times slower puts 256 voices well
+beyond the 2.67 ms period; the default of 256 stays (a lower one is proposed in the session's
+report, not made).
+
+**What the host reads.** `oscairn.voice-budget` `active_voices`: every voice not free in the sounds
+the plugin renders (releasing, fading and stolen-but-fading ones included), summed over the
+sounds, with the per-voice cost in microseconds in `*voice_cost`; per sound,
+`oscairn.sound-contexts` `get` `active_voices` (0.8.3; it was 1 while the sound sounded).
+
 ### Memory and streaming (RFC 0025, `oscairn.memory/draft`)
 
 From `023ac572` to `e2f91c4a` (memory session, section 11). What a Sampler instance holds, and the
@@ -2201,6 +2251,25 @@ against 1.5 to 2.4), if its voices cost what the bench's do: unverified.
 **Next places** (not done): the per-sample loop partitioning in `fillWithData` (about 3,300
 instructions a voice, integer only), the element envelope's per-sample `double` decay (800).
 
+### Stuck voices (2026-11-13): plugin 0.8.3
+
+A device run on the Performance "# Organ" (two Sampler parts, looped organ samples, an arpeggiator
+before each) had one Sampler worker at 71 to 78 % of a core with no key held until the host's
+Panic. Reproduced with the CLAP test host: voices stack until the engine's 256 and then cost
+730 to 890 us a block on an M-series core (the table in section 5, "Note lifetimes").
+
+Faults in the plugin's own glue, each now with a test that failed before: a note-off whose id
+did not match its note (the key and channel matching, or the id matching and the key or channel
+not) was dropped, leaving the note sounding; a repeated note-on of the same id made a second
+table entry and a second NOTE_END; with 256 notes in the table a new note was not tracked, so its
+note-off was dropped and it sounded (and the host's route for it was never freed); a note-on the
+plugin refused had no NOTE_END; CC 123 left a key-off element's note waiting for a note-off;
+a sound context's `active_voices` was 1. In `Voice.cpp`, an element with a constant gain of
+zero looped unheard until a note-off. Not faults: a note-on without a note-off, a pedal left down
+and a sostenuto over a held note, which sound by SFZ's rules until an all-notes-off or a choke.
+Random runs of 6000 blocks (notes piled past the voice limit, retriggers, wrong ids, chokes,
+pedals, CC 123, a lowered budget, then everything released) end with exactly one NOTE_END a note.
+
 ### Upstream merge test (2026-11-01)
 
 `upstream/develop` has no commits after `f5c6e29f`: merging it into `oscairn` is a no-op
@@ -2279,3 +2348,6 @@ repository, or the local scripts beside the renders).
 | K59 | A streamed chunk not decoded in time | In real time, the frames of a long sample whose chunk the loader has not brought yet play as silence and the voice goes on (stock sfizz ended the voice at the frames loaded so far); on the reference, not measured | Streaming in chunks (memory session); offline renders wait and are unaffected | Accepted; only under a loader that falls behind | CLAP test "a voice whose next chunk is late" | `FilePool::gather`, `Voice.cpp` |
 | K60 | Element voices at a lower sample quality | Only when a sound sets `sample_quality` 1 (or 0) or the device sets `OSCAIRN_SAMPLER_ELEMENT_QUALITY` to it: linear interpolation instead of Hermite; against Hermite the renders differ by -41 to -60 dB (RMS of the difference, four of Jacob's sounds); against the reference not measured | A setting for small devices (about 6 % of an element voice's instructions) | Off by default; for Jacob | A/B files in `forks/measurements/sampler-quality-2026-11-13/` | `Voice::Impl::getCurrentSampleQuality`, `clap/plugin.cpp` |
 | K61 | Loader thread scheduling | The Sampler's file loader is SCHED_OTHER; stock sfizz runs it SCHED_RR at 50 % of the range (`OSCAIRN_SAMPLER_LOADER_PRIORITY=stock` or `rr:<n>` restores that); not a reference behaviour, sound is unaffected except that a late chunk (K59) may come later | Real-time at the interrupt threads' level can hold a core against them and the audio thread (section 11) | Accepted; effect on the device's long blocks unmeasured | CLAP test "the sample loader thread is an ordinary thread" | `FilePool::raiseCurrentThreadPriority`, `applyLoaderScheduling` in `clap/plugin.cpp` |
+| K62 | A note-off addressed by a wrong id, key or channel | A note-off whose id names no note ends the notes on its key and channel; one whose id names a note ends that note whatever its key and channel (the CLAP host's id is the note's name). Stock sfizz has no ids: it ends every voice on a key. A stale note-off (for a note that already ended, or never started) can end another note on its key | Robustness against senders that lose or mangle ids | Deliberate; no reference | `clap/test.cpp` `noteLifetimes` | `clap/plugin.cpp` `applyEvent` |
+| K63 | A full note table | The 257th note ends the oldest held note (fading its key's voices, sending its NOTE_END) so that the new one is tracked | Only 256 notes are tracked | Deliberate | `clap/test.cpp` `fullNoteTable` | `clap/plugin.cpp` `applyEvent` |
+| K64 | An element with zero constant gain | Ends at the end of its first block (nothing could ever sound); the reference's behaviour for a velocity that mutes an element is not measured (K4 for velocity 1 only) | Looping an unheard voice costs CPU | Deliberate | `clap/test.cpp` `silentElements` | `src/sfizz/Voice.cpp` |
