@@ -313,6 +313,10 @@ absl::optional<sfz::FileInformation> sfz::FilePool::getFileInformation(const Fil
             return shared->second.information;
     }
 
+    const auto read = readInformation.find(fileId);
+    if (read != readInformation.end())
+        return read->second;
+
     const fs::path file { rootDirectory / fileId.filename() };
 
     if (!fs::exists(file))
@@ -320,7 +324,10 @@ absl::optional<sfz::FileInformation> sfz::FilePool::getFileInformation(const Fil
 
     ++fileOpens;
     AudioReaderPtr reader = createAudioReader(file, fileId.isReverse());
-    return getReaderInformation(reader.get());
+    auto information = getReaderInformation(reader.get());
+    if (information)
+        readInformation.insert_or_assign(fileId, *information);
+    return information;
 }
 
 std::string sfz::FilePool::sharedKey(const FileId& fileId) const
@@ -635,6 +642,7 @@ void sfz::FilePool::clear()
     lastUsedFiles.clear();
     preloadedFiles.clear();
     loadedFiles.clear();
+    readInformation.clear();
 }
 
 uint32_t sfz::FilePool::getPreloadSize() const noexcept

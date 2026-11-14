@@ -259,7 +259,11 @@ public:
      *
      * @param directory
      */
-    void setRootDirectory(const fs::path& directory) noexcept { rootDirectory = directory; }
+    void setRootDirectory(const fs::path& directory) noexcept
+    {
+        rootDirectory = directory;
+        readInformation.clear();
+    }
     /**
      * @brief Get the number of preloaded sample files
      *
@@ -506,6 +510,8 @@ private:
     // Preloaded data
     absl::flat_hash_map<FileId, FileData> preloadedFiles;
     absl::flat_hash_map<FileId, FileData> loadedFiles;
+    // What the files' headers said, kept for the load that read them (the loading thread only)
+    absl::flat_hash_map<FileId, FileInformation> readInformation;
     LEAK_DETECTOR(FilePool);
 };
 }

@@ -861,6 +861,20 @@ TEST_CASE("[Files] Synths sharing preloaded data read each file once")
     REQUIRE(render(third) == expected);
 }
 
+TEST_CASE("[Files] A load opens each sample file once to read it and once to preload it")
+{
+    // Regions sharing a file, and the preload after the regions, used to read its header again each time
+    sfz::Synth synth;
+    synth.loadSfzString(fs::current_path() / "tests/TestFiles/openCount.sfz", R"(
+<region> key=60 sample=looped_flute.wav
+<region> key=61 sample=looped_flute.wav
+<region> key=62 sample=stereo_sample.wav
+)");
+    REQUIRE(synth.getNumRegions() == 3);
+    REQUIRE(synth.getNumPreloadedSamples() == 2);
+    REQUIRE(synth.getResources().getFilePool().getNumFileOpens() == 4);
+}
+
 TEST_CASE("[Files] Freewheeling waits for the file a note just queued")
 {
     // A note queues its file for the dispatch thread; the wait at the start of the next
