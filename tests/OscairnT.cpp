@@ -810,6 +810,17 @@ TEST_CASE("[Oscairn] Element filter cutoff and damping laws")
     REQUIRE(filterCutoffHz(512) == Approx(445.9f).epsilon(0.01));
     REQUIRE(filterCutoffHz(576) == Approx(750.7f).epsilon(0.01));
     REQUIRE(filterCutoffHz(512, 1200.0f) == Approx(2.0f * filterCutoffHz(512)).epsilon(1e-4));
+    // Below index 264, measured on the reference's harmonics (pcm round 2, probes b_lad0 to b_lad256: a
+    // saw at note 36 through type 0 at resonance 0, the cutoff fitted to the harmonic levels), in cents
+    // from 440 Hz every 16 indices; the earlier table put index 160 at -3666 cents and 0 at -5603
+    const float measured[17] = { -5932, -5612, -5382, -5200, -5058, -4934, -4814, -4539, -4281, -4082, -3921, -3784, -3658, -3465, -3173, -2955, -2773 };
+    for (int i = 0; i < 17; ++i) {
+        INFO("index " << 16 * i);
+        REQUIRE(1200.0f * std::log2(filterCutoffHz(16 * i) / 440.0f) == Approx(measured[i]).margin(0.5f));
+    }
+    // between knots linear in cents; from 264 up unchanged
+    REQUIRE(1200.0f * std::log2(filterCutoffHz(168) / 440.0f) == Approx(0.5f * (-3921 - 3784)).margin(0.5f));
+    REQUIRE(1200.0f * std::log2(filterCutoffHz(264) / 440.0f) == Approx(-2703.0f).margin(0.5f));
     REQUIRE(filterDamping(0) == Approx(2.0f));
     REQUIRE(filterDamping(32) == Approx(0.5f));
     REQUIRE(filterDamping(64) == Approx(0.125f));

@@ -22,13 +22,17 @@ struct Knot {
     int index;
     float cents; // relative to 440 Hz
 };
-// Cutoff measured on reference renders every 8 indices (white noise, resonance 0), in cents
-// from 440 Hz, linear in cents between knots. Below 144 the renders' cutoffs (under 30 Hz)
-// are not measurable; the table continues at 11.54 cents per index, the knots' mean slope.
+// Cutoff in cents from 440 Hz, linear in cents between knots. From 264 up, measured on reference
+// renders every 8 indices (white noise, resonance 0). From 0 to 256, measured every 16 indices on
+// a saw's harmonics (note 36) through the two sections at resonance 0, the cutoff fitted to the
+// harmonic levels (within 0.26 dB rms; the Oscairn PCM engine's round 2, probes b_lad*). The
+// earlier knots from 144 to 256 sat higher, and below 144 the table continued at 11.54 cents per
+// index.
 constexpr Knot kCutoffKnots[] = {
-    { 144, -3952.f }, { 152, -3817.f }, { 160, -3666.f }, { 168, -3734.f }, { 176, -3669.f }, { 184, -3578.f },
-    { 192, -3486.f }, { 200, -3541.f }, { 208, -3360.f }, { 216, -3226.f }, { 224, -3117.f }, { 232, -3077.f },
-    { 240, -2901.f }, { 248, -2828.f }, { 256, -2749.f }, { 264, -2703.f }, { 272, -2647.f }, { 280, -2529.f },
+    { 0, -5932.f }, { 16, -5612.f }, { 32, -5382.f }, { 48, -5200.f }, { 64, -5058.f }, { 80, -4934.f },
+    { 96, -4814.f }, { 112, -4539.f }, { 128, -4281.f }, { 144, -4082.f }, { 160, -3921.f }, { 176, -3784.f },
+    { 192, -3658.f }, { 208, -3465.f }, { 224, -3173.f }, { 240, -2955.f }, { 256, -2773.f },
+    { 264, -2703.f }, { 272, -2647.f }, { 280, -2529.f },
     { 288, -2502.f }, { 296, -2442.f }, { 304, -2390.f }, { 312, -2215.f }, { 320, -2065.f }, { 328, -1978.f },
     { 336, -1809.f }, { 344, -1724.f }, { 352, -1627.f }, { 360, -1549.f }, { 368, -1508.f }, { 376, -1391.f },
     { 384, -1356.f }, { 392, -1325.f }, { 400, -1247.f }, { 408, -1199.f }, { 416, -1029.f }, { 424, -839.f },
@@ -44,7 +48,6 @@ constexpr Knot kCutoffKnots[] = {
     { 864, 4375.f }, { 872, 4467.f }, { 880, 4545.f }, { 888, 4621.f }, { 896, 4688.f }, { 904, 4753.f },
     { 912, 4812.f },
 };
-constexpr float kBelowSlope = 11.54f;
 // Above index 912 the measured cutoff stays at 7290 Hz (and the frequency coefficient there).
 constexpr double kTopHz = 7290.0;
 
@@ -54,7 +57,7 @@ float cutoffCents(float index) noexcept
     const Knot* first = std::begin(kCutoffKnots);
     const Knot* last = std::end(kCutoffKnots) - 1;
     if (i <= static_cast<float>(first->index))
-        return first->cents - kBelowSlope * (static_cast<float>(first->index) - i);
+        return first->cents;
     if (i >= static_cast<float>(last->index))
         return 1200.0f * std::log2(static_cast<float>(kTopHz) / 440.0f);
     const Knot* hi = std::upper_bound(first, last + 1, i, [](float v, const Knot& k) { return v < static_cast<float>(k.index); });
