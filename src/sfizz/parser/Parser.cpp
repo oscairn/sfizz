@@ -489,16 +489,7 @@ void Parser::trimRight(std::string& text)
 
 size_t Parser::extractToEol(Reader& reader, std::string* dst)
 {
-    return reader.extractWhile(dst, [&reader](char c) {
-        if (c == '\r' || c == '\n')
-            return false;
-        if (c == '/') {
-            int c2 = reader.peekChar();
-            if (c2 == '/' || c2 == '*') // stop at comment
-                return false;
-        }
-        return true;
-    });
+    return reader.extractToEol(dst);
 }
 
 std::string Parser::expandDollarVars(const SourceRange& range, absl::string_view src)

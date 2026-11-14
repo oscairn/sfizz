@@ -7,6 +7,7 @@
 #include "sfizz/SfzHelpers.h"
 #include "sfizz/parser/Parser.h"
 #include "sfizz/parser/ParserListener.h"
+#include <chrono>
 #include <iostream>
 #include "catch2/catch.hpp"
 #include "absl/strings/string_view.h"
@@ -745,4 +746,52 @@ TEST_CASE("[Parsing] Sample data 2")
         REQUIRE(mock.headers == expectedHeaders);
         REQUIRE(mock.fullBlockHeaders == expectedHeaders);
         REQUIRE(mock.fullBlockMembers == expectedMembers);
+}
+
+TEST_CASE("[Parsing] A long line of many opcodes")
+{
+    // Each opcode's value is read to the end of the line and the rest put back, so reading
+    // took time quadratic in the line's length (this line: 16 s on an M-series Mac).
+    struct Locations : sfz::Parser::Listener {
+        void onParseOpcode(const sfz::SourceRange& name, const sfz::SourceRange& value, const std::string& n, const std::string& v) override
+        {
+            names.push_back(n);
+            values.push_back(v);
+            nameColumns.push_back(name.start.columnNumber);
+            valueEndColumns.push_back(value.end.columnNumber);
+            lines.push_back(name.start.lineNumber);
+        }
+        std::vector<std::string> names, values;
+        std::vector<size_t> nameColumns, valueEndColumns, lines;
+    } listener;
+
+    const size_t count = 20000;
+    std::string text = "<group>";
+    std::vector<size_t> nameColumns, valueEndColumns;
+    for (size_t i = 0; i < count; ++i) {
+        text += ' ';
+        nameColumns.push_back(text.size());
+        text += "key" + std::to_string(i) + "=" + std::to_string(i * 7);
+        valueEndColumns.push_back(text.size());
+    }
+    text += " // trailing comment\n<region> sample=a.wav\n";
+
+    sfz::Parser parser;
+    parser.setListener(&listener);
+    const auto begin = std::chrono::steady_clock::now();
+    parser.parseString("/longLine.sfz", text);
+    const auto seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - begin).count();
+
+    REQUIRE(listener.names.size() == count + 1);
+    for (size_t i = 0; i < count; ++i) {
+        REQUIRE(listener.names[i] == "key" + std::to_string(i));
+        REQUIRE(listener.values[i] == std::to_string(i * 7));
+        REQUIRE(listener.nameColumns[i] == nameColumns[i]);
+        REQUIRE(listener.valueEndColumns[i] == valueEndColumns[i]);
+        REQUIRE(listener.lines[i] == 0);
+    }
+    REQUIRE(listener.names[count] == "sample");
+    REQUIRE(listener.values[count] == "a.wav");
+    REQUIRE(listener.lines[count] == 1);
+    REQUIRE(seconds < 5.0);
 }

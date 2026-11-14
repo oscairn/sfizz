@@ -52,6 +52,12 @@ public:
     void putBackChars(absl::string_view characters);
 
     /**
+     * @brief Extract up to the end of the line, or up to a comment (`//` or `/*`), as one block.
+     * @return The number of characters extracted.
+     */
+    size_t extractToEol(std::string* dst);
+
+    /**
      * @brief Extract as long as a predicate holds on the next character.
      */
     template <class P> size_t extractWhile(std::string* dst, const P& pred);
@@ -95,11 +101,19 @@ protected:
     virtual int getNextStreamByte() = 0;
 
 private:
+    bool fill(size_t index);
+    void compact();
     void updateSourceLocationAdding(int byte);
     void updateSourceLocationRemoving(int byte);
 
 private:
-    std::string _accum; // new characters at the front, old at the back
+    // The characters read from the stream, and the position of the next one to hand out.
+    // Putting back characters just read only moves the position.
+    std::string _buf;
+    size_t _pos = 0;
+    // where the last extractToEol() found the end of its line, scanning from _eolFrom
+    bool _eolScanned = false;
+    size_t _eolFrom = 0, _eolEnd = 0;
     SourceLocation _loc;
     std::vector<int> _lineNumColumns;
 };

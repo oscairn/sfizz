@@ -5,45 +5,84 @@
 // If not, contact the sfizz maintainers at https://github.com/sfztools/sfizz
 
 #include "ParserPrivate.h"
+#include <cstring>
 
 namespace sfz {
 
 Reader::Reader(const fs::path& filePath)
 {
-    _accum.reserve(256);
+    _buf.reserve(256);
     _loc.filePath = std::make_shared<fs::path>(filePath);
     _lineNumColumns.reserve(256);
 }
 
-int Reader::getChar()
+// Makes the character at `index` available in the buffer, if the stream has one
+bool Reader::fill(size_t index)
 {
-    int byte;
-
-    if (_accum.empty())
-        byte = getNextStreamByte();
-    else {
-        byte = static_cast<unsigned char>(_accum.back());
-        _accum.pop_back();
+    while (index >= _buf.size()) {
+        int byte = getNextStreamByte();
+        if (byte == kEof)
+            return false;
+        _buf.push_back(static_cast<char>(byte));
     }
 
-    if (byte != kEof)
-        updateSourceLocationAdding(byte);
+    return true;
+}
 
+// Forgets the characters read so far, when none is unread
+void Reader::compact()
+{
+    if (_pos >= 4096 && _pos == _buf.size()) {
+        _buf.clear();
+        _pos = 0;
+        _eolScanned = false;
+    }
+}
+
+int Reader::getChar()
+{
+    compact();
+    if (!fill(_pos))
+        return kEof;
+
+    int byte = static_cast<unsigned char>(_buf[_pos++]);
+    updateSourceLocationAdding(byte);
     return byte;
 }
 
 int Reader::peekChar()
 {
-    int byte;
+    compact();
+    return fill(_pos) ? static_cast<unsigned char>(_buf[_pos]) : kEof;
+}
 
-    if (_accum.empty()) {
-        byte = getChar();
-        putBackChar(byte);
+size_t Reader::extractToEol(std::string* dst)
+{
+    compact();
+    size_t end;
+
+    // a line with many opcodes asks again from each one: the end found last time still holds
+    if (_eolScanned && _eolFrom <= _pos && _pos <= _eolEnd)
+        end = _eolEnd;
+    else {
+        for (end = _pos; fill(end); ++end) {
+            char c = _buf[end];
+            if (c == '\r' || c == '\n')
+                break;
+            if (c == '/' && fill(end + 1) && (_buf[end + 1] == '/' || _buf[end + 1] == '*'))
+                break;
+        }
+        _eolScanned = true;
+        _eolFrom = _pos;
+        _eolEnd = end;
     }
-    else
-        byte = static_cast<unsigned char>(_accum.back());
 
-    return byte;
+    const size_t count = end - _pos;
+    if (dst)
+        dst->append(_buf, _pos, count);
+    _pos = end;
+    _loc.columnNumber += count; // the stop characters are not in it
+    return count;
 }
 
 bool Reader::extractExactChar(char c)
@@ -68,10 +107,22 @@ void Reader::putBackChar(int c)
 
 void Reader::putBackChars(absl::string_view characters)
 {
-    _accum.append(characters.rbegin(), characters.rend());
+    const size_t count = characters.size();
 
-    for (size_t i = characters.size(); i-- > 0;)
-        updateSourceLocationRemoving(static_cast<unsigned char>(characters[i]));
+    // the usual case: these are the characters just read, so only the position moves
+    if (_pos >= count && _buf.compare(_pos - count, count, characters.data(), count) == 0)
+        _pos -= count;
+    else {
+        _buf.insert(_pos, characters.data(), count);
+        _eolScanned = false;
+    }
+
+    if (!std::memchr(characters.data(), '\n', count))
+        _loc.columnNumber -= count;
+    else {
+        for (size_t i = count; i-- > 0;)
+            updateSourceLocationRemoving(static_cast<unsigned char>(characters[i]));
+    }
 }
 
 size_t Reader::skipChars(absl::string_view chars)
