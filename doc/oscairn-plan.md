@@ -674,6 +674,16 @@ main thread (shrink now), section 11.
 With the FANTOM's 500 MB free, the policy gives Rd 73 16384 frames (9.6 MiB of preloads) and
 Nameless Piano 4096 (27.5 MiB); under pressure both get 2048.
 
+**Load cost** (0.8.5). A patch's text is parsed twice per load, once to list its samples (the memory
+policy and the asset resolution share that scan) and once by the synth; the parser reads a line of
+many opcodes in linear time (the converter writes 200-opcode `<group>` lines); each sample file's
+header is read once per load and kept, then the file is opened once more to preload it. The piano
+part of "ST Final" (854 regions, 854 stereo FLAC files) loads in 853 M instructions instead of 1,506 M
+(aarch64 container: about 93 ms instead of 127; Mac: about 165 ms instead of 245). The windowed-sinc
+tables (about 180 M instructions) are still built when the first synth in a process is created: a
+voice may need them from the audio thread (offline rendering turns freewheeling, quality 10, on there),
+so building them on first use is not safe.
+
 **Element voices' sample quality.** A sound's `sample_quality` opcode sets it per sound (the
 converter can write it); `OSCAIRN_SAMPLER_ELEMENT_QUALITY` (0 to 10) sets the device's default for
 element voices with none (`Synth::setElementSampleQuality`; unset: the synth's live quality, 2, as
