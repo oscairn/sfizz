@@ -11,6 +11,9 @@ namespace sfz {
 
 thread_local size_t Reader::_locationSteps = 0;
 
+// out of line, so that the thread-local is only ever touched from this file
+size_t Reader::locationSteps() { return _locationSteps; }
+
 Reader::Reader(const fs::path& filePath)
 {
     _buf.reserve(256);

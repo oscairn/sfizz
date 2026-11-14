@@ -25,7 +25,7 @@ public:
      * @brief For tests: how many characters readers on this thread have counted one at a
      * time into source locations. Work done in bulk is not counted.
      */
-    static size_t locationSteps() { return _locationSteps; }
+    static size_t locationSteps();
 
     /**
      * @brief Get the current source location.
