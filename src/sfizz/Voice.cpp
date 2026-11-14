@@ -535,7 +535,7 @@ bool Voice::startVoice(Layer* layer, int delay, const TriggerEvent& event) noexc
     impl.baseGain_ = region.getBaseGain();
     if (impl.triggerEvent_.type != TriggerEventType::CC || region.velocityOverride == VelocityOverride::previous)
         impl.baseGain_ *= noteGain(region, impl.triggerEvent_.number, impl.triggerEvent_.value, midiState, curveSet);
-    if (region.oscairn.referenceLevel)
+    if (region.oscairn.profile)
         impl.baseGain_ *= oscairn::referenceLevelGain;
     if (region.oscairn.levelScalingEnabled)
         impl.baseGain_ *= oscairn::levelScalingGain(region.oscairn.levelScaling, impl.triggerEvent_.number);

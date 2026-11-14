@@ -995,10 +995,11 @@ Taken in the fourth session; Jacob accepted 22-24 and 26 and decided 25 (2026-11
     second section's cutoff index moves by 7 per step.
 24. **The filter envelope's release gets the whole key-follow shift** (no adjustment parameter
     exists for it; not measured).
-25. **Output staging (K28) is an option:** the reference plays a full-scale sample 1.84 dB below
-    sfizz at the same Part Volume and CC 7. `oscairn_ref_level=1` (per patch or region, under
-    the profile) applies that; it is off by default, so sfizz's own level stays the default
-    (Jacob sometimes finds the reference too quiet).
+25. **Output staging (K28) is the reference's** (changed 2026-11-14, plugin 0.8.6; it was an option
+    until 0.8.5): every region of a patch with the profile plays 2.075 dB below sfizz's level at
+    the same Part Volume and CC 7, which is the reference's -9.43 dB per channel for a full-scale
+    sample at centre. `oscairn_ref_level` is gone (it is an unknown opcode); patches without the
+    profile keep sfizz's level.
 26. **Filter code 18's late low-pass (K27)** is not modelled: factory elements use code 21.
 
 Taken in the voice budget session (2026-11-06), confirmed by Jacob 2026-11-07:
@@ -2320,6 +2321,18 @@ and a sostenuto over a held note, which sound by SFZ's rules until an all-notes-
 Random runs of 6000 blocks (notes piled past the voice limit, retriggers, wrong ids, chokes,
 pedals, CC 123, a lowered budget, then everything released) end with exactly one NOTE_END a note.
 
+### Levels round (2026-11-14): staging, pan, voice end, cutoff, filter envelope release
+
+Four measured corrections from the Oscairn PCM engine's round 2 (reference recordings of one
+element, filter Thru or Type 0, effects off, at 44.1 kHz) back-ported to the element path, each its
+own commit and each checked by rendering the same probes (the PCM engine's sound texts, the factory
+samples' flac files) through this fork before and after. They change the loudness of every sample
+part: see the staging entry below.
+
+- **Output staging** (K28, decision 25): 2.075 dB lower for every region of a patch with the
+  profile. Fork against reference at centre pan, `a_saw_p64`, `a_st_p64`, `a_lvl100`, `a_lvl64`:
+  +2.07, +2.05, +2.09, +2.12 dB before, 0.00, +0.02, +0.01, +0.04 dB after.
+
 ### Upstream merge test (2026-11-01)
 
 `upstream/develop` has no commits after `f5c6e29f`: merging it into `oscairn` is a no-op
@@ -2366,7 +2379,7 @@ repository, or the local scripts beside the renders).
 | K25 | Filter under cutoff modulation | The engine runs the state-variable structure itself (since `f4b72515`) and redesigns it every 16 samples from the filter envelope and LFO cents; the reference's update rate and structure under fast cutoff changes are not compared | - | Unverified | none yet | `ElementFilter.cpp` `process` |
 | K26 | Note shift, transpose, coarse tune and bend range | The reference's documented ranges are narrower (Part and Performance note shift and element coarse tune +-48 semitones, bend range -48 to +24 semitones); Oscairn takes transpose to +-127 semitones and bends to +-120 semitones, unclamped | - | Deliberate (decision 17) | `OscairnT.cpp` "Note shift and bend range" | stock `Defaults.cpp` (permissive bounds) |
 | K27 | Level of held looped waveforms | The steps are a low-pass: the probes use filter code 18, which the reference passes untouched at first and then, about 10.5 s after a note-60 note-on, turns into a fixed two-pole low-pass at about 1190 Hz with damping 2 (fit rms 0.09 dB), fading in over about 1.5 s, whatever the element's cutoff (384 or 640) and resonance (0 or 64); at note 84 nothing within 16 s; code 21 shows nothing within 16 s. Held noise shows it directly; repeated Oboe2 render agrees | Reference behaviour of code 18; factory elements do not use code 18 | Not modelled (decision 26); reproduces | `ls1`, `ls2` (`noise_hold`), `ls3` | - |
-| K28 | Overall level of the sine probes | The reference plays a full-scale sample at Part Volume 127, pan centre, at -9.19 dB per channel (`lv1` `pv_127`); sfizz at CC 7 127 at -7.35 dB (its fixed global volume; its default CC 7 of 100 is -4.15 dB, exactly the probes' Part Volume 100). So the sine pairs' +1.7 to +1.9 dB is 1.84 dB of output staging (the equal-power centre -3.01 dB and a further -6.18 dB on the reference side) | Output staging | Optional: `oscairn_ref_level=1` applies it, off by default (decision 25) | `lv1`; `scripts/s4/k28` | stock `Defaults.h` `globalVolume` |
+| K28 | Overall level (output staging) | Sine probes first gave 1.84 dB (`lv1` `pv_127`: -9.19 dB per channel at Part Volume 127, pan centre; sfizz at CC 7 127 at -7.35 dB, its fixed global volume). Measured on factory samples in the Oscairn PCM engine's round 2 (`a_saw_p*`, `a_st_p*`, `a_fat_p*`, `a_lvl*`, 44.1 kHz, full-scale 16-bit samples, element level 127, velocity sensitivity 0): the reference plays them at -9.43 dB per channel, mono and stereo alike, and the fork played the same samples 2.07 to 2.09 dB higher (44 probes at centre pan and on the near side; the far side differs by the pan law, K1) | Output staging, 2.075 dB | Applied to every region of a patch with the profile (`oscairn_ref_level` removed, decision 25); no known difference left | probes `a_saw_p64`, `a_st_p64`, `a_lvl100`, `a_lvl64`; test "Output staging is the reference's" | `lv1`; `scripts/s4/k28` | stock `Defaults.h` `globalVolume` |
 | K31 | Filter type 3 where its section passes the top of the range | The section sits 4097 cents above the cutoff and is held at 7290 Hz; with resonance there the reference shows a weak peak (fit damping 1.36 at cutoff 768, resonance 64) where the engine has the full one (15 dB rms off); low cutoffs (64-448 at resonance 0) 1.2-3.7 dB rms | Not measured near the top | Unresolved | `fl1`, `fl2` (`t3*`, `ty3*`) | `ElementFilter.cpp` `update` case 3 |
 | K32 | Dual types with a distance that pushes the second section past the top | At distance +127 (cutoff 512, resonance 32) the reference's second section is near 16 kHz, above 7290 Hz; the engine holds it at 7290 Hz (rms 6.7-7.8 dB for that render); distances -128, -64, +64 fit within 0.13-0.96 dB with 7 index steps per distance step | Above-top frequencies not modelled | Unresolved | `fl3` (`ty14d_*`-`ty16d_*`); `scripts/s4/tdist.py` | `ElementFilter.cpp` `update` cases 14-17 |
 | K33 | Filter envelope times | The engine uses the pitch envelope's law (the decay table's full-scale time, hold table); glides measured from noise renders agree within the analysis's spread: attack 72 -2 to -7 %, decay 80 -3 to +5 %, time velocity (+63 at velocity 32) -2 to -11 %, key follow (+63 at note 84) -12 to +6 %, at 44.1, 48 and 96 kHz; attack 48 and release 48 read 20-25 % shorter on the reference than the table (too fast for the analysis window) | Shared law, measured only at these points | Partly checked | `fl3` (`fa_*`, `fd_*`, `fr_*`, `ftv_*`, `ftk_*`); `scripts/s4/eng_feg.py` | `ElementPitch.cpp` |

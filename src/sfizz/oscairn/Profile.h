@@ -63,9 +63,9 @@ struct RegionData {
     ElementPitchParameters feg { 0, 0, 64, 64, 80, 128, 255, 255, 255, 128, 40 };
     int32_t fegDepthVelocitySensitivity { 0 }; // -64..+63
     int32_t fegDepthVelocityCurve { 2 }; // 0-4
-    // The reference's output staging: 1.84 dB below sfizz's for the same sample, Part Volume
-    // and CC 7 (doc/oscairn-plan.md, decision 25, K28); off by default
-    bool referenceLevel { false };
+    // Set on every region of a patch that enables the profile: such a region plays at the
+    // reference's output staging (ElementLevel.h, K28)
+    bool profile { false };
     // Element LFO (reference mode by default)
     bool lfoEnabled { false };
     ElementLfoParameters lfo;

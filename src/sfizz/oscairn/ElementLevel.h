@@ -59,11 +59,12 @@ float levelScalingGain(const ElementLevelScaling& s, int key) noexcept;
 void balanceGains(int32_t pan, float& left, float& right) noexcept;
 
 /**
- * @brief Gain of the reference's output staging relative to sfizz's (-1.84 dB, measured: a
- * full-scale sample at Part Volume 127, pan centre, plays at -9.19 dB per channel on the
- * reference and -7.35 dB in sfizz at CC 7 127).
+ * @brief Gain of the reference's output staging relative to sfizz's (-2.075 dB, measured: a
+ * full-scale sample at element level 127, Part Volume 127, pan centre plays at -9.43 dB per
+ * channel on the reference, mono and stereo alike, and -7.35 dB in sfizz at CC 7 127: the
+ * same sample through both differs by 2.07 to 2.09 dB across 44 probes).
  */
-constexpr float referenceLevelGain = 0.80910f; // 10^(-1.84 / 20)
+constexpr float referenceLevelGain = 0.78750f; // 10^(-2.075 / 20)
 
 } // namespace oscairn
 } // namespace sfz

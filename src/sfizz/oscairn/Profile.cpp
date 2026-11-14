@@ -160,7 +160,6 @@ bool parseRegionOpcode(const Opcode& opcode, RegionData& data)
     case hash("oscairn_delay"): data.keyOnDelay = opcode.read(index127); return true;
     case hash("oscairn_delay_note"): data.keyOnDelayNote = opcode.read(noteLength); return true;
     case hash("oscairn_mono"): data.mono = opcode.read(switchSpec) == 1; return true;
-    case hash("oscairn_ref_level"): data.referenceLevel = opcode.read(switchSpec) == 1; return true;
     case hash("oscairn_elfo_mode"): data.lfo.mode = opcode.read(switchSpec); data.lfoEnabled = true; return true;
     case hash("oscairn_elfo_wave"): data.lfo.wave = opcode.read(lfoWaves); data.lfoEnabled = true; return true;
     case hash("oscairn_elfo_speed"): data.lfo.speed = opcode.read(speed63); data.lfoEnabled = true; return true;

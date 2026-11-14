@@ -1851,7 +1851,7 @@ int main(int argc, char** argv)
         CHECK(notes.count == 8);
         for (int n = 0; n < 8; ++n) { // every note keeps its two loudest elements, and its level
             CHECK(notes.voices(n) == 2);
-            CHECK(std::fabs(notes.loudness(n) - notes.loudness(0)) < 1e-3f && notes.loudness(n) > 0.5f);
+            CHECK(std::fabs(notes.loudness(n) - notes.loudness(0)) < 1e-3f && notes.loudness(n) > 0.39f); // 0.5 before the output staging, which is x0.7875
             CHECK(events.ends(n) == 0);
         }
         // the limit lowered to 8: each note's second element goes, every note still sounds

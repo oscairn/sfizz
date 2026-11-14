@@ -19,6 +19,7 @@
 #include "TestHelpers.h"
 #include "catch2/catch.hpp"
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <complex>
 #include <cstring>
@@ -98,7 +99,7 @@ TEST_CASE("[Oscairn] The profile enables the opcodes for the regions after it")
     REQUIRE(!isUnknown(synth, "oscairn_ampeg_decay1"));
 }
 
-TEST_CASE("[Oscairn] A profile alone changes nothing; reloading clears it")
+TEST_CASE("[Oscairn] A profile alone changes only the output staging; reloading clears it")
 {
     const std::string plain = "<region> sample=*saw ampeg_attack=0.01 ampeg_release=0.05";
     auto render = [](const std::string& text) {
@@ -116,7 +117,10 @@ TEST_CASE("[Oscairn] A profile alone changes nothing; reloading clears it")
         }
         return out;
     };
-    REQUIRE(render(plain) == render("<control> oscairn_profile=1\n" + plain));
+    const auto stock = render(plain), staged = render("<control> oscairn_profile=1\n" + plain);
+    REQUIRE(stock.size() == staged.size());
+    for (size_t i = 0; i < stock.size(); ++i)
+        REQUIRE(staged[i] == Approx(stock[i] * sfz::oscairn::referenceLevelGain).margin(1e-7));
 
     sfz::Synth synth;
     synth.loadSfzString(fs::current_path() / "tests/TestFiles/oscairn.sfz", "<control> oscairn_profile=1 <region> sample=*sine oscairn_ampeg_attack=1");
@@ -423,12 +427,13 @@ TEST_CASE("[Oscairn] Velocity and pan opcodes reach the voice")
         }
         return std::make_pair(left, right);
     };
-    const auto full = peaks("<region> sample=*sine amp_veltrack=0", 64);
+    const auto stock = peaks("<region> sample=*sine amp_veltrack=0", 64);
+    const auto full = peaks("<control> oscairn_profile=1 <region> sample=*sine amp_veltrack=0", 64);
     const auto vel = peaks("<control> oscairn_profile=1 <region> sample=*sine amp_veltrack=0 oscairn_amp_velsens=32", 64);
     REQUIRE(vel.first / full.first == Approx(std::pow(10.0f, -12.0f / 20.0f)).epsilon(0.01));
     const auto off = peaks("<region> sample=*sine amp_veltrack=0 oscairn_amp_velsens=32 oscairn_pan=1", 64);
-    REQUIRE(off.first == Approx(full.first).epsilon(0.001)); // no profile: unknown, no effect
-    REQUIRE(off.second == Approx(full.second).epsilon(0.001));
+    REQUIRE(off.first == Approx(stock.first).epsilon(0.001)); // no profile: unknown, no effect
+    REQUIRE(off.second == Approx(stock.second).epsilon(0.001));
     const auto left = peaks("<control> oscairn_profile=1 <region> sample=*sine amp_veltrack=0 oscairn_pan=1", 64);
     REQUIRE(left.first == Approx(full.first).epsilon(0.001));
     REQUIRE(left.second < 1e-6f);
@@ -1287,33 +1292,39 @@ TEST_CASE("[Oscairn] Filter envelope opcodes and voice")
     REQUIRE(open - closed > 20.0);
 }
 
-TEST_CASE("[Oscairn] Reference output level is an option")
+TEST_CASE("[Oscairn] Output staging is the reference's")
 {
-    // Off by default (sfizz's own level); oscairn_ref_level=1 plays 1.84 dB lower, as the
-    // reference does (decision 25)
-    auto level = [](const std::string& opcodes) {
+    // A full-scale sample at element level 127, Part Volume 127 (CC 7 127) and pan centre plays at
+    // -9.43 dB per channel on the reference (pcm round 2, probes a_saw_p64 and a_st_p64: the fork
+    // played the same samples 2.07 and 2.05 dB higher), and at -7.35 dB in stock sfizz: a patch with
+    // the profile plays 2.075 dB below the same patch without it.
+    auto level = [](const std::string& control, const std::string& opcodes) {
         sfz::Synth s;
         s.setSampleRate(48000.0f);
         s.setSamplesPerBlock(256);
-        s.loadSfzString(fs::current_path() / "tests/TestFiles/oscairn.sfz", "<control> oscairn_profile=1 <region> sample=*sine amp_veltrack=0 " + opcodes);
+        s.loadSfzString(fs::current_path() / "tests/TestFiles/oscairn.sfz",
+            "<control> set_cc7=127 " + control + " <region> sample=*square amp_veltrack=0 " + opcodes);
         s.noteOn(0, 69, 127);
         sfz::AudioBuffer<float> buffer { 2, 256 };
-        double sum = 0.0;
+        double sum[2] = { 0.0, 0.0 };
         for (int b = 0; b < 40; ++b) {
             s.renderBlock(buffer);
             if (b >= 20)
-                for (float x : buffer.getConstSpan(0))
-                    sum += static_cast<double>(x) * x;
+                for (int c = 0; c < 2; ++c)
+                    for (float x : buffer.getConstSpan(c))
+                        sum[c] += static_cast<double>(x) * x;
         }
-        return 10.0 * std::log10(sum);
+        return std::array<double, 2> { 10.0 * std::log10(sum[0] / (20 * 256)), 10.0 * std::log10(sum[1] / (20 * 256)) };
     };
-    const double plain = level("");
-    REQUIRE(level("oscairn_ref_level=0") == Approx(plain).margin(1e-6));
-    REQUIRE(level("oscairn_ref_level=1") - plain == Approx(-1.84).margin(0.01));
-    // Without the profile the opcode is unknown and changes nothing
+    const auto stock = level("", "");
+    const auto staged = level("oscairn_profile=1", "");
+    REQUIRE(staged[0] - stock[0] == Approx(-2.075).margin(0.02));
+    REQUIRE(staged[1] - stock[1] == Approx(-2.075).margin(0.02));
+    // Regions of a profile patch with their own opcodes play at the same level, and the opcode of the
+    // old option is no longer one
+    REQUIRE(level("oscairn_profile=1", "oscairn_ampeg_attack=0")[0] - stock[0] == Approx(-2.075).margin(0.02));
     sfz::Synth synth;
-    synth.loadSfzString(fs::current_path() / "tests/TestFiles/oscairn.sfz", "<region> sample=*sine oscairn_ref_level=1");
-    REQUIRE_FALSE(synth.getRegionView(0)->oscairn.referenceLevel);
+    synth.loadSfzString(fs::current_path() / "tests/TestFiles/oscairn.sfz", "<control> oscairn_profile=1 <region> sample=*sine oscairn_ref_level=1");
     REQUIRE(isUnknown(synth, "oscairn_ref_level"));
 }
 
@@ -1370,7 +1381,8 @@ TEST_CASE("[Oscairn] Element level scaling by key")
     };
     const std::string opcodes = " sample=*sine amp_veltrack=0 oscairn_amp_scaling_key3=60 oscairn_amp_scaling_offset3=-64";
     const double plain = level("<region> sample=*sine amp_veltrack=0", 60);
-    REQUIRE(level("<control> oscairn_profile=1 <region>" + opcodes, 60) - plain == Approx(-12.0).margin(0.01));
+    const double staged = level("<control> oscairn_profile=1 <region> sample=*sine amp_veltrack=0", 60);
+    REQUIRE(level("<control> oscairn_profile=1 <region>" + opcodes, 60) - staged == Approx(-12.0).margin(0.01));
     REQUIRE(level("<region>" + opcodes, 60) == Approx(plain).margin(1e-6));
     sfz::Synth synth;
     synth.loadSfzString(fs::current_path() / "tests/TestFiles/oscairn.sfz",

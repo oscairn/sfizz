@@ -169,6 +169,7 @@ void Synth::Impl::buildRegion(const std::vector<Opcode>& regionOpcodes)
     Layer* lastLayer = new Layer(regionNumber, defaultPath_, midiState);
     layers_.emplace_back(lastLayer);
     Region* lastRegion = &lastLayer->getRegion();
+    lastRegion->oscairn.profile = oscairnProfile_;
 
     //
     auto parseOpcodes = [&](const std::vector<Opcode>& opcodes) {
