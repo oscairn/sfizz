@@ -9,6 +9,8 @@
 
 namespace sfz {
 
+std::atomic<size_t> Reader::_locationSteps { 0 };
+
 Reader::Reader(const fs::path& filePath)
 {
     _buf.reserve(256);
@@ -153,6 +155,7 @@ bool Reader::hasOneOfChars(absl::string_view chars)
 
 void Reader::updateSourceLocationAdding(int byte)
 {
+    _locationSteps.fetch_add(1, std::memory_order_relaxed);
     if (byte != '\n')
         _loc.columnNumber += 1;
     else {
@@ -164,6 +167,7 @@ void Reader::updateSourceLocationAdding(int byte)
 
 void Reader::updateSourceLocationRemoving(int byte)
 {
+    _locationSteps.fetch_add(1, std::memory_order_relaxed);
     if (byte != '\n')
         _loc.columnNumber -= 1;
     else {

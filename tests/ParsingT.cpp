@@ -7,7 +7,7 @@
 #include "sfizz/SfzHelpers.h"
 #include "sfizz/parser/Parser.h"
 #include "sfizz/parser/ParserListener.h"
-#include <chrono>
+#include "sfizz/parser/ParserPrivate.h"
 #include <iostream>
 #include "catch2/catch.hpp"
 #include "absl/strings/string_view.h"
@@ -751,7 +751,8 @@ TEST_CASE("[Parsing] Sample data 2")
 TEST_CASE("[Parsing] A long line of many opcodes")
 {
     // Each opcode's value is read to the end of the line and the rest put back, so reading
-    // took time quadratic in the line's length (this line: 16 s on an M-series Mac).
+    // took time quadratic in the line's length. The work is counted, not timed: characters
+    // handled one at a time must grow in step with the opcodes, not with their square.
     struct Locations : sfz::Parser::Listener {
         void onParseOpcode(const sfz::SourceRange& name, const sfz::SourceRange& value, const std::string& n, const std::string& v) override
         {
@@ -778,9 +779,7 @@ TEST_CASE("[Parsing] A long line of many opcodes")
 
     sfz::Parser parser;
     parser.setListener(&listener);
-    const auto begin = std::chrono::steady_clock::now();
     parser.parseString("/longLine.sfz", text);
-    const auto seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - begin).count();
 
     REQUIRE(listener.names.size() == count + 1);
     for (size_t i = 0; i < count; ++i) {
@@ -793,5 +792,18 @@ TEST_CASE("[Parsing] A long line of many opcodes")
     REQUIRE(listener.names[count] == "sample");
     REQUIRE(listener.values[count] == "a.wav");
     REQUIRE(listener.lines[count] == 1);
-    REQUIRE(seconds < 5.0);
+
+    // a line of 2000 opcodes and one of 8000: four times the opcodes, about four times the work
+    auto steps = [](size_t opcodes) {
+        std::string line = "<group>";
+        for (size_t i = 0; i < opcodes; ++i)
+            line += " key" + std::to_string(i) + "=" + std::to_string(i * 7);
+        sfz::Parser p;
+        const size_t before = sfz::Reader::locationSteps();
+        p.parseString("/steps.sfz", line);
+        return sfz::Reader::locationSteps() - before;
+    };
+    const size_t small = steps(2000), large = steps(8000);
+    REQUIRE(small > 0);
+    REQUIRE(large < 6 * small); // linear: 4, quadratic: 16
 }
