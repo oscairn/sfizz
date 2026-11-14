@@ -121,6 +121,10 @@ void ElementEnvelope::release(int delay) noexcept
 
 void ElementEnvelope::setReleaseSeconds(double secondsPer60dB) noexcept
 {
+    // A voice whose sample has ended asks for the same fast release every block: starting the
+    // fall over each time never reached its end
+    if (secondsPer60dB == releaseOverride_)
+        return;
     releaseOverride_ = secondsPer60dB;
     if (stage_ == Stage::Release) // already releasing: go on from the current level at the new rate
         enter(Stage::Release);

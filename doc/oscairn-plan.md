@@ -2321,6 +2321,16 @@ and a sostenuto over a held note, which sound by SFZ's rules until an all-notes-
 Random runs of 6000 blocks (notes piled past the voice limit, retriggers, wrong ids, chokes,
 pedals, CC 123, a lowered budget, then everything released) end with exactly one NOTE_END a note.
 
+**Stuck one-shot element voices (0.8.7).** A one-shot element voice (a key-off element, or any
+no-loop region with the element envelope) whose sample ended asked for its fast release again in
+every block, and each ask restarted the 3 ms release from the envelope's level, floored at -90 dB.
+A 128-frame block is shorter than the fall to the -96.45 dB end threshold (231 samples at 48 kHz),
+so the release never reached it and the voice sounded silently, and cost a block's work, until a
+panic. Seen on a converted piano whose 216 key-off regions are one-shots: 26 voices after a script
+of 26 notes, still there 400 s later. A repeated request for the release already in force is now
+ignored (`ElementEnvelope::setReleaseSeconds`); test `A one-shot element voice whose sample ends
+before its release ends, in blocks shorter than its fall`.
+
 ### Levels round (2026-11-14): staging, pan, voice end, cutoff, filter envelope release
 
 Four measured corrections from the Oscairn PCM engine's round 2 (reference recordings of one

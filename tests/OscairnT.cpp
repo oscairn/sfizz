@@ -1652,6 +1652,27 @@ TEST_CASE("[Oscairn] Key-off elements release 2 s after they start")
     REQUIRE(voicesPlain == 1);
 }
 
+TEST_CASE("[Oscairn] A one-shot element voice whose sample ends before its release ends, in blocks shorter than its fall")
+{
+    // Every block after the sample's end asks again for the fast release; it must go on falling
+    // (a 128-frame block is shorter than the 4.8 ms fall to the end threshold)
+    for (const char* opcodes : { "trigger=release rt_dead=1 oscairn_keyoff=1", "" }) {
+        sfz::Synth synth;
+        synth.setSampleRate(48000.0f);
+        synth.setSamplesPerBlock(128);
+        synth.loadSfzString(fs::current_path() / "tests/TestFiles/oscairn.sfz",
+            std::string("<control> oscairn_profile=1 <region> sample=kick.wav pitch_keycenter=60 loop_mode=no_loop amp_veltrack=0 oscairn_ampeg_release=40 ") + opcodes);
+        sfz::AudioBuffer<float> buffer { 2, 128 };
+        synth.noteOn(0, 60, 100);
+        for (int b = 0; b < 400; ++b) {
+            if (b == 2)
+                synth.noteOff(0, 60, 0);
+            synth.renderBlock(buffer);
+        }
+        REQUIRE(synth.getNumActiveVoices() == 0);
+    }
+}
+
 TEST_CASE("[Oscairn] Chokes and polyphony limits end an element voice at the off time")
 {
     // off() shortens the stock amplitude EG; under the profile the element envelope is the
