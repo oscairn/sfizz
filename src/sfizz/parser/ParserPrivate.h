@@ -10,7 +10,6 @@
 #include "absl/strings/string_view.h"
 #include <string>
 #include <fstream>
-#include <atomic>
 
 namespace sfz {
 
@@ -23,10 +22,10 @@ public:
     virtual ~Reader() {}
 
     /**
-     * @brief For tests: how many characters have been counted one at a time into source
-     * locations by any reader. Work done in bulk is not counted.
+     * @brief For tests: how many characters readers on this thread have counted one at a
+     * time into source locations. Work done in bulk is not counted.
      */
-    static size_t locationSteps() { return _locationSteps.load(std::memory_order_relaxed); }
+    static size_t locationSteps() { return _locationSteps; }
 
     /**
      * @brief Get the current source location.
@@ -116,7 +115,7 @@ private:
 private:
     // The characters read from the stream, and the position of the next one to hand out.
     // Putting back characters just read only moves the position.
-    static std::atomic<size_t> _locationSteps;
+    static thread_local size_t _locationSteps;
     std::string _buf;
     size_t _pos = 0;
     // where the last extractToEol() found the end of its line, scanning from _eolFrom
