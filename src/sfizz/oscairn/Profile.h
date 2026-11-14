@@ -46,8 +46,9 @@ struct RegionData {
     // Key On Delay: time length 0-127, or a tempo-synced note length 5-21 (0: none)
     int32_t keyOnDelay { 0 };
     int32_t keyOnDelayNote { 0 };
-    // Balance-law pan, after sfizz's pan stage
-    bool panEnabled { false };
+    // The element's pan 0-127 (64 centre). With the profile a region's pan is this plus the key
+    // bank's (the `pan` opcode, -100..100 as raw steps), clamped, under the balance law
+    // (summedPan, balanceGains); sfizz's own pan law does not act
     int32_t pan { 64 };
     // Pitch envelope, added to the voice's pitch in cents
     bool pegEnabled { false };

@@ -91,7 +91,7 @@ bool parseRegionOpcode(const Opcode& opcode, RegionData& data)
     case hash("oscairn_amp_keyfollow"): data.levelScaling.keyFollow = opcode.read(bipolar64); data.levelScalingEnabled = true; return true;
     case hash("oscairn_amp_level"): data.levelScaling.level = opcode.read(level127); data.levelScalingEnabled = true; return true;
     case hash("oscairn_amp_velcurve"): data.velocity.curve = opcode.read(curves); data.velocityEnabled = true; return true;
-    case hash("oscairn_pan"): data.pan = opcode.read(index127); data.panEnabled = true; return true;
+    case hash("oscairn_pan"): data.pan = opcode.read(index127); return true;
     case hash("oscairn_pitcheg_hold"): data.peg.holdTime = opcode.read(index127); data.pegEnabled = true; return true;
     case hash("oscairn_pitcheg_attack"): data.peg.attackTime = opcode.read(index127); data.pegEnabled = true; return true;
     case hash("oscairn_pitcheg_decay&"):

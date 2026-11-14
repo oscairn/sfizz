@@ -943,11 +943,15 @@ void Voice::renderBlock(AudioSpan<float, 2> buffer) noexcept
         impl.filterStageMono(buffer);
         impl.panStageMono(buffer);
     }
-    if (region->oscairn.panEnabled) {
+    if (region->oscairn.profile) {
+        // The key bank's pan and the element's add in raw steps, then the balance law, for mono and
+        // stereo samples alike (the near side keeps the centre level)
         float left, right;
-        oscairn::balanceGains(region->oscairn.pan, left, right);
-        applyGain1<float>(left, buffer.getSpan(0));
-        applyGain1<float>(right, buffer.getSpan(1));
+        oscairn::balanceGains(oscairn::summedPan(region->oscairn.pan, region->pan), left, right);
+        if (left != 1.0f)
+            applyGain1<float>(left, buffer.getSpan(0));
+        if (right != 1.0f)
+            applyGain1<float>(right, buffer.getSpan(1));
     }
 
     if (region->oscairn.ampegEnabled) {
@@ -1160,8 +1164,8 @@ void Voice::Impl::panStageMono(AudioSpan<float> buffer) noexcept
     // Prepare for stereo output
     copy<float>(leftBuffer, rightBuffer);
 
-    // Apply panning
-    fill(*modulationSpan, region_->pan);
+    // Apply panning (a profile region's own pan acts as the balance law, below)
+    fill(*modulationSpan, region_->oscairn.profile ? 0.0f : region_->pan);
     float* panMod = mm.getModulation(panTarget_);
     if (panMod) {
         for (size_t i = 0; i < numSamples; ++i)
@@ -1192,8 +1196,8 @@ void Voice::Impl::panStageStereo(AudioSpan<float> buffer) noexcept
 
     ModMatrix& mm = resources_.getModMatrix();
 
-    // Apply panning
-    fill(*modulationSpan, region_->pan);
+    // Apply panning (a profile region's own pan acts as the balance law, below)
+    fill(*modulationSpan, region_->oscairn.profile ? 0.0f : region_->pan);
     float* panMod = mm.getModulation(panTarget_);
     if (panMod) {
         for (size_t i = 0; i < numSamples; ++i)

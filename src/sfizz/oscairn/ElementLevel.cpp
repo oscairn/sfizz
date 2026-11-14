@@ -126,6 +126,11 @@ float levelScalingGain(const ElementLevelScaling& s, int key) noexcept
     return static_cast<float>(std::pow(10.0, (gridDb(scaled) - gridDb(s.level)) / 20.0));
 }
 
+int32_t summedPan(int32_t elementPan, float keyBankPan) noexcept
+{
+    return std::max<int32_t>(1, std::min<int32_t>(127, elementPan + static_cast<int32_t>(std::lround(keyBankPan * 63.0f))));
+}
+
 void balanceGains(int32_t pan, float& left, float& right) noexcept
 {
     const int32_t p = std::max<int32_t>(1, std::min<int32_t>(127, pan));

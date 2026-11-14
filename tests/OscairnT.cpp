@@ -1328,6 +1328,58 @@ TEST_CASE("[Oscairn] Output staging is the reference's")
     REQUIRE(isUnknown(synth, "oscairn_ref_level"));
 }
 
+TEST_CASE("[Oscairn] Key bank pan and element pan add under the balance law")
+{
+    // Reference (pcm round 2, probes a_saw_p*, a_st_p*, a_fat_p*): the key bank's pan and the element
+    // pan add in raw steps (a key bank's -100..100 as 1..127), clamped, and the sum takes the balance
+    // law, mono and stereo samples alike. A hard-panned mono key bank keeps the centre level (the fork
+    // played it 3.01 dB louder under sfizz's pan law), and with the element pan hard left a
+    // right-panned key bank sounds at the centre level on both sides.
+    auto levels = [](const std::string& sample, const std::string& opcodes) {
+        sfz::Synth s;
+        s.setSampleRate(48000.0f);
+        s.setSamplesPerBlock(256);
+        s.setPreloadSize(1 << 20); // whole files in memory: no streaming race under load
+        s.loadSfzString(fs::current_path() / "tests/TestFiles/oscairn.sfz",
+            "<control> oscairn_profile=1 <region> sample=" + sample + " amp_veltrack=0 loop_mode=loop_continuous " + opcodes);
+        s.noteOn(0, 69, 127);
+        sfz::AudioBuffer<float> buffer { 2, 256 };
+        double sum[2] = { 0.0, 0.0 };
+        for (int b = 0; b < 60; ++b) {
+            s.renderBlock(buffer);
+            if (b >= 20)
+                for (int c = 0; c < 2; ++c)
+                    for (float x : buffer.getConstSpan(c))
+                        sum[c] += static_cast<double>(x) * x;
+        }
+        return std::array<double, 2> { 10.0 * std::log10(sum[0] + 1e-30), 10.0 * std::log10(sum[1] + 1e-30) };
+    };
+    struct Case { const char* opcodes; double left, right; }; // dB against the centre; -300: silent
+    const Case cases[] = {
+        { "pan=-100", 0.0, -300.0 },                        // a hard-left key bank: centre level on the left
+        { "pan=-100 oscairn_pan=1", 0.0, -300.0 },          // pushed further left: clamped
+        { "pan=100 oscairn_pan=1", 0.0, 0.0 },              // hard right plus hard left: centre, both sides
+        { "pan=100 oscairn_pan=32", -6.0, 0.0 },            // raw 95: the left side sin^2(pi/4) on the grid
+        { "oscairn_pan=96", -6.375, 0.0 },                  // raw 96, 31 steps from the edge: 17 grid steps
+        { "oscairn_pan=8", 0.0, -30.75 },                   // raw 8, 7 steps from the edge (probe a_saw_p8: -30.85)
+    };
+    for (const char* sample : { "*sine", "stereo_sample.wav" }) {
+        const auto centre = levels(sample, "");
+        for (const Case& c : cases) {
+            INFO(sample << " " << c.opcodes);
+            const auto got = levels(sample, c.opcodes);
+            if (c.left > -299.0)
+                REQUIRE(got[0] - centre[0] == Approx(c.left).margin(0.05));
+            else
+                REQUIRE(got[0] < -200.0);
+            if (c.right > -299.0)
+                REQUIRE(got[1] - centre[1] == Approx(c.right).margin(0.05));
+            else
+                REQUIRE(got[1] < -200.0);
+        }
+    }
+}
+
 TEST_CASE("[Oscairn] Element level scaling by key")
 {
     using sfz::oscairn::ElementLevelScaling;

@@ -59,6 +59,13 @@ float levelScalingGain(const ElementLevelScaling& s, int key) noexcept;
 void balanceGains(int32_t pan, float& left, float& right) noexcept;
 
 /**
+ * @brief The raw pan 1-127 of an element pan and a key bank's pan: the key bank's pan (-1 to +1,
+ * the `pan` opcode over 100) in raw steps, 63 for a full side, added to the element's and
+ * clamped.
+ */
+int32_t summedPan(int32_t elementPan, float keyBankPan) noexcept;
+
+/**
  * @brief Gain of the reference's output staging relative to sfizz's (-2.075 dB, measured: a
  * full-scale sample at element level 127, Part Volume 127, pan centre plays at -9.43 dB per
  * channel on the reference, mono and stereo alike, and -7.35 dB in sfizz at CC 7 127: the
