@@ -166,11 +166,32 @@ TEST_CASE("[Oscairn] Element envelope segments take the table times at every sam
         REQUIRE(crossing(v, rate, std::pow(10.0f, -6.0f / 20.0f), false, attack) - attack == Approx(1.5 * decay60 * 6 / -sustainDb).margin(tol));
         REQUIRE(crossing(v, rate, sustain * 1.000001f, false, attack) - attack == Approx(1.5 * decay60).margin(tol));
         REQUIRE(v[static_cast<size_t>((hold - 0.01) * rate)] == Approx(sustain).epsilon(1e-4));
-        // the release is a straight line in dB to -90 dB over 1.5 times release60, then silence
+        // the release is a straight line in dB to -96.45 dB over release60 * 96.45 / 60, then silence
         const double t20 = crossing(v, rate, sustain * std::pow(10.0f, -20.0f / 20.0f), false, hold);
-        REQUIRE(t20 - hold == Approx(1.5 * release60 * 20 / (90 + sustainDb)).margin(tol));
-        REQUIRE(crossing(v, rate, 0.0f, false, hold) - hold == Approx(1.5 * release60).margin(tol));
+        REQUIRE(t20 - hold == Approx(release60 * 96.45 / 60 * 20 / (96.45 + sustainDb)).margin(tol));
+        REQUIRE(crossing(v, rate, 0.0f, false, hold) - hold == Approx(release60 * 96.45 / 60).margin(tol));
         REQUIRE(v.back() == 0.0f);
+    }
+}
+
+TEST_CASE("[Oscairn] A release ends at -96.45 dB, where the reference's voices end")
+{
+    // Reference (pcm round 2, probes c_end*): a sine at element level 127 released after 0.7 s ends
+    // at -96.46 (release 96), -96.47 (104) and -96.47 dB (112) below its held level, 13.39, 26.08 and
+    // 51.33 s after the onset, 0.7 s of it the hold: the fork ended at -90 dB, about 6 % early
+    for (int index : { 96, 104, 112 }) {
+        ElementEnvelopeParameters p;
+        p.releaseTime = index;
+        const double rate = 44100.0, hold = 0.7;
+        const double end = hold + sfz::oscairn::releaseSecondsPer60dB(index) * 96.45 / 60;
+        const auto v = renderEnvelope(p, rate, end + 1.0, hold);
+        size_t last = 0;
+        for (size_t i = 0; i < v.size(); ++i)
+            if (v[i] > 0.0f)
+                last = i;
+        INFO("release " << index);
+        REQUIRE(last / rate == Approx(end).margin(2.0 / rate));
+        REQUIRE(20 * std::log10(v[last]) == Approx(-96.45).margin(0.05));
     }
 }
 

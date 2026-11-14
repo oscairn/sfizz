@@ -17,6 +17,10 @@ namespace {
 // and then the envelope is silent. Fitted: decays from level 127 to levels 96, 64 and 32 at
 // one index took the same time as the decay to level 0 when level 0 sits at -90 dB.
 constexpr double floorDb = -90.0;
+// Where a release ends and the voice with it: a straight line in dB at the release's rate down to
+// here, below the envelope's full scale. Measured on the reference at releases 96, 104 and 112 and
+// element levels 127 and 64: -96.46, -96.47, -96.47 and -96.43 dB. A decay to level 0 keeps floorDb.
+constexpr double releaseEndDb = -96.45;
 
 int32_t clampIndex(int32_t i) { return std::max<int32_t>(0, std::min<int32_t>(127, i)); }
 double toDb(double gain) { return gain > 0.0 ? std::max(20.0 * std::log10(gain), floorDb) : floorDb; }
@@ -162,8 +166,9 @@ void ElementEnvelope::enter(Stage stage) noexcept
         const int32_t index = release ? p_.releaseTime : stage == Stage::Decay1 ? p_.decay1Time : p_.decay2Time;
         const double per60 = release ? (releaseOverride_ > 0.0 ? releaseOverride_ : releaseSecondsPer60dB(index))
                                      : decaySecondsPer60dB(index);
-        const double samples = std::max(1.0, per60 * (-floorDb / 60.0) * sampleRate_);
-        target_ = release ? floorDb : levelDb(stage == Stage::Decay1 ? p_.decay1Level : p_.decay2Level);
+        const double end = release ? releaseEndDb : floorDb;
+        const double samples = std::max(1.0, per60 * (-end / 60.0) * sampleRate_);
+        target_ = release ? end : levelDb(stage == Stage::Decay1 ? p_.decay1Level : p_.decay2Level);
         db_ = toDb(gain_);
         // from level 0 a rising segment starts at the floor (measured: eg7), not at silence
         if (gain_ <= 0.0 && target_ > db_)

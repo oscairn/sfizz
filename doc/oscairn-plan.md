@@ -2337,6 +2337,12 @@ part: see the staging entry below.
   reference 0.0 to +0.11 dB and -0.02 to +0.13 dB (before the staging fix +2.07 to +2.20, the far
   side up to 0.11 dB more); hard-panned key bank pairs `a_fat_p*` (element pans 1, 32, 64, 96, 127):
   -1.26 to +5.13 dB before and two silent sides playing, -0.02 to +0.21 dB after.
+- **Voice end** (K66): a release ends at -96.45 dB. Level of the last 50 ms before the voice ends,
+  re the held level, reference / fork before / fork after: release 96 -96.37 / -89.82 / -96.22, 104
+  -96.45 / -89.87 / -96.35, 112 -96.51 / -89.92 / -96.42, 96 at element level 64 -96.37 / -89.82 /
+  -96.22 dB; end time after the onset (note-off at 0.7 s) 13.39 / 12.59 / 13.45, 26.08 / 24.49 /
+  26.19, 51.33 / 48.27 / 51.68, 13.38 / 12.59 / 13.45 s (the reference's note-off falls up to 0.35 s
+  off its nominal time).
 
 ### Upstream merge test (2026-11-01)
 
@@ -2420,4 +2426,4 @@ repository, or the local scripts beside the renders).
 | K63 | A full note table | The 257th note ends the oldest held note (fading its key's voices, sending its NOTE_END) so that the new one is tracked | Only 256 notes are tracked | Deliberate | `clap/test.cpp` `fullNoteTable` | `clap/plugin.cpp` `applyEvent` |
 | K64 | An element with zero constant gain | Ends at the end of its first block (nothing could ever sound); the reference's behaviour for a velocity that mutes an element is not measured (K4 for velocity 1 only) | Looping an unheard voice costs CPU | Deliberate | `clap/test.cpp` `silentElements` | `src/sfizz/Voice.cpp` |
 | K65 | Voice stealing order with a device cap | With `OSCAIRN_SAMPLER_MAX_VOICES` (or a host limit) the voice budget's order decides which voice goes: releasing before held, then the quieter, then the older. Stock sfizz's engine limit steals the oldest voice whether held or releasing (the fork's 256 voices still do) | The device cannot render the reference's 128 voices | Deliberate; unset, stock's order | `clap/test.cpp` `voiceCap` | `clap/plugin.cpp` `budgetSetLimits` |
-| K66 | Where a released element voice ends | The element envelope ends a voice at -90 dB below its released level | The reference's voice ends at about -96 dB (measured at release index 96: the line in dB runs to -96.9 dB, then digital silence). Ours ends 6 dB early, 10.6 s at index 127 (105.7 s per 60 dB). Not measured at higher indices (recordings stop at 45 s) | Open: a one-constant change if wanted; not changed because 0.8.4 is a table fix | `tests/OscairnReferenceT.cpp` does not pin it | `src/sfizz/oscairn/ElementEnvelope.cpp` |
+| K66 | Where a released element voice ends | The reference's release is a straight line in dB at the table's rate down to -96.45 dB below the envelope's full scale, where the voice ends in digital silence (measured on the Oscairn PCM engine's round 2 probes `c_end*`, a sine, releases 96, 104 and 112 at element levels 127 and 64: -96.46, -96.47, -96.47 and -96.43 dB; the take at 120 was too short to reach its end) | The release ends at -96.45 dB (changed 2026-11-14, plugin 0.8.6; it ended at -90 dB, 6 % early). A decay to level 0 keeps the -90 dB floor (K44). Where a release starts from an envelope level below full scale (a decay level under 127) the line is unmeasured: it keeps lasting the same time from any level, as before | Closed for releases 96-112 at the envelope's full scale; not measured at other indices | `c_end96`, `c_end104`, `c_end112`, `c_end96_l64`; test "A release ends at -96.45 dB, where the reference's voices end" | `src/sfizz/oscairn/ElementEnvelope.cpp` `releaseEndDb` |
