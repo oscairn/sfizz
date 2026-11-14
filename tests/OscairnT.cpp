@@ -1204,6 +1204,38 @@ TEST_CASE("[Oscairn] Element LFO opcodes and voice")
     REQUIRE(spread(127) == Approx(1118.0).margin(40.0));
 }
 
+TEST_CASE("[Oscairn] Filter envelope release times follow the measured pattern")
+{
+    using namespace sfz::oscairn;
+    // Reference (pcm round 2, probes b_rel48 to b_rel104, +4800 cents back to 0): the release takes the
+    // decay table's time, times 1.0 at indices 8k, 0.9875 at 8k+2, 0.973 at 8k+4 and 0.9525 at 8k+6
+    // (the odd places interpolated); the pitch envelope's release does not
+    const double rate = 48000.0;
+    for (int index : { 64, 72, 80, 82, 84, 85, 86, 88, 90, 92, 96 }) {
+        ElementPitchParameters p;
+        p.holdLevel = p.attackLevel = p.decay1Level = p.decay2Level = 192;
+        p.attackTime = 0;
+        p.depth = 63;
+        p.releaseTime = index;
+        p.releaseLevel = 128;
+        const double factor = index % 8 == 0 ? 1.0 : index % 8 == 2 ? 0.9875 : index % 8 == 4 ? 0.973 : index % 8 == 6 ? 0.9525 : 0.963;
+        for (bool filter : { true, false }) {
+            ElementPitchEnvelope eg { filter ? 75.0f : 37.5f, filter };
+            eg.setSampleRate(rate);
+            eg.start(p, 0);
+            eg.release(static_cast<int>(rate));
+            const double seconds = 1.5 * decaySecondsPer60dB(index) * (filter ? factor : 1.0);
+            std::vector<float> c(static_cast<size_t>((1.0 + seconds + 0.5) * rate), 0.0f);
+            eg.processAdd(absl::MakeSpan(c));
+            size_t end = 0;
+            while (end < c.size() && !(end > rate && std::abs(c[end]) < 0.01f))
+                ++end;
+            INFO("release " << index << (filter ? " filter" : " pitch"));
+            REQUIRE((end - rate) / rate == Approx(seconds).margin(2.0 / rate));
+        }
+    }
+}
+
 TEST_CASE("[Oscairn] Filter envelope levels, times and velocity")
 {
     using namespace sfz::oscairn;

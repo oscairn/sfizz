@@ -19,6 +19,12 @@ float pitchLevelCents(int32_t level, int32_t depth) noexcept
     return static_cast<float>(steps) * 37.5f * static_cast<float>(d) / 64.0f;
 }
 
+float filterReleaseFactor(int32_t index) noexcept
+{
+    static constexpr float place[8] = { 1.0f, 0.994f, 0.9875f, 0.98f, 0.973f, 0.963f, 0.9525f, 0.976f };
+    return place[std::max<int32_t>(0, index) % 8];
+}
+
 float pitchHoldSeconds(int32_t index) noexcept
 {
     // Measured at 16, 32, 64 and 80 (0.027, 0.075, 0.421, 0.978 s); interpolated in log time,
@@ -122,7 +128,9 @@ void ElementPitchEnvelope::enter(Stage stage) noexcept
     case Stage::Release: index = p_.releaseTime; level = p_.releaseLevel; break;
     default: step_ = 0.0; left_ = 0; return;
     }
-    const double seconds = stage == Stage::Hold ? pitchHoldSeconds(index) : 1.5 * decaySecondsPer60dB(index);
+    double seconds = stage == Stage::Hold ? pitchHoldSeconds(index) : 1.5 * decaySecondsPer60dB(index);
+    if (stage == Stage::Release && filter_)
+        seconds *= filterReleaseFactor(index);
     left_ = std::max(1L, std::lround(seconds * sampleRate_));
     target_ = levelCents(level);
     step_ = (target_ - cents_) / static_cast<double>(left_);

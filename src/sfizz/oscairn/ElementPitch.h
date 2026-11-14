@@ -45,9 +45,18 @@ float pitchHoldSeconds(int32_t index) noexcept;
  */
 float pitchLevelCents(int32_t level, int32_t depth) noexcept;
 
+/**
+ * @brief The filter envelope's release time against the pitch envelope's law, by release index:
+ * 1.0 at 8k, 0.9875 at 8k+2, 0.973 at 8k+4, 0.9525 at 8k+6, the odd places interpolated (the
+ * Oscairn PCM engine's round 2, releases 48-104 from +4800 cents).
+ * shortcut: the odd places are interpolated, not measured.
+ */
+float filterReleaseFactor(int32_t index) noexcept;
+
 class ElementPitchEnvelope {
 public:
-    explicit ElementPitchEnvelope(float centsPerStep = 37.5f) noexcept : centsPerStep_(centsPerStep) {}
+    explicit ElementPitchEnvelope(float centsPerStep = 37.5f, bool filter = false) noexcept
+        : centsPerStep_(centsPerStep), filter_(filter) {}
     void setSampleRate(double sampleRate) noexcept { sampleRate_ = sampleRate; }
     // `scale` multiplies every level (depth velocity sensitivity)
     void start(const ElementPitchParameters& parameters, int delay, int key = 60, int velocity = 127, float scale = 1.0f) noexcept;
@@ -61,6 +70,7 @@ private:
     double levelCents(int32_t level) const noexcept;
 
     float centsPerStep_;
+    bool filter_; // the filter envelope: its release times differ (filterReleaseFactor)
     float scale_ { 1.0f };
     ElementPitchParameters p_;
     double sampleRate_ { 48000.0 };

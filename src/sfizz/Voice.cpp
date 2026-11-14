@@ -296,7 +296,7 @@ struct Voice::Impl
     oscairn::ElementPitchEnvelope oscairnPitchEG_;
     oscairn::ElementFilter oscairnFilter_;
     oscairn::ElementLfo oscairnLfo_;
-    oscairn::ElementPitchEnvelope oscairnFilterEG_ { 75.0f };
+    oscairn::ElementPitchEnvelope oscairnFilterEG_ { 75.0f, true };
     void oscairnFilterStage(absl::Span<float> left, absl::Span<float> right) noexcept;
     float hostGain_ { 1.0f };
     int fadeDelay_ { -1 }; // a fade-out starts after this many frames; -1 when none
