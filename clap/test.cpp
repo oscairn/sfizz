@@ -1198,7 +1198,9 @@ int main(int argc, char** argv)
         plugin = create();
         deps = static_cast<const oscairn_plugin_asset_dependencies_t*>(plugin->get_extension(plugin, OSCAIRN_EXT_ASSET_DEPENDENCIES));
         const std::string kick = "<region> sample=kick.wav";
+        const size_t scans = oscairnSamplerPatchScanParses();
         CHECK(load(plugin, stateFor(kick, "lib", "sub")));
+        CHECK(oscairnSamplerPatchScanParses() == scans + 1); // one scan for the memory policy and the assets
         CHECK(deps->count(plugin) == 1);
         ref = {};
         CHECK(deps->get(plugin, 0, &ref) && !std::strcmp(ref.path, "sub/kick.wav") && !std::strcmp(ref.library, "lib") && std::strlen(ref.sha256) == 64);

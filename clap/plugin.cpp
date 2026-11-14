@@ -320,6 +320,8 @@ void configure(const Plugin& s, sfz::Synth& synth, uint32_t preload)
     synth.setElementSampleQuality(elementSampleQuality());
 }
 
+std::atomic<size_t> patchScanParses { 0 }; // for tests: how many times a patch text was parsed just to scan it
+
 // The sample files a patch names, relative to its directory (default_path applied)
 struct SampleCollector : sfz::Parser::Listener {
     std::string defaultPath, header;
@@ -338,13 +340,16 @@ struct SampleCollector : sfz::Parser::Listener {
 
 bool loadPatch(const Plugin& s, Engine& e, const oscairn_asset_ref_t* base, std::string& message)
 {
+    // One scan serves the memory policy and the asset resolution below
+    SampleCollector scan;
     {
-        SampleCollector scan;
         sfz::Parser parser;
         parser.setListener(&scan);
-        parser.parseString("/nonexistent-oscairn-policy/patch.sfz", e.patch.text);
-        std::sort(scan.samples.begin(), scan.samples.end());
-        e.preloadFrames = memoryPolicyPreload(static_cast<size_t>(std::unique(scan.samples.begin(), scan.samples.end()) - scan.samples.begin()));
+        parser.parseString("/nonexistent-oscairn-scan/patch.sfz", e.patch.text);
+        ++patchScanParses;
+        std::vector<std::string> distinct = scan.samples;
+        std::sort(distinct.begin(), distinct.end());
+        e.preloadFrames = memoryPolicyPreload(static_cast<size_t>(std::unique(distinct.begin(), distinct.end()) - distinct.begin()));
     }
     configure(s, e.synth, e.preloadFrames);
     e.synth.getResources().getFilePool().setSharedPreloads(s.sharedPreloads);
@@ -357,10 +362,6 @@ bool loadPatch(const Plugin& s, Engine& e, const oscairn_asset_ref_t* base, std:
         // then lie in one folder tree, which becomes the patch's directory.
         // shortcut: samples resolving to several folders are refused, and #include files are
         // not resolved; per-file resolution needs a path-mapping hook in sfizz's file pool.
-        SampleCollector scan;
-        sfz::Parser parser;
-        parser.setListener(&scan);
-        parser.parseString("/nonexistent-oscairn-base/patch.sfz", e.patch.text);
         if (e.patch.text.find("#include") != std::string::npos) {
             message = "#include is not supported with host-resolved samples yet";
             return false;
@@ -1837,6 +1838,8 @@ const void* getExtension(const clap_plugin_t*, const char* id)
 }
 
 } // namespace
+
+size_t oscairnSamplerPatchScanParses() { return patchScanParses; }
 
 size_t oscairnSamplerFileOpens(const clap_plugin_t* p)
 {
