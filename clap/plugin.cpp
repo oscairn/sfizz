@@ -1856,13 +1856,13 @@ const char* features[] = { CLAP_PLUGIN_FEATURE_INSTRUMENT, CLAP_PLUGIN_FEATURE_S
 
 const clap_plugin_descriptor_t descriptor {
     CLAP_VERSION_INIT,
-    "org.oscairn.sampler",
+    "org.oscairn.sfizz",
     "Oscairn Sampler",
     "Oscairn",
     "https://github.com/oscairn/sfizz",
     "",
     "",
-    "0.8.7",
+    "0.8.8",
     "SFZ and AWM2-class sample player, based on sfizz",
     features,
 };

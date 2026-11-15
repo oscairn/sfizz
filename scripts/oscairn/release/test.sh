@@ -19,5 +19,5 @@ bin=$build/library/bin
 "$bin/sfizz_tests"
 "$bin/oscairn_sampler_clap_tests" "$build/$CLAP_FILE"
 clap/tests/privacy-check.sh "$bin/oscairn_sampler_privacy_host" "$build/$CLAP_FILE" \
-    org.oscairn.sampler --library org.oscairn.privacy-test="$PWD/tests/TestFiles" --state clap/tests/privacy-state.txt
+    org.oscairn.sfizz --library org.oscairn.privacy-test="$PWD/tests/TestFiles" --state clap/tests/privacy-state.txt
 echo "test.sh: $platform tests pass"

@@ -893,7 +893,7 @@ one probe differ by up to 7.3 ms; past the 7 ms seen at 120 BPM, so for Jacob to
 - Oscairn loads the plugin through CLAP as a separate work (RFC 0001), so the BSD licence
   has no effect on Oscairn's AGPL and vice versa.
 - Naming (Jacob, 2026-11-06): the plugin is **Oscairn Sampler**, CLAP ID
-  `org.oscairn.sampler`, bundle `oscairn-sampler.clap`, described as "SFZ and AWM2-class sample
+  `org.oscairn.sfizz`, bundle `oscairn-sampler.clap`, described as "SFZ and AWM2-class sample
   player, based on sfizz", from 0.5.0; it was "Oscairn sfizz" (`org.oscairn.sfizz`,
   `oscairn-sfizz.clap`). The name was free once Oscairn's deprecated sampler became the Oscairn
   Legacy Sampler (`org.oscairn.legacy-sampler`, `oscairn/sampler` `5c7c420`, pinned by Oscairn
@@ -931,7 +931,7 @@ Decisions taken (for Jacob to confirm):
    as parameter targets.
 7. **The old Oscairn Sampler** was deprecated by Oscairn in favour of this engine and renamed
    the Oscairn Legacy Sampler (`org.oscairn.legacy-sampler`, 2026-11-06).
-8. **CLAP identity:** ID `org.oscairn.sampler`, name "Oscairn Sampler", vendor "Oscairn", from
+8. **CLAP identity:** ID `org.oscairn.sfizz`, name "Oscairn Sampler", vendor "Oscairn", from
    0.5.0 (Jacob, 2026-11-06; section 9); ID `org.oscairn.sfizz`, name "Oscairn sfizz" from
    0.1.0 to 0.4.1.
 9. **Profile scope:** the profile applies to the regions after its `<control>` header, not to

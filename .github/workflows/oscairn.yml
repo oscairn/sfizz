@@ -84,7 +84,7 @@ jobs:
           ./build/library/bin/sfizz_tests
           ./build/library/bin/oscairn_sampler_clap_tests build/library/lib/oscairn-sampler.clap
           clap/tests/privacy-check.sh ./build/library/bin/oscairn_sampler_privacy_host build/library/lib/oscairn-sampler.clap \
-            org.oscairn.sampler --library org.oscairn.privacy-test="$PWD/tests/TestFiles" --state clap/tests/privacy-state.txt
+            org.oscairn.sfizz --library org.oscairn.privacy-test="$PWD/tests/TestFiles" --state clap/tests/privacy-state.txt
       - name: Restore the stock tree
         if: matrix.gate
         uses: actions/cache@v4
@@ -172,4 +172,4 @@ jobs:
         run: |
           ./build/library/bin/oscairn_sampler_clap_tests build/library/lib/oscairn-sampler.clap
           clap/tests/privacy-check.sh ./build/library/bin/oscairn_sampler_privacy_host build/library/lib/oscairn-sampler.clap \
-            org.oscairn.sampler --library org.oscairn.privacy-test="$PWD/tests/TestFiles" --state clap/tests/privacy-state.txt
+            org.oscairn.sfizz --library org.oscairn.privacy-test="$PWD/tests/TestFiles" --state clap/tests/privacy-state.txt

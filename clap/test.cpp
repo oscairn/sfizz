@@ -987,7 +987,7 @@ int main(int argc, char** argv)
             auto* factory = static_cast<const clap_plugin_factory_t*>(entry->get_factory(CLAP_PLUGIN_FACTORY_ID));
             CHECK(factory && factory->get_plugin_count(factory) == 1);
             auto* desc = factory ? factory->get_plugin_descriptor(factory, 0) : nullptr;
-            CHECK(desc && !std::strcmp(desc->id, "org.oscairn.sampler") && !std::strcmp(desc->name, "Oscairn Sampler"));
+            CHECK(desc && !std::strcmp(desc->id, "org.oscairn.sfizz") && !std::strcmp(desc->name, "Oscairn Sampler"));
             entry->deinit();
         }
     }
